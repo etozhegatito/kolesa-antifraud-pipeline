@@ -273,6 +273,28 @@ def test_exact_hash_same_car_not_flagged_dealer_repost():
     assert out.empty
 
 
+def test_dealer_press_photo_across_trims_not_flagged():
+    """Реальный класс ложняков (2026-07): официальный дилер вешает ОДНО
+    пресс-фото на разные комплектации одной модели (OMODA S5 Life/Prestige,
+    GAC GS3 GB/GL) — фото совпадает точно, но это не кража. Дилер↔дилер
+    исключаем; дилер↔частник (украли пресс-фото под чужой б/у) — остаётся."""
+    hashes = pd.DataFrame([
+        {"ad_id": "1", "position": 1, "phash": "a" * 16},
+        {"ad_id": "2", "position": 1, "phash": "a" * 16},
+        {"ad_id": "3", "position": 1, "phash": "a" * 16},
+    ])
+    cars = pd.DataFrame([
+        ("1", "OMODA", "S5 Life",     2025, 7_490_000, "новый", "Новая|Официальный дилер"),
+        ("2", "OMODA", "S5 Prestige", 2025, 7_990_000, "новый", "Новая|Официальный дилер"),
+        ("3", "Chevrolet", "Nexia",   2015, 3_000_000, "б/у",   ""),   # частник, украл фото
+    ], columns=["ad_id", "brand", "model", "year", "price_tenge", "condition", "labels"])
+    out = photo_dedup.find_cross_car_duplicates(hashes, cars)
+    pairs = {frozenset((r.ad_id_a, r.ad_id_b)) for r in out.itertuples()}
+    assert frozenset(("1", "2")) not in pairs      # дилер↔дилер — исключены
+    assert frozenset(("1", "3")) in pairs           # дилер↔частник — кража, флаг остаётся
+    assert frozenset(("2", "3")) in pairs
+
+
 def test_near_hash_not_flagged_studio_lookalike():
     """Калибровка на реальных данных (2026-07-20): ВСЕ пары с hamming
     2-4 оказались «одна дилерская студия — разные машины» (Lexus RX vs

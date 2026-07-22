@@ -254,8 +254,28 @@ def find_cross_car_duplicates(hashes: pd.DataFrame, clean: pd.DataFrame) -> pd.D
             "model_key_a", "price_a", "year_a",
             "model_key_b", "price_b", "year_b"])
 
-    cars = clean.set_index("ad_id")[["brand", "model", "year", "price_tenge"]]
+    keep = ["brand", "model", "year", "price_tenge"]
+    for extra in ("condition", "labels"):
+        if extra in clean.columns:
+            keep.append(extra)
+    cars = clean.set_index("ad_id")[keep]
     cars["model_key"] = (cars["brand"].fillna("") + " " + cars["model"].fillna("")).str.strip()
+
+    # Дилерский иммунитет (тот же, что у possible_repost в clean.py):
+    # официальный дилер вешает ОДНО пресс-фото производителя на разные
+    # комплектации одной модели (GS3 GB/GL, S5 Life/Prestige) — точное
+    # совпадение фото, но это НЕ кража. Исключаем пару, только если ОБА —
+    # новый/дилер. Кражей остаётся дилер↔частник (украли пресс-фото под
+    # фейковый б/у) — там хотя бы одна сторона не дилер, флаг сохраняется.
+    _cond = cars["condition"] if "condition" in cars.columns else pd.Series("", index=cars.index)
+    _lab = cars["labels"] if "labels" in cars.columns else pd.Series("", index=cars.index)
+    cars["dealer_new"] = (_cond.eq("новый").fillna(False)
+                          | _lab.fillna("").str.contains("дилер|Новая", case=False))
+
+    def both_dealer_new(a: str, b: str) -> bool:
+        if a not in cars.index or b not in cars.index:
+            return False
+        return bool(cars.loc[a, "dealer_new"]) and bool(cars.loc[b, "dealer_new"])
 
     def different_cars(a: str, b: str) -> bool:
         if a not in cars.index or b not in cars.index:
@@ -303,6 +323,8 @@ def find_cross_car_duplicates(hashes: pd.DataFrame, clean: pd.DataFrame) -> pd.D
 
     records = []
     for (a, b), dist in pairs.items():
+        if both_dealer_new(a, b):
+            continue   # дилер↔дилер: пресс-фото между комплектациями, не кража
         if not different_cars(a, b):
             continue
         ca = cars.loc[a] if a in cars.index else None
@@ -344,8 +366,8 @@ def main():
     # hashes — из CSV (тот же "дорогой сырой слой на время пилота", что и
     # enriched.csv в enrich.py); clean_data — disposable, только Postgres.
     hashes = pd.read_csv(HASHES_CSV, dtype={"ad_id": str})
-    clean = pd.read_sql("SELECT ad_id, brand, model, year, price_tenge FROM clean_data",
-                         engine, dtype={"ad_id": str})
+    clean = pd.read_sql("SELECT ad_id, brand, model, year, price_tenge, condition, labels "
+                        "FROM clean_data", engine, dtype={"ad_id": str})
     dups = find_cross_car_duplicates(hashes, clean)
     dups.to_csv(DUPLICATES_CSV, index=False)
     # disposable, как clean_data: TRUNCATE+заливка в одной транзакции
