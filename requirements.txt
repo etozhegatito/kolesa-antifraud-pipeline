@@ -1,0 +1,16 @@
+# Зафиксированы мажорные версии: достаточно для воспроизводимости,
+# но без излишней жёсткости (точные пины — когда проект стабилизируется)
+playwright>=1.50
+beautifulsoup4>=4.12
+pandas>=2.0
+numpy>=1.26
+matplotlib>=3.8
+requests>=2.31
+imagehash>=4.3
+Pillow>=10.0
+psycopg2-binary>=2.9
+SQLAlchemy>=2.0
+python-dotenv>=1.0
+
+# для тестов (test_pipeline.py), не нужен для самого пайплайна
+pytest>=8.0

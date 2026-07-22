@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
+.pytest_cache/
+browser_state.json
+cache/
+
+# runtime-данные — не код; структура папок сохранена через .gitkeep
+data/**/*.csv
+data/**/*.png
+data/**/*.bak
+logs/*.log
+# runtime-состояние (напр. .catch_up_budget.json — суточный счётчик бюджета)
+logs/*.json
+
+# debug-дампы страниц kolesa — не код, раздувают репо и языковую
+# статистику GitHub (532КБ HTML). Регенерируются debug/debug_selectors.py.
+debug/*.html
