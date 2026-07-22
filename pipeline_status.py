@@ -39,6 +39,10 @@ import pandas as pd
 from sqlalchemy import text
 
 from db import get_engine
+# Пороги «пробел статуса» берём из catch_up (а он синхронен с check_status —
+# см. test_catch_up_status_thresholds_match_check_status): единый источник,
+# чтобы пульт, catch_up и сам джоб не разошлись в определении бэклога.
+from catch_up import STATUS_STALE_DAYS, STATUS_RECHECK_DAYS
 
 # Дневные бюджеты — должны совпадать с константами самих джобов
 ENRICH_PER_DAY = 120    # enrich.py MAX_PER_RUN
@@ -139,18 +143,22 @@ def main():
     print("\n► Статусы (check_status.py)")
     for name, cnt in st.items():
         print(f"  {name:<10} {cnt}")
-    # бэклог проверки: не видели в листинге >=2 дней и не в терминальном
-    # статусе — та же логика отбора кандидатов, что в самом check_status.py
+    # бэклог проверки: пропал из листинга >=STALE_DAYS, НЕ терминальный И
+    # давно (>=RECHECK_DAYS) не проверялся напрямую — та же логика, что
+    # needs_status_check() в check_status.py и compute_gaps() в catch_up.py
     last_seen = pd.read_sql(
         "SELECT ad_id, MAX(seen_date) AS seen FROM sightings GROUP BY ad_id",
         engine, dtype={"ad_id": str})
-    statuses = pd.read_sql("SELECT ad_id, status FROM ad_status", engine,
-                            dtype={"ad_id": str})
+    statuses = pd.read_sql("SELECT ad_id, status, checked_at FROM ad_status",
+                            engine, dtype={"ad_id": str})
     last_seen = last_seen.merge(statuses, on="ad_id", how="left")
-    days_gone = (pd.Timestamp.today().normalize()
-                 - pd.to_datetime(last_seen["seen"])).dt.days
-    st_pending = int(((days_gone >= 2)
-                      & ~last_seen["status"].isin(["archived", "deleted"])).sum())
+    today = pd.Timestamp.today().normalize()
+    days_gone = (today - pd.to_datetime(last_seen["seen"])).dt.days
+    checked_days = (today - pd.to_datetime(last_seen["checked_at"])).dt.days
+    terminal = last_seen["status"].isin(["archived", "deleted"])
+    recently_checked = checked_days < STATUS_RECHECK_DAYS          # NaN<7 → False
+    st_pending = int(((~terminal) & (days_gone >= STATUS_STALE_DAYS)
+                      & (~recently_checked)).sum())
     print(f"  ждут проверки статуса: {st_pending}  → "
           f"{eta_days(st_pending, 150)} (лимит check_status.py)")
 
