@@ -240,6 +240,38 @@ def test_repost_unconfirmed_goes_to_info_only():
     assert (out["info_flags"].str.contains("repost_unconfirmed")).all()
 
 
+def _dup_df_color(rows):
+    cols = ["ad_id", "title", "year", "price_tenge", "mileage_km",
+            "description", "condition", "labels", "color"]
+    d = pd.DataFrame(rows, columns=cols)
+    d["info_flags"] = ""
+    return d
+
+
+def test_repost_different_base_color_not_confirmed():
+    """Цвет не меняется у той же машины: разный БАЗОВЫЙ цвет при совпавших
+    title+год+цена+пробег = РАЗНЫЕ авто (совпал круглый пробег), не перезалив.
+    Реальный кейс: белая и чёрная Hyundai Sonata 2023, обе 100000 км, 10.5М."""
+    d = _dup_df_color([
+        ("1", "Hyundai Sonata", 2023, 10_500_000, 100_000, None, "б/у", None, "белый"),
+        ("2", "Hyundai Sonata", 2023, 10_500_000, 100_000, None, "б/у", None, "черный металлик"),
+    ])
+    out = clean.add_duplicate_flags(d)
+    assert (out["dup_reasons"] == "").all()                       # разный цвет → не перезалив
+    assert out["info_flags"].str.contains("repost_unconfirmed").all()
+
+
+def test_repost_same_base_color_metallic_still_confirmed():
+    """«белый» vs «белый металлик» — тот же базовый цвет (суффикс финиша не
+    различает машину) → остаётся possible_repost (реальный кейс Camry 2021)."""
+    d = _dup_df_color([
+        ("1", "Toyota Camry", 2021, 14_500_000, 110_000, None, "б/у", None, "белый"),
+        ("2", "Toyota Camry", 2021, 14_500_000, 110_000, None, "б/у", None, "белый металлик"),
+    ])
+    out = clean.add_duplicate_flags(d)
+    assert (out["dup_reasons"] == "possible_repost").all()
+
+
 # ─── photo_dedup: фото одно — машины разные (стоит подозрения) ───────────────
 def _cars(rows):
     return pd.DataFrame(rows, columns=["ad_id", "brand", "model", "year", "price_tenge"])

@@ -264,6 +264,13 @@ def add_duplicate_flags(df: pd.DataFrame) -> pd.DataFrame:
 
     # Подтверждение группы вторым фактором: одинаковый непустой пробег
     # или одинаковое непустое описание хотя бы у пары внутри группы.
+    def _base_color(v) -> str:
+        """Базовый цвет = первое слово: «белый металлик» → «белый». Финиш
+        (металлик/перламутр) машину не различает; пусто/NaN → '' (не сравниваем)."""
+        if pd.isna(v):
+            return ""
+        return str(v).strip().lower().split(" ")[0]
+
     def corroborated(g: pd.DataFrame) -> bool:
         # Большая группа — это НЕ перезалив, а коммерческая партия
         # (реальный кейс: 24 одинаковых Chevrolet Cobalt 2023 по 4.9 млн —
@@ -272,16 +279,29 @@ def add_duplicate_flags(df: pd.DataFrame) -> pd.DataFrame:
         # перезальщик дублирует объявление 2-5 раз.
         if len(g) > 5:
             return False
-        # Совпавший пробег — подтверждение, только если он РЕАЛЬНЫЙ
-        # (>1000 км): у дилерского стока новых машин пробеги 0/1/10/50
-        # совпадают тривиально (Changan X5 2026: 0|0|0 — это склад,
-        # даже если condition криво заполнен как «б/у»)
-        m = g["mileage_km"].dropna()
-        m = m[m > 1000]
-        if m.duplicated().any():
-            return True
-        d = g["description"].fillna("")
-        return bool(d[d != ""].duplicated().any())
+        has_color = "color" in g.columns
+        rows = g.to_dict("records")
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                a, b = rows[i], rows[j]
+                # Тот же авто → тот же цвет (цвет не меняется). Разный БАЗОВЫЙ
+                # цвет = разные машины, а «совпавший» круглый пробег —
+                # совпадение (реальный кейс: белая и чёрная Sonata 2023, обе
+                # 100000 км, 10.5М — две РАЗНЫЕ, не перезалив).
+                if has_color:
+                    ca, cb = _base_color(a.get("color")), _base_color(b.get("color"))
+                    if ca and cb and ca != cb:
+                        continue
+                # Подтверждение «та же машина»: РЕАЛЬНЫЙ пробег (>1000 км;
+                # дилерский сток 0/1/10/50 совпадает тривиально) совпал ИЛИ
+                # совпало непустое описание.
+                ma, mb = a.get("mileage_km"), b.get("mileage_km")
+                same_mileage = bool(pd.notna(ma) and ma > 1000 and ma == mb)
+                da = "" if pd.isna(a.get("description")) else str(a.get("description"))
+                db = "" if pd.isna(b.get("description")) else str(b.get("description"))
+                if same_mileage or (da and da == db):
+                    return True
+        return False
 
     strong_groups = set()
     for key, g in df[dup].groupby(["title", "year", "price_tenge"]):
