@@ -156,6 +156,19 @@ def test_real_damage_still_detected():
     assert "без матора" in kws and "без коробки" in kws
 
 
+def test_damage_disclosed_rust_and_gearbox():
+    """Раскрытые дефекты, которые старый лексикон пропускал (реальный ad
+    225502216 Chevrolet Aveo): «рыжики» (сленг про ржавчину) и «не
+    включается 5-я передача» (общий дефект, брат «не работает»). Обычные
+    отрицания ПЕРЕД словом по-прежнему гасят хит (окно 2 токена)."""
+    from damage import find_damage_keywords, has_damage
+    assert has_damage("есть классические рыжики на порогах")
+    assert has_damage("не включается 5-я передача")
+    assert has_damage("не включается кондиционер")
+    assert not has_damage("без рыжиков, кузов идеальный")
+    assert not has_damage("нет рыжиков")
+
+
 # ─── статистика: модифицированный z-score робастен к выбросу ─────────────────
 def test_robust_z_ignores_single_outlier():
     import pandas as pd
