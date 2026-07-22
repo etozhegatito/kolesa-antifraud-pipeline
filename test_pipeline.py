@@ -408,6 +408,23 @@ def test_extract_status_badge():
     assert enrich.parse_ad_page("<div>нет бейджа</div>")["page_status_badge"] == "-"
 
 
+def test_used_zero_mileage_excludes_current_year_new():
+    """б/у + 0 км = сокрытие пробега ТОЛЬКО у не-новой машины. У текущего
+    модельного года 0 км — правда «новая со склада» (реальный кейс Changan
+    X5 Plus 2026: condition криво распарсился как «б/у», лейбл «первый взнос»,
+    коммент «машина новая без пробега»)."""
+    import clean
+    cy = clean.CURRENT_YEAR
+    df = pd.DataFrame([
+        {"year": cy,     "condition": "б/у", "mileage_km": 0, "price_tenge": 7_600_000},
+        {"year": cy - 5, "condition": "б/у", "mileage_km": 0, "price_tenge": 3_000_000},
+    ])
+    df["age"] = cy - df["year"] + 1
+    out = clean.apply_hard_rules(df)
+    assert "used_but_zero_mileage" not in out.iloc[0]["rule_reasons"]   # новая — не флаг
+    assert "used_but_zero_mileage" in out.iloc[1]["rule_reasons"]       # старая 0 км — флаг
+
+
 def test_young_car_cheap_cleared_when_declared_wreck():
     """Честно битый молодой дешёвый (сайт: «Аварийная») — НЕ приманка,
     young_car_cheap снимается. Кейс Chevrolet Onix 2023 за 1.7М.
