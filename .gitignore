@@ -4,6 +4,8 @@ __pycache__/
 .env
 .DS_Store
 .pytest_cache/
+# CatBoost пишет сюда логи обучения (train_price_model.py) — артефакт, не код
+catboost_info/
 browser_state.json
 cache/
 

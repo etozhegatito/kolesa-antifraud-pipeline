@@ -505,6 +505,15 @@ def test_junk_mileage_placeholder_detection():
     assert not is_junk_mileage(float("nan"))
 
 
+# ─── квантильный residual-детектор: конфиг осмыслен, фичи без утечки ────────
+def test_residual_detector_config():
+    import residual_detector as r
+    from train_price_model import FEATURES
+    assert 0 < r.ALPHA < 0.5              # нижний квантиль (пол цены)
+    assert r.MIN_SUPPORT >= 1 and r.AGE_MAX >= 1
+    assert r.FEATURES is FEATURES         # те же фичи модели → та же анти-утечка
+
+
 # ─── текстовые фичи для модели цены (интерпретируемые keyword-сигналы) ──────
 def test_text_features_extract():
     from text_features import text_features
