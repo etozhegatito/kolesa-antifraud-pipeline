@@ -50,7 +50,7 @@ from db import get_engine, upsert
 ENRICHED_CSV = "data/enriched/enriched.csv"
 LOG_FILE     = "logs/enrich.log"
 
-MAX_PER_RUN           = 120     # дневной бюджет запросов этого джоба
+MAX_PER_RUN           = 20      # мелкая порция: анти-бан (2026-07-23 IP словил блок на больших)
 DELAY_RANGE           = (4.0, 8.0)
 MAX_CONSECUTIVE_FAILS = 3
 

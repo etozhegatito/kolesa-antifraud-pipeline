@@ -14,7 +14,7 @@ backfill_avgprice.py — разовое дозаполнение полей со
 НЕ трогает (напр. avgPrice, добранный прошлым заходом, переживёт добор
 бейджа). Подозрительные первыми. Бюджет и паузы — как у enrich.py.
 
-Запуск: python backfill_avgprice.py            (следующая порция ~120)
+Запуск: python backfill_avgprice.py            (следующая порция ~20)
         python backfill_avgprice.py --all       (все разом, ~1.5 часа, риск лимитов)
 
 Рекомендация: гоняй БЕЗ --all по паре раз в день — резюмируемо и безопасно
@@ -40,7 +40,7 @@ from sqlalchemy import text
 from db import get_engine
 from enrich import HEADERS, extract_avg_price, extract_status_badge, ENRICHED_CSV
 
-MAX_PER_RUN           = 120
+MAX_PER_RUN           = 20      # мелкая порция (анти-бан, см. catch_up DAILY_BUDGET)
 DELAY_RANGE           = (4.0, 8.0)
 MAX_CONSECUTIVE_FAILS = 3           # предохранитель: N сбоев подряд → стоп
 LOG_FILE              = "logs/enrich.log"   # тот же лог, что у обогащения

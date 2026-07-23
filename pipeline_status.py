@@ -42,11 +42,13 @@ from db import get_engine
 # Пороги «пробел статуса» берём из catch_up (а он синхронен с check_status —
 # см. test_catch_up_status_thresholds_match_check_status): единый источник,
 # чтобы пульт, catch_up и сам джоб не разошлись в определении бэклога.
-from catch_up import STATUS_STALE_DAYS, STATUS_RECHECK_DAYS
+from catch_up import STATUS_STALE_DAYS, STATUS_RECHECK_DAYS, DAILY_BUDGET
 
-# Дневные бюджеты — должны совпадать с константами самих джобов
-ENRICH_PER_DAY = 120    # enrich.py MAX_PER_RUN
-PHOTOS_PER_DAY = 300    # photo_dedup.py MAX_PER_RUN
+# ETA считаем по СУТОЧНОМУ бюджету хоста (потолок при catch_up --until-done),
+# а не по размеру одной порции — берём из catch_up, чтобы не разъезжалось при
+# смене лимитов. Это оценка «при полном дневном доборе на хост».
+ENRICH_PER_DAY = DAILY_BUDGET["kolesa"]
+PHOTOS_PER_DAY = DAILY_BUDGET["cdn"]
 
 LABELS_CSV = "data/manual_labels.csv"
 
@@ -160,7 +162,7 @@ def main():
     st_pending = int(((~terminal) & (days_gone >= STATUS_STALE_DAYS)
                       & (~recently_checked)).sum())
     print(f"  ждут проверки статуса: {st_pending}  → "
-          f"{eta_days(st_pending, 150)} (лимит check_status.py)")
+          f"{eta_days(st_pending, DAILY_BUDGET['kolesa'])} (потолок kolesa/сутки)")
 
     # ── Ручная разметка ──────────────────────────────────────────────────
     print("\n► Ручная разметка (data/manual_labels.csv)")

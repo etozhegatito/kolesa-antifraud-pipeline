@@ -84,7 +84,7 @@ LINE = "─" * 64
 # запасом. ВАЖНО: бюджет видит только catch_up — run_all/parser и твой браузинг
 # kolesa НЕ учитывает, а они бьют по тому же IP. В дни добора: run_all --light
 # и не стакать всё разом. При budget 200 обычный --run делает ~одну порцию
-# (статусы 150); точечный добор avgPrice/бейджа — --backfill (120).
+# (по 20 на джоб); точечный добор avgPrice/бейджа — --backfill (порции по 20).
 DAILY_BUDGET = {"kolesa": 200, "cdn": 1200}
 BUDGET_FILE  = "logs/.catch_up_budget.json"
 
@@ -92,7 +92,8 @@ BUDGET_FILE  = "logs/.catch_up_budget.json"
 # копией здесь, чтобы не импортировать джобы (у них при импорте открываются
 # лог-файлы и настраивается root logger). Синхронность с источником стережёт
 # test_catch_up_chunk_sizes_match_jobs.
-CHUNK_MAX = {"status": 150, "enrich": 120, "backfill": 120, "photo": 300}
+# photo=300: это CDN (kcdn.kz), другой хост, бан был на kolesa — не режем.
+CHUNK_MAX = {"status": 20, "enrich": 20, "backfill": 20, "photo": 300}
 
 # Пороги «нужен ли пере-запрос статуса» ДОЛЖНЫ совпадать с check_status.py,
 # иначе счётчик пробелов разошёлся бы с реальной выборкой джоба. Синхронность

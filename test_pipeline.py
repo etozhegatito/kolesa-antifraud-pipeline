@@ -559,9 +559,11 @@ def test_catch_up_budget_allows_near_done_at_edge():
     в тот же остаток. Иначе near-done джоб голодал бы у границы бюджета."""
     import catch_up
     B = catch_up.DAILY_BUDGET["kolesa"]
-    assert catch_up.budget_allows("kolesa", "status", 3809, {"kolesa": 0, "cdn": 0})
-    assert not catch_up.budget_allows("kolesa", "enrich", 3000, {"kolesa": B - 50, "cdn": 0})
-    assert catch_up.budget_allows("kolesa", "enrich", 30, {"kolesa": B - 50, "cdn": 0})
+    cm = catch_up.CHUNK_MAX["enrich"]
+    assert catch_up.budget_allows("kolesa", "status", 10**6, {"kolesa": 0, "cdn": 0})
+    edge = B - (cm - 1)                       # остаток = cm-1 < полной порции
+    assert not catch_up.budget_allows("kolesa", "enrich", 10**6, {"kolesa": edge, "cdn": 0})
+    assert catch_up.budget_allows("kolesa", "enrich", 1, {"kolesa": edge, "cdn": 0})
 
 
 def test_catch_up_status_thresholds_match_check_status():
