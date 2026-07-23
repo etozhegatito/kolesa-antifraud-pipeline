@@ -505,6 +505,21 @@ def test_junk_mileage_placeholder_detection():
     assert not is_junk_mileage(float("nan"))
 
 
+# ─── текстовые фичи для модели цены (интерпретируемые keyword-сигналы) ──────
+def test_text_features_extract():
+    from text_features import text_features
+    f = text_features("Максимальная комплектация, кожа, панорама, камера. "
+                      "Не бит не крашен, один хозяин.")
+    assert f["txt_opt_count"] >= 3        # макс.компл + кожа + панорама + камера
+    assert f["txt_positive"] == 1
+    assert f["txt_damage"] == 0
+    f2 = text_features("требует ремонта, рыжики на порогах, продаю срочно")
+    assert f2["txt_damage"] == 1          # damage-лексикон (вкл. рыжики)
+    assert f2["txt_urgency"] == 1
+    assert f2["txt_opt_count"] == 0
+    assert text_features(None)["txt_len"] == 0
+
+
 # ─── модель цены: НЕ должна видеть признаки-утечки цели ─────────────────────
 def test_price_model_features_no_leakage():
     """Модель цены не должна учиться на признаках, производных ОТ цены или на

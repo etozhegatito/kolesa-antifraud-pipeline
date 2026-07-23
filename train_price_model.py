@@ -34,6 +34,11 @@ NUM_FEATURES = ["age", "mileage_km", "engine_volume", "photos_count",
 CAT_FEATURES = ["brand", "model", "engine_type", "transmission",
                 "body_type", "condition"]
 FEATURES = NUM_FEATURES + CAT_FEATURES
+# Текстовые фичи (text_features.py) ПРОБОВАЛИ и измерили: на текущих данных
+# (медиана 51 символ, лишь 27% полных комментов) дали flat — R² тот же 0.914,
+# MAPE 24.0→24.5, суммарная важность ~3%. Причина: сигнал избыточен с brand/
+# engine_volume/body_type. Вернём, когда backfill наберёт полные комменты
+# (там уже TF-IDF/эмбеддинги). Модуль готов и покрыт тестом — не выкидываем.
 
 
 def load() -> pd.DataFrame:
