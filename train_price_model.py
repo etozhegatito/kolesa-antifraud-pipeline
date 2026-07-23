@@ -33,6 +33,13 @@ NUM_FEATURES = ["age", "mileage_km", "engine_volume", "photos_count",
 # Категориальные (CatBoost сам кодирует — model с 815 значениями не проблема)
 CAT_FEATURES = ["brand", "model", "engine_type", "transmission",
                 "body_type", "condition"]
+# ИЗМЕРЕНО 2026-07-23: структурные фичи обогащения (customs_cleared/steering/
+# drive) и текстовые (text_features.py) обе дали flat — MAPE ~24% без сдвига,
+# важность <3%. Причины: покрытие 28% (72% NaN), малая вариация (справа 53,
+# «нерастаможен» 16), частичная избыточность с brand/model. Вывод: baseline
+# (R²≈0.91) близок к ПОТОЛКУ табличных фич — следующий прирост от БОЛЬШЕГО
+# объёма (backfill) и НОВЫХ модальностей (фото/CV, полный текст), не от новых
+# табличных признаков. Вернуть customs/drive стоит после роста покрытия.
 FEATURES = NUM_FEATURES + CAT_FEATURES
 # Текстовые фичи (text_features.py) ПРОБОВАЛИ и измерили: на текущих данных
 # (медиана 51 символ, лишь 27% полных комментов) дали flat — R² тот же 0.914,
