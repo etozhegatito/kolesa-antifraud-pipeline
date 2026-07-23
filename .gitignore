@@ -20,3 +20,6 @@ logs/*.json
 # debug-дампы страниц kolesa — не код, раздувают репо и языковую
 # статистику GitHub (532КБ HTML). Регенерируются debug/debug_selectors.py.
 debug/*.html
+
+# сгенерированные HTML-отчёты (ml_report.py) — артефакт
+data/**/*.html

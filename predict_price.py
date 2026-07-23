@@ -55,17 +55,20 @@ def main():
                           loss_function="RMSE", random_seed=42, verbose=False)
     m.fit(Pool(Xtr, ytr, cat_features=CAT_FEATURES))
 
-    # (a) оценка «своей» машины
-    p = estimate(m, brand="Toyota", model="Camry", year=2019, engine_volume=2.5,
-                 mileage_km=90000, engine_type="бензин", transmission="автомат",
-                 body_type="седан", condition="б/у")
-    print(f"(a) Toyota Camry 2019, 2.5 бензин, 90 000 км → оценка ≈ {p/1e6:.1f}М ₸")
+    # (a) СЛУЧАЙНАЯ реальная машина (каждый запуск новая) → оценка vs факт
+    car = clean.sample(1).iloc[0]
+    p = estimate(m, brand=car["brand"], model=car["model"], age=int(car["age"]),
+                 engine_volume=car["engine_volume"], mileage_km=car["mileage_km"],
+                 engine_type=car["engine_type"], transmission=car["transmission"],
+                 body_type=car["body_type"], condition=car["condition"])
+    print(f"(a) {car['brand']} {car['model']} {int(car['year'])} — оценка модели "
+          f"≈ {p/1e6:.1f}М ₸  (в объявлении: {car['price_tenge']/1e6:.1f}М)")
 
     # (b) откуда 24%: pred vs факт на НЕВИДЕННЫХ моделью машинах
     te = clean.loc[Xte.index].copy()
     te["pred"] = np.exp(m.predict(Xte))
     te["err"] = (np.abs(te["pred"] - te["price_tenge"]) / te["price_tenge"] * 100)
-    s = te.sample(8, random_state=1).copy()
+    s = te.sample(min(8, len(te))).copy()          # без seed → каждый запуск новые машины
     s["факт_М"] = (s["price_tenge"] / 1e6).round(1)
     s["пред_М"] = (s["pred"] / 1e6).round(1)
     s["ошибка_%"] = s["err"].round(0)
