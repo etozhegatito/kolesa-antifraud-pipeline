@@ -489,6 +489,19 @@ def test_catch_up_references_real_scripts():
         assert os.path.exists(s), f"catch_up ссылается на несуществующий {s}"
 
 
+# ─── модель цены: НЕ должна видеть признаки-утечки цели ─────────────────────
+def test_price_model_features_no_leakage():
+    """Модель цены не должна учиться на признаках, производных ОТ цены или на
+    чужой оценке цены (target leakage, правило №6): kolesa_avg_price, price_z,
+    сама цена, is_suspicious. city — константа (Алматы), views_count —
+    пост-фактум. Иначе модель «списывала» бы, а не оценивала."""
+    import train_price_model as m
+    banned = {"price_tenge", "log_price", "price_z", "kolesa_avg_price",
+              "is_suspicious", "suspicion_reasons", "city", "views_count"}
+    leak = set(m.FEATURES) & banned
+    assert not leak, f"утечка цели в фичах модели: {leak}"
+
+
 # ─── catch_up --values: приоритет ценных-для-оправдания джобов ──────────────
 def test_catch_up_value_jobs_are_exculpation_fillers():
     """--values гоняет ТОЛЬКО enrich+backfill (заполняют avgPrice/бейдж/цвет/

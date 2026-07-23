@@ -12,5 +12,9 @@ psycopg2-binary>=2.9
 SQLAlchemy>=2.0
 python-dotenv>=1.0
 
+# модель оценки цены (train_price_model.py)
+catboost>=1.2
+scikit-learn>=1.3
+
 # для тестов (test_pipeline.py), не нужен для самого пайплайна
 pytest>=8.0
