@@ -500,6 +500,11 @@ def test_catch_up_value_jobs_are_exculpation_fillers():
     assert "status" not in keys and "photo" not in keys            # не liveness/фото
     for _, script, _ in catch_up.VALUE_JOBS:
         assert os.path.exists(script)
+    # --backfill ещё уже: только backfill (чистый добор avgPrice+бейджа),
+    # подмножество VALUE_JOBS, без enrich
+    bkeys = [k for _, _, k in catch_up.BACKFILL_JOBS]
+    assert bkeys == ["backfill"]
+    assert all(j in catch_up.VALUE_JOBS for j in catch_up.BACKFILL_JOBS)
 
 
 # ─── catch_up: детект 429 не должен ложно срабатывать на числах ─────────────

@@ -51,6 +51,11 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
                                          цвет/damage/растаможка. Статусы и фото
                                          пропускает. Быстро чистит подозрительных
                                          под разметку; сочетается с --until-done)
+        python catch_up.py --run --backfill
+                                        (ещё уже: ТОЛЬКО добор avgPrice+бейджа у
+                                         УЖЕ обогащённых строк — целится в незапол-
+                                         ненные, заполненные пропускает, новые
+                                         объявления не обогащает; тоже с --until-done)
 """
 
 import pathlib as _p
@@ -145,6 +150,7 @@ def compute_gaps() -> dict:
     ok = enr[enr["http_status"] == 200]
     g["backfill"] = int((ok["kolesa_avg_price"].isna()
                          | ok["page_status_badge"].isna()).sum())
+    g["enriched_total"] = int(len(ok))   # знаменатель: сколько всего обогащено (http 200)
 
     # 4) фото-хэши: реальные (http) фото, которых нет в photo_hashes
     photos = pd.read_sql("SELECT url FROM photos", eng)
@@ -172,6 +178,11 @@ OFFLINE = [("чистка (clean)", "clean.py"), ("отчёт (explore)", "explo
 # подозрение shared_photo, а не снимает). Чем быстрее заполнены эти поля,
 # тем быстрее чистится список подозрительных под разметку.
 VALUE_JOBS = [j for j in KOLESA if j[2] in ("enrich", "backfill")]
+
+# Ещё уже: только backfill — чистый добор avgPrice+бейджа у УЖЕ обогащённых
+# строк (пропускает заполненные, целится в 554 из 1089 http-200). НЕ трогает
+# enrich (новые объявления). Для --backfill.
+BACKFILL_JOBS = [j for j in KOLESA if j[2] == "backfill"]
 
 
 def is_429_line(line: str) -> bool:
@@ -309,29 +320,30 @@ def report(g: dict, title: str):
               "backfill": "avgPrice/бейдж не добраны", "photo": "фото не хэшировано"}
     for k in ["status", "enrich", "backfill", "photo"]:
         mark = "—" if g[k] == 0 else str(g[k])
-        print(f"  {labels[k]:<28} {mark}")
+        extra = (f"  (из {g['enriched_total']} обогащённых)"
+                 if k == "backfill" and g.get("enriched_total") else "")
+        print(f"  {labels[k]:<28} {mark}{extra}")
     print(LINE)
 
 
-def run_gapped_jobs(until_done: bool = False, values: bool = False):
+def run_gapped_jobs(until_done: bool = False, kolesa_jobs=None, do_cdn: bool = True):
     """Сетевые джобы под дневным бюджетом на хост.
 
     until_done=False (по умолчанию): один проход — по одной порции на джоб
       (в пределах бюджета) — вежливо, резюмируемо, за пару минут.
     until_done=True: используем всю оставшуюся дневную квоту (round-robin
       порциями), потом встаём до завтра.
-    values=True: гоняем ТОЛЬКО ценные-для-оправдания джобы (enrich + backfill,
-      см. VALUE_JOBS), фото пропускаем — фокус на быстрой чистке подозрительных.
+    kolesa_jobs: какой набор kolesa-джобов гнать (KOLESA / VALUE_JOBS /
+      BACKFILL_JOBS — выбирается флагами в main). do_cdn: трогать ли фото.
     Хосты идут по очереди (kolesa → CDN), у каждого свой бюджет. 429/
     предохранитель на хосте прерывает только ЕГО цепочку."""
     used = load_budget_used()
     t0 = time.time()
 
-    # kolesa (общий IP): в --values только enrich+backfill, иначе все три
-    kolesa_jobs = VALUE_JOBS if values else KOLESA
+    kolesa_jobs = KOLESA if kolesa_jobs is None else kolesa_jobs
     kolesa_aborted = drain_host(kolesa_jobs, "kolesa", used, until_done)
-    if not values:
-        drain_host(CDN, "cdn", used, until_done)   # фото не оправдывает → в --values пропускаем
+    if do_cdn:
+        drain_host(CDN, "cdn", used, until_done)
     if kolesa_aborted:
         print("\n(kolesa прерван по сигналу сайта; CDN — отдельный хост, "
               "его добор это не затрагивает.)")
@@ -348,7 +360,9 @@ def run_gapped_jobs(until_done: bool = False, values: bool = False):
 
 def main():
     until_done = "--until-done" in sys.argv
-    values = "--values" in sys.argv
+    backfill_only = "--backfill" in sys.argv     # уже некуда: только avgPrice+бейдж
+    values = "--values" in sys.argv and not backfill_only   # backfill приоритетнее
+
     g = compute_gaps()
     report(g, "ПРОБЕЛЫ СЕЙЧАС (что можно добрать)")
 
@@ -357,35 +371,41 @@ def main():
           f"kolesa {used['kolesa']}/{DAILY_BUDGET['kolesa']}, "
           f"CDN {used['cdn']}/{DAILY_BUDGET['cdn']}")
 
-    # в --values считаем «нечего делать» только по ценным джобам
-    net = (g["enrich"] + g["backfill"]) if values \
-        else (g["status"] + g["enrich"] + g["backfill"] + g["photo"])
+    # набор джобов и «нечего делать» — по выбранному фокусу
+    if backfill_only:
+        kolesa_jobs, do_cdn, net = BACKFILL_JOBS, False, g["backfill"]
+    elif values:
+        kolesa_jobs, do_cdn, net = VALUE_JOBS, False, g["enrich"] + g["backfill"]
+    else:
+        kolesa_jobs, do_cdn = KOLESA, True
+        net = g["status"] + g["enrich"] + g["backfill"] + g["photo"]
     if net == 0:
-        print("\nЦенные поля (обогащение + avgPrice/бейдж) добраны — нечего делать."
-              if values else "\nВсё добрано — сетевым джобам нечего делать.")
+        print("\nНечего добирать в выбранном режиме.")
         return
 
-    if values:
-        print("\nРежим --values: приоритетно добираю ТОЛЬКО ценные для оправдания")
-        print("поля — обогащение + avgPrice/бейдж (enrich + backfill). Статусы и")
-        print("фото пропускаю: чем быстрее заполнены, тем быстрее чистятся подозрительные.")
+    if backfill_only:
+        print(f"\nРежим --backfill: добираю ТОЛЬКО avgPrice+бейдж у обогащённых "
+              f"({g['backfill']} из {g['enriched_total']}), заполненные пропускаю.")
+        print("enrich (новые), статусы и фото не трогаю.")
+    elif values:
+        print("\nРежим --values: обогащение + avgPrice/бейдж (enrich + backfill),")
+        print("без статусов и фото — быстрая чистка подозрительных под разметку.")
     if until_done:
-        print("\n--until-done: использую всю оставшуюся дневную квоту (round-robin")
-        print("порциями; стоп при 429 или исчерпании суточного бюджета). Резюмируемо.")
-    elif not values:
-        print("\nОдин проход: по одной порции на джоб в пределах дневного бюджета.")
-        print("Вся дневная квота разом: --until-done. Только ценные поля: --values.")
+        print("--until-done: вся оставшаяся дневная квота (round-robin; стоп при 429/бюджете).")
+    elif not (values or backfill_only):
+        print("\nОдин проход по всем джобам в пределах бюджета. Фокус: --values / --backfill.")
 
-    flags = (" --until-done" if until_done else "") + (" --values" if values else "")
+    flags = (" --until-done" if until_done else "") \
+        + (" --backfill" if backfill_only else (" --values" if values else ""))
     if "--run" in sys.argv:
-        run_gapped_jobs(until_done, values)
+        run_gapped_jobs(until_done, kolesa_jobs, do_cdn)
         return
     if not sys.stdin.isatty():
         print(f"\nЗапустить: python catch_up.py --run{flags}")
         return
     ans = input("\nЗапустить догон сейчас? [y/N] ").strip().lower()
     if ans in ("y", "yes", "д", "да"):
-        run_gapped_jobs(until_done, values)
+        run_gapped_jobs(until_done, kolesa_jobs, do_cdn)
     else:
         print(f"Ок, не запускаю. Когда решишь: python catch_up.py --run{flags}")
 
