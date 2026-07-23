@@ -19,12 +19,10 @@ matplotlib.use("Agg")                       # рендер в файл без о
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from catboost import CatBoostRegressor, Pool
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import KFold
 
 from data_quality import scrub_junk_mileage
-from train_price_model import CAT_FEATURES, FEATURES, load
+from train_price_model import FEATURES, grouped_oof_predictions, load, load_artifact
 
 OUT_PNG = "data/eda/ml_dashboard.png"
 AGE_ORDER = ["0-3", "4-7", "8-12", "13-20", "21+"]
@@ -39,13 +37,6 @@ plt.rcParams.update({
 C_OK, C_BAD, C_ACC = "#4fa3ff", "#ff5d5d", "#ffd166"
 
 
-def _fit(X, y):
-    m = CatBoostRegressor(iterations=600, learning_rate=0.05, depth=8,
-                          loss_function="RMSE", random_seed=42, verbose=False)
-    m.fit(Pool(X, y, cat_features=CAT_FEATURES))
-    return m
-
-
 def main():
     df = load()
     df = df[df["price_tenge"].notna() & (df["price_tenge"] > 0)]
@@ -54,26 +45,29 @@ def main():
     clean = df[df["is_suspicious"] == 0].reset_index(drop=True)
     X, y = clean[FEATURES], clean["log_price"]
 
-    # Out-of-fold предсказания (честно: точку предсказывает модель, её НЕ видевшая)
-    oof = np.zeros(len(y))
-    for tr, te in KFold(5, shuffle=True, random_state=42).split(X):
-        oof[te] = _fit(X.iloc[tr], y.iloc[tr]).predict(X.iloc[te])
+    # Grouped OOF: точку не видит модель, и её точный перезалив также
+    # не может оказаться в train-фолде.
+    oof, baseline_oof = grouped_oof_predictions(clean)
     clean["oof_log"] = oof
     clean["ape"] = np.abs(np.exp(oof) - np.exp(y)) / np.exp(y) * 100
 
     r2 = r2_score(y, oof)
     mae = mean_absolute_error(np.exp(y), np.exp(oof))
     mape = float(clean["ape"].mean())
-    final = _fit(X, y)                        # финальная модель — для важности
+    final, _ = load_artifact()                # тот же артефакт, что в inference
+    baseline_mape = float(
+        (np.abs(np.exp(baseline_oof) - np.exp(y)) / np.exp(y) * 100).mean()
+    )
 
     # ── сводка в консоль ────────────────────────────────────────────────────
-    print(f"Модель цены (out-of-fold, {len(X)} машин, чистые):")
+    print(f"Модель цены (grouped out-of-fold, {len(X)} машин, чистые):")
     print(f"  R²(log) = {r2:.3f}   MAPE = {mape:.1f}%   MAE = {mae/1e6:.2f}М ₸")
+    print(f"  baseline MAPE = {baseline_mape:.1f}%")
 
     # ── дашборд ─────────────────────────────────────────────────────────────
     fig, ax = plt.subplots(2, 2, figsize=(15, 10))
     fig.suptitle(f"Модель оценки цены · R²={r2:.3f} · MAPE={mape:.1f}%  "
-                 f"(out-of-fold, {len(X)} машин)", fontsize=14, fontweight="bold")
+                 f"(grouped OOF, {len(X)} машин)", fontsize=14, fontweight="bold")
 
     # 1) предсказание vs факт (log-log)
     a = ax[0, 0]

@@ -168,7 +168,14 @@ def main():
     print("\n► Ручная разметка (data/manual_labels.csv)")
     if Path(LABELS_CSV).exists():
         lab = pd.read_csv(LABELS_CSV, dtype={"ad_id": str})
-        print(f"  вердиктов: {len(lab)}")
+        verdict = lab["verdict"].astype("string").str.strip().str.lower()
+        latest = lab.assign(_verdict=verdict).drop_duplicates("ad_id", keep="last")
+        n_valid = int(latest["_verdict"].isin(["fraud", "legit"]).sum())
+        n_fraud = int((latest["_verdict"] == "fraud").sum())
+        print(f"  валидных вердиктов: {n_valid} "
+              f"(fraud: {n_fraud}, legit: {n_valid - n_fraud})")
+        print(f"  строк журнала: {len(lab)}; "
+              f"пустых/unknown: {int((~verdict.isin(['fraud', 'legit'])).sum())}")
     else:
         print("  файла ещё нет — 0 вердиктов "
               "(очередь: data/eda/labeling_queue.csv)")

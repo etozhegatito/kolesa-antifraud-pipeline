@@ -23,3 +23,7 @@ debug/*.html
 
 # сгенерированные HTML-отчёты (ml_report.py) — артефакт
 data/**/*.html
+# обученные модели и их metadata содержат fingerprint локального датасета;
+# воспроизводятся командами train_price_model.py / residual_detector.py
+data/models/*.cbm
+data/models/*.json

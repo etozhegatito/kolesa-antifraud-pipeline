@@ -24,11 +24,9 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
-from catboost import CatBoostRegressor, Pool
-
 from data_quality import scrub_junk_mileage
 from db import get_engine
-from train_price_model import CAT_FEATURES, FEATURES, load
+from train_price_model import FEATURES, load, load_artifact
 
 YEAR = date.today().year
 _MON = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
@@ -50,15 +48,12 @@ def parse_posted(s):
 
 
 def fair_price_model():
-    """Модель справедливой цены на чистых (для residual = цена vs справедливая)."""
+    """Сохранённая production-модель и данные для расчёта residual."""
     df = load()
     df = df[df["price_tenge"] > 0].copy()
     df["log_price"] = np.log(df["price_tenge"])
     df, _ = scrub_junk_mileage(df)
-    clean = df[df["is_suspicious"] == 0]
-    m = CatBoostRegressor(iterations=600, learning_rate=0.05, depth=8,
-                          loss_function="RMSE", random_seed=42, verbose=False)
-    m.fit(Pool(clean[FEATURES], clean["log_price"], cat_features=CAT_FEATURES))
+    m, _ = load_artifact()
     return m, df
 
 

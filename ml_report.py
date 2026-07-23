@@ -14,11 +14,10 @@ ml_report.py — красивый HTML-отчёт по модели цены (а
 
 import numpy as np
 import pandas as pd
-from catboost import CatBoostRegressor, Pool
 
 from data_quality import scrub_junk_mileage
-from residual_detector import AGE_MAX, ALPHA, MIN_SUPPORT
-from train_price_model import CAT_FEATURES, FEATURES, cross_validate, load
+from residual_detector import AGE_MAX, MIN_SUPPORT, load_floor_artifact, score_floor
+from train_price_model import CAT_FEATURES, FEATURES, load, load_artifact
 
 OUT = "data/eda/ml_report.html"
 
@@ -120,15 +119,8 @@ PAGE = """<!doctype html>
     <th class="num">ниже пола</th></tr>__SUSPECTS__</table></div>
 
   <footer>Сгенерировано ml_report.py · каждый запуск — новая случайная машина ·
-    метрики честные (out-of-fold 5-fold CV)</footer>
+    метрики честные (grouped CV + out-of-time holdout)</footer>
 </div></body></html>"""
-
-
-def _fit(X, y):
-    m = CatBoostRegressor(iterations=600, learning_rate=0.05, depth=8,
-                          loss_function="RMSE", random_seed=42, verbose=False)
-    m.fit(Pool(X, y, cat_features=CAT_FEATURES))
-    return m
 
 
 def _stat(v, k):
@@ -143,8 +135,13 @@ def main():
     clean = df[df["is_suspicious"] == 0]
     X, y = clean[FEATURES], clean["log_price"]
 
-    r2, mae, mape = cross_validate(X, y).mean(axis=0)     # честные метрики
-    model = _fit(X, y)
+    model, metadata = load_artifact()
+    grouped = metadata["validation"]["grouped_cv"]["model"]
+    r2, mae, mape = (
+        grouped["r2_log"],
+        grouped["mae_tenge"],
+        grouped["mape_pct"],
+    )
 
     # прожектор — случайная машина
     car = clean.sample(1).iloc[0]
@@ -182,16 +179,13 @@ def main():
                  f'<td class="num">{r["pred"]/1e6:.1f}М</td>'
                  f'<td class="num">{err:.0f}%</td></tr>')
 
-    # residual-антифрод: квантильный «пол» + гейты (см. residual_detector.py)
-    qm = CatBoostRegressor(iterations=600, learning_rate=0.05, depth=8,
-                           loss_function=f"Quantile:alpha={ALPHA}",
-                           random_seed=42, verbose=False)
-    qm.fit(Pool(X, y, cat_features=CAT_FEATURES))
+    # Тот же калиброванный артефакт пола, что использует residual_detector.py.
+    qm, qmeta = load_floor_artifact()
     dd = df.copy()
     Xall = dd[FEATURES].copy()
     for c in CAT_FEATURES:
         Xall[c] = Xall[c].astype(str)
-    dd["floor"] = np.exp(qm.predict(Xall))
+    dd["floor"] = np.exp(score_floor(qm, qmeta, Xall))
     sup = clean.groupby(["brand", "model"]).size()
     dd["sup"] = [int(sup.get((b, m), 0)) for b, m in zip(dd["brand"], dd["model"])]
     dd["flag"] = ((dd["price_tenge"] < dd["floor"]) & (dd["sup"] >= MIN_SUPPORT)

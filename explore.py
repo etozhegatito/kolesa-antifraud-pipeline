@@ -27,6 +27,8 @@ if _p.Path(__file__).name != _expected:
         f"{_p.Path(__file__).name}. Файлы перепутаны при копировании!")
 
 
+import csv
+
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -37,6 +39,7 @@ from db import get_engine
 
 OUT_PNG  = "data/eda/dashboard.png"
 OUT_SUSP = "data/eda/suspicious_sorted.csv"
+CONTROL_SAMPLE_SIZE = 50
 
 # ─── Внешний вид ──────────────────────────────────────────────────────────────
 plt.rcParams.update({
@@ -104,18 +107,109 @@ def add_iqr_flags(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─── Консольный отчёт ─────────────────────────────────────────────────────────
+def _write_csv(path: str, df: pd.DataFrame) -> None:
+    """CSV без pandas round-trip целых чисел в строки вида '50.0'."""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(df.columns))
+        writer.writeheader()
+        for row in df.to_dict("records"):
+            writer.writerow({k: ("" if pd.isna(v) else v) for k, v in row.items()})
+
+
+def select_labeling_rows(
+    df: pd.DataFrame,
+    residual_mask: pd.Series | None = None,
+    control_n: int = CONTROL_SAMPLE_SIZE,
+) -> pd.DataFrame:
+    """Три слоя разметки: precision правил, новые ML-кандидаты и FN-контроль.
+
+    Очередь только из rule-positive строк не может обнаружить false negative,
+    поэтому recall по ней принципиально неизмерим. Случайный control — это
+    поиск пропущенного fraud среди строк, которые не поднял ни один детектор.
+    """
+    work = df.copy()
+    residual_mask = (
+        residual_mask.reindex(work.index, fill_value=False).astype(bool)
+        if residual_mask is not None
+        else pd.Series(False, index=work.index)
+    )
+    rule = work["is_suspicious"].eq(1)
+    residual = (~rule) & residual_mask
+    control = (~rule) & (~residual)
+
+    work["sampling_stratum"] = np.select(
+        [rule, residual],
+        ["rule_positive", "residual_candidate"],
+        default="random_control",
+    )
+    population = work["sampling_stratum"].value_counts().to_dict()
+
+    # Не предлагаем повторно уже принятые или явно отложенные решения.
+    if "verdict" in work.columns:
+        verdict = work["verdict"].astype("string").str.strip().str.lower()
+        unresolved = ~verdict.isin(["fraud", "legit", "unknown"])
+    else:
+        unresolved = pd.Series(True, index=work.index)
+
+    pos = work[unresolved & rule].sort_values(
+        ["both_detectors_low", "price_z"], ascending=[False, True]
+    )
+    res = work[unresolved & residual].sort_values("residual_gap", ascending=False)
+    controls = work[unresolved & control].copy()
+    # Детерминированная псевдослучайная выборка: повторный explore не меняет
+    # контроль без изменения набора ad_id.
+    controls["_sample_key"] = pd.util.hash_pandas_object(
+        controls["ad_id"].astype(str), index=False
+    )
+    controls = controls.nsmallest(min(control_n, len(controls)), "_sample_key")
+    controls = controls.drop(columns="_sample_key")
+
+    q = pd.concat([pos, res, controls], ignore_index=True)
+    q["stratum_population"] = q["sampling_stratum"].map(population).astype(int)
+    sample_counts = q["sampling_stratum"].value_counts().to_dict()
+    q["stratum_sample_size"] = q["sampling_stratum"].map(sample_counts).astype(int)
+    return q
+
+
 def export_labeling_queue(df: pd.DataFrame):
-    """Очередь на ручную разметку: подозрительные без вердикта, худшие
-    сверху, с готовыми колонками verdict/comment. Смысл: снизить трение —
-    чем проще размечать, тем быстрее наберутся 50–100 вердиктов, а это
-    и precision правил, и будущая обучающая выборка."""
-    q = df[df.is_suspicious == 1].copy()
-    if "verdict" in q.columns:
-        q = q[q["verdict"].isna()]
-    q = q.sort_values(["both_detectors_low", "price_z"],
-                      ascending=[False, True])
-    cols = ["ad_id", "url", "title", "year", "price_tenge", "mileage_km",
-            "price_z", "suspicion_reasons"]
+    """Аудируемая очередь для precision, новых кандидатов и поиска FN."""
+    work = df.copy()
+    work["residual_gap"] = np.nan
+    residual_mask = pd.Series(False, index=work.index)
+    try:
+        from residual_detector import (
+            AGE_MAX,
+            MIN_SUPPORT,
+            load_floor_artifact,
+            score_floor,
+        )
+        from train_price_model import FEATURES
+
+        model, metadata = load_floor_artifact()
+        floor = score_floor(model, metadata, work[FEATURES])
+        work["residual_gap"] = floor - np.log(work["price_tenge"])
+        clean = work[work["is_suspicious"] == 0]
+        support = clean.groupby(["brand", "model"]).size()
+        sup = pd.Series(
+            [int(support.get((b, m), 0)) for b, m in zip(work["brand"], work["model"])],
+            index=work.index,
+        )
+        residual_mask = (
+            work["residual_gap"].gt(0)
+            & sup.ge(MIN_SUPPORT)
+            & work["age"].le(AGE_MAX)
+        )
+    except FileNotFoundError:
+        # Первый run_all до обучения модели: rule + random control всё равно
+        # образуют полезную очередь. После residual_detector.py слой добавится.
+        pass
+
+    q = select_labeling_rows(work, residual_mask)
+    cols = [
+        "sampling_stratum", "stratum_population", "stratum_sample_size",
+        "ad_id", "url", "title", "year", "price_tenge", "mileage_km",
+        "price_z", "residual_gap", "suspicion_reasons",
+    ]
     for extra in ["customs_cleared", "steering", "damage_keywords",
                   "seller_comment"]:
         if extra in q.columns:
@@ -125,8 +219,11 @@ def export_labeling_queue(df: pd.DataFrame):
         q["seller_comment"] = q["seller_comment"].fillna("").str[:150]
     q["verdict"] = ""     # ← заполняй: legit / fraud / unknown
     q["comment"] = ""
-    q.to_csv("data/eda/labeling_queue.csv", index=False)
-    print(f"Очередь на разметку ({len(q)} шт.) → data/eda/labeling_queue.csv")
+    out = "data/eda/labeling_queue.csv"
+    _write_csv(out, q)
+    counts = q["sampling_stratum"].value_counts()
+    summary = ", ".join(f"{k}={v}" for k, v in counts.items())
+    print(f"Очередь на разметку ({len(q)}: {summary}) → {out}")
 
 
 def console_report(df: pd.DataFrame):
@@ -269,7 +366,7 @@ def main():
     susp = (df[df.is_suspicious == 1]
               .sort_values(["both_detectors_low", "price_z"],
                            ascending=[False, True]))
-    susp.to_csv(OUT_SUSP, index=False)
+    _write_csv(OUT_SUSP, susp)
     print(f"Флаги (отсортированы) → {OUT_SUSP}")
 
     export_labeling_queue(df)

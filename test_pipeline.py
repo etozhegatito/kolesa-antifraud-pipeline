@@ -374,6 +374,21 @@ def test_confusion_matrix_counts():
     assert c == {"TP": 2, "FP": 1, "FN": 1, "TN": 2}
 
 
+def test_weighted_confusion_uses_sampling_probability():
+    """Один fraud в контроле 1/100 представляет 100 строк населения."""
+    df = pd.DataFrame({
+        "is_suspicious": [1, 1, 0],
+        "verdict": ["fraud", "legit", "fraud"],
+        "stratum_population": [2, 2, 100],
+        "stratum_sample_size": [2, 2, 1],
+    })
+    c = evaluate_detector.weighted_confusion(df)
+    assert c == {"TP": 1.0, "FP": 1.0, "FN": 100.0, "TN": 0.0}
+    assert evaluate_detector._prf({"TP": 0, "FP": 2, "FN": 3, "TN": 0}) == (
+        0.0, 0.0, 0.0
+    )
+
+
 # ─── dual-write: "50.0" из CSV не должно ронять запись в Postgres INTEGER ────
 def test_pg_value_coerces_float_strings():
     """Реальный баг: после pandas-round-trip пробег в CSV = '50.0';
@@ -676,3 +691,102 @@ def test_catch_up_budget_resets_next_day(tmp_path, monkeypatch):
     assert catch_up.load_budget_used() == {"kolesa": 150, "cdn": 300}  # сегодня → как есть
     f.write_text("{ битый json", encoding="utf-8")
     assert catch_up.load_budget_used() == {"kolesa": 0, "cdn": 0}   # не падаем
+
+
+# ─── ML validation: дубли, время, калибровка и train/inference schema ───────
+def test_duplicate_groups_keep_repost_in_one_fold():
+    """Цена может поменяться у перезалива, но это всё ещё одна CV-группа."""
+    import pandas as pd
+    from train_price_model import duplicate_groups
+    d = pd.DataFrame([
+        {"ad_id": "1", "brand": "Toyota", "model": "Camry", "year": 2020,
+         "mileage_km": 80000, "engine_volume": 2.5, "body_type": "седан",
+         "text_full": "один хозяин, родной окрас, зимняя резина",
+         "price_tenge": 10_000_000},
+        {"ad_id": "2", "brand": "Toyota", "model": "Camry", "year": 2020,
+         "mileage_km": 80000, "engine_volume": 2.5, "body_type": "седан",
+         "text_full": "один хозяин, родной окрас, зимняя резина",
+         "price_tenge": 9_700_000},
+        # Без содержательного текста круглого пробега недостаточно для склейки.
+        {"ad_id": "3", "brand": "Toyota", "model": "Camry", "year": 2020,
+         "mileage_km": 80000, "engine_volume": 2.5, "body_type": "седан",
+         "text_full": "", "price_tenge": 10_000_000},
+    ])
+    g = duplicate_groups(d)
+    assert g.iloc[0] == g.iloc[1]
+    assert g.iloc[2] != g.iloc[0]
+
+
+def test_temporal_holdout_is_future_and_removes_group_overlap():
+    import pandas as pd
+    from train_price_model import duplicate_groups, temporal_holdout
+    rows = []
+    for i in range(120):
+        rows.append({
+            "ad_id": str(i), "scraped_at": pd.Timestamp("2026-01-01")
+            + pd.Timedelta(days=i), "brand": "B", "model": f"M{i}",
+            "year": 2020, "mileage_km": i + 1000, "engine_volume": 2.0,
+            "body_type": "седан", "text_full": f"уникальное описание машины номер {i}",
+        })
+    # Последняя строка — перезалив первой; первая должна быть удалена из train.
+    rows[-1].update({
+        "brand": rows[0]["brand"], "model": rows[0]["model"],
+        "mileage_km": rows[0]["mileage_km"], "text_full": rows[0]["text_full"],
+    })
+    d = pd.DataFrame(rows)
+    tr, te = temporal_holdout(d)
+    assert d.loc[tr, "scraped_at"].max() < d.loc[te, "scraped_at"].min()
+    assert set(duplicate_groups(d.loc[tr])).isdisjoint(duplicate_groups(d.loc[te]))
+
+
+def test_residual_calibration_hits_requested_fraction():
+    import numpy as np
+    from residual_detector import calibration_offset
+    y = np.linspace(-2, 2, 1001)
+    raw = np.zeros_like(y)
+    offset = calibration_offset(y, raw, alpha=0.10)
+    frac = float((y < raw + offset).mean())
+    assert abs(frac - 0.10) <= 1 / len(y)
+
+
+def test_predict_row_matches_training_schema_and_zero_is_not_missing():
+    from predict_price import make_row
+    from train_price_model import FEATURES
+    row = make_row(
+        brand="Toyota", model="Camry", year=2020, mileage_km=0,
+        engine_volume=2.5,
+    )
+    assert list(row.columns) == FEATURES
+    assert row.loc[0, "is_mileage_missing"] == 0
+    assert row.loc[0, "brand"] == "Toyota"
+
+
+def test_model_artifacts_are_runtime_data_not_git_payload():
+    from pathlib import Path
+    ignore = Path(".gitignore").read_text(encoding="utf-8")
+    assert "data/models/*.cbm" in ignore
+    assert "data/models/*.json" in ignore
+
+
+def test_labeling_queue_contains_positive_residual_and_control_strata():
+    """Без random_control очередь не способна находить false negatives."""
+    import pandas as pd
+    from explore import select_labeling_rows
+    n = 27
+    d = pd.DataFrame({
+        "ad_id": [str(i) for i in range(n)],
+        "is_suspicious": [1] * 3 + [0] * (n - 3),
+        "both_detectors_low": [0] * n,
+        "price_z": list(range(n)),
+        "residual_gap": [0.0] * n,
+    })
+    residual = pd.Series([False] * 3 + [True] * 4 + [False] * 20)
+    q = select_labeling_rows(d, residual, control_n=5)
+    counts = q["sampling_stratum"].value_counts().to_dict()
+    assert counts == {
+        "random_control": 5,
+        "residual_candidate": 4,
+        "rule_positive": 3,
+    }
+    assert set(q.loc[q["sampling_stratum"] == "random_control",
+                     "stratum_population"]) == {20}
