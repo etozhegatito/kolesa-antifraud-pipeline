@@ -45,6 +45,12 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
                                          суточный бюджет хоста / не закрыты
                                          пробелы / не пришёл 429; резюмируемо
                                          назавтра — идеально под ежедневный крон)
+        python catch_up.py --run --values
+                                        (приоритетно ТОЛЬКО ценные-для-оправдания
+                                         поля: enrich + backfill = avgPrice/бейдж/
+                                         цвет/damage/растаможка. Статусы и фото
+                                         пропускает. Быстро чистит подозрительных
+                                         под разметку; сочетается с --until-done)
 """
 
 import pathlib as _p
@@ -157,6 +163,15 @@ KOLESA = [
 ]
 CDN = [("фото-хэши (photo_dedup)", "photo_dedup.py", "photo")]   # другой хост
 OFFLINE = [("чистка (clean)", "clean.py"), ("отчёт (explore)", "explore.py")]
+
+# Приоритетный набор для --values: джобы, заполняющие ЦЕННЫЕ для ОПРАВДАНИЯ
+# (exculpation) поля. backfill добирает avgPrice + бейдж у старых строк;
+# enrich даёт их же у новых объявлений ПЛЮС цвет/damage/растаможку/коммент —
+# всё, на что смотрит exculpate() в clean.py, снимая ложные подозрения.
+# Статусы (liveness) сюда не входят, фото — тем более (оно ДОБАВляет
+# подозрение shared_photo, а не снимает). Чем быстрее заполнены эти поля,
+# тем быстрее чистится список подозрительных под разметку.
+VALUE_JOBS = [j for j in KOLESA if j[2] in ("enrich", "backfill")]
 
 
 def is_429_line(line: str) -> bool:
@@ -298,21 +313,25 @@ def report(g: dict, title: str):
     print(LINE)
 
 
-def run_gapped_jobs(until_done: bool = False):
+def run_gapped_jobs(until_done: bool = False, values: bool = False):
     """Сетевые джобы под дневным бюджетом на хост.
 
     until_done=False (по умолчанию): один проход — по одной порции на джоб
       (в пределах бюджета) — вежливо, резюмируемо, за пару минут.
     until_done=True: используем всю оставшуюся дневную квоту (round-robin
       порциями), потом встаём до завтра.
+    values=True: гоняем ТОЛЬКО ценные-для-оправдания джобы (enrich + backfill,
+      см. VALUE_JOBS), фото пропускаем — фокус на быстрой чистке подозрительных.
     Хосты идут по очереди (kolesa → CDN), у каждого свой бюджет. 429/
     предохранитель на хосте прерывает только ЕГО цепочку."""
     used = load_budget_used()
     t0 = time.time()
 
-    # kolesa (общий IP на три джоба) → затем CDN (другой хост, свой бюджет)
-    kolesa_aborted = drain_host(KOLESA, "kolesa", used, until_done)
-    drain_host(CDN, "cdn", used, until_done)
+    # kolesa (общий IP): в --values только enrich+backfill, иначе все три
+    kolesa_jobs = VALUE_JOBS if values else KOLESA
+    kolesa_aborted = drain_host(kolesa_jobs, "kolesa", used, until_done)
+    if not values:
+        drain_host(CDN, "cdn", used, until_done)   # фото не оправдывает → в --values пропускаем
     if kolesa_aborted:
         print("\n(kolesa прерван по сигналу сайта; CDN — отдельный хост, "
               "его добор это не затрагивает.)")
@@ -329,6 +348,7 @@ def run_gapped_jobs(until_done: bool = False):
 
 def main():
     until_done = "--until-done" in sys.argv
+    values = "--values" in sys.argv
     g = compute_gaps()
     report(g, "ПРОБЕЛЫ СЕЙЧАС (что можно добрать)")
 
@@ -337,32 +357,37 @@ def main():
           f"kolesa {used['kolesa']}/{DAILY_BUDGET['kolesa']}, "
           f"CDN {used['cdn']}/{DAILY_BUDGET['cdn']}")
 
-    total_net = g["status"] + g["enrich"] + g["backfill"] + g["photo"]
-    if total_net == 0:
-        print("\nВсё добрано — сетевым джобам нечего делать.")
+    # в --values считаем «нечего делать» только по ценным джобам
+    net = (g["enrich"] + g["backfill"]) if values \
+        else (g["status"] + g["enrich"] + g["backfill"] + g["photo"])
+    if net == 0:
+        print("\nЦенные поля (обогащение + avgPrice/бейдж) добраны — нечего делать."
+              if values else "\nВсё добрано — сетевым джобам нечего делать.")
         return
 
+    if values:
+        print("\nРежим --values: приоритетно добираю ТОЛЬКО ценные для оправдания")
+        print("поля — обогащение + avgPrice/бейдж (enrich + backfill). Статусы и")
+        print("фото пропускаю: чем быстрее заполнены, тем быстрее чистятся подозрительные.")
     if until_done:
-        print("\nРежим --until-done: использую всю оставшуюся дневную квоту")
-        print("(round-robin порциями, паузы+предохранители внутри; стоп при 429")
-        print("или при исчерпании суточного бюджета хоста). Резюмируемо завтра.")
-    else:
+        print("\n--until-done: использую всю оставшуюся дневную квоту (round-robin")
+        print("порциями; стоп при 429 или исчерпании суточного бюджета). Резюмируемо.")
+    elif not values:
         print("\nОдин проход: по одной порции на джоб в пределах дневного бюджета.")
-        print("Использовать всю дневную квоту разом: добавь --until-done.")
+        print("Вся дневная квота разом: --until-done. Только ценные поля: --values.")
 
+    flags = (" --until-done" if until_done else "") + (" --values" if values else "")
     if "--run" in sys.argv:
-        run_gapped_jobs(until_done)
+        run_gapped_jobs(until_done, values)
         return
     if not sys.stdin.isatty():
-        cmd = "python catch_up.py --run" + (" --until-done" if until_done else "")
-        print(f"\nЗапустить: {cmd}")
+        print(f"\nЗапустить: python catch_up.py --run{flags}")
         return
     ans = input("\nЗапустить догон сейчас? [y/N] ").strip().lower()
     if ans in ("y", "yes", "д", "да"):
-        run_gapped_jobs(until_done)
+        run_gapped_jobs(until_done, values)
     else:
-        print("Ок, не запускаю. Когда решишь: python catch_up.py --run"
-              + (" --until-done" if until_done else ""))
+        print(f"Ок, не запускаю. Когда решишь: python catch_up.py --run{flags}")
 
 
 if __name__ == "__main__":

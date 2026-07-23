@@ -489,6 +489,19 @@ def test_catch_up_references_real_scripts():
         assert os.path.exists(s), f"catch_up ссылается на несуществующий {s}"
 
 
+# ─── catch_up --values: приоритет ценных-для-оправдания джобов ──────────────
+def test_catch_up_value_jobs_are_exculpation_fillers():
+    """--values гоняет ТОЛЬКО enrich+backfill (заполняют avgPrice/бейдж/цвет/
+    damage — поля exculpation), пропуская статусы и фото. Подмножество KOLESA."""
+    import os, catch_up
+    keys = [k for _, _, k in catch_up.VALUE_JOBS]
+    assert keys == ["enrich", "backfill"]
+    assert all(j in catch_up.KOLESA for j in catch_up.VALUE_JOBS)   # подмножество KOLESA
+    assert "status" not in keys and "photo" not in keys            # не liveness/фото
+    for _, script, _ in catch_up.VALUE_JOBS:
+        assert os.path.exists(script)
+
+
 # ─── catch_up: детект 429 не должен ложно срабатывать на числах ─────────────
 def test_catch_up_429_detection_not_fooled_by_numbers():
     """Реальный баг моего же кода: count_429 считал подстроку '429', а она
