@@ -505,6 +505,19 @@ def test_junk_mileage_placeholder_detection():
     assert not is_junk_mileage(float("nan"))
 
 
+# ─── time-to-sell (уровень 2): парсинг даты публикации из карточки ──────────
+def test_parse_posted_date():
+    from datetime import date
+    from time_to_sell import parse_posted
+    cy = date.today().year
+    assert parse_posted("18 июля") == date(cy, 7, 18)
+    assert parse_posted("18 июл.") == date(cy, 7, 18)      # сокращение
+    assert parse_posted("5 мая") == date(cy, 5, 5)
+    assert parse_posted("сегодня") is None                 # относительная — не дата
+    assert parse_posted(None) is None
+    assert parse_posted("99 июля") is None                 # невалидный день
+
+
 # ─── квантильный residual-детектор: конфиг осмыслен, фичи без утечки ────────
 def test_residual_detector_config():
     import residual_detector as r
