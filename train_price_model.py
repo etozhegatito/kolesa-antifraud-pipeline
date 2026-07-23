@@ -24,6 +24,7 @@ from catboost import CatBoostRegressor, Pool
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 
+from data_quality import scrub_junk_mileage, iforest_anomaly
 from db import get_engine
 
 # Числовые (CatBoost ест NaN нативно — пробег с 33% пропусков ок)
@@ -50,6 +51,16 @@ def main():
     df = load()
     df = df[df["price_tenge"].notna() & (df["price_tenge"] > 0)].copy()
     df["log_price"] = np.log(df["price_tenge"])
+
+    # data-quality: занулить плейсхолдер-пробеги (777777 и т.п.) ДО обучения —
+    # иначе модель учит мусор как реальные 777k км.
+    df, n_junk = scrub_junk_mileage(df)
+    if n_junk:
+        print(f"Data-quality: занулено {n_junk} плейсхолдер-пробегов (репдигит >300k)")
+    # iForest — только репорт для ревью (не удаляем: ловит и редкое-честное)
+    dq = iforest_anomaly(df)
+    print(f"Data-quality: iForest пометил {int(dq.sum())} строк для ревью "
+          f"(глобальные выбросы — старьё/редкость/мусор; НЕ авто-удаляем, НЕ фрод)")
 
     clean = df[df["is_suspicious"] == 0]            # обучаем только на чистых
     X, y = clean[FEATURES], clean["log_price"]

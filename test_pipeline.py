@@ -489,6 +489,22 @@ def test_catch_up_references_real_scripts():
         assert os.path.exists(s), f"catch_up ссылается на несуществующий {s}"
 
 
+# ─── data-quality: плейсхолдер-пробег (777777) занулить перед моделью ───────
+def test_junk_mileage_placeholder_detection():
+    """Репдигит >300k («забитое» поле 777777) — junk; реальные 99999/111111/
+    150000 и 0/None — НЕ junk."""
+    from data_quality import is_junk_mileage
+    assert is_junk_mileage(777777)          # 777k репдигит → плейсхолдер
+    assert is_junk_mileage(999999)
+    assert is_junk_mileage(888888)
+    assert not is_junk_mileage(99999)       # 99k — правдоподобно
+    assert not is_junk_mileage(111111)      # 111k < 300k — не трогаем
+    assert not is_junk_mileage(150000)      # обычный пробег
+    assert not is_junk_mileage(0)           # отдельная история (used_but_zero)
+    assert not is_junk_mileage(None)
+    assert not is_junk_mileage(float("nan"))
+
+
 # ─── модель цены: НЕ должна видеть признаки-утечки цели ─────────────────────
 def test_price_model_features_no_leakage():
     """Модель цены не должна учиться на признаках, производных ОТ цены или на
