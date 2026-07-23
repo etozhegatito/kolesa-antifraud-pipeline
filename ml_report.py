@@ -17,6 +17,7 @@ import pandas as pd
 from catboost import CatBoostRegressor, Pool
 
 from data_quality import scrub_junk_mileage
+from residual_detector import AGE_MAX, ALPHA, MIN_SUPPORT
 from train_price_model import CAT_FEATURES, FEATURES, cross_validate, load
 
 OUT = "data/eda/ml_report.html"
@@ -114,6 +115,10 @@ PAGE = """<!doctype html>
     <table><tr><th>машина</th><th class="num">факт</th><th class="num">оценка</th>
     <th class="num">ошибка</th></tr>__ROWS__</table></div>
 
+  <div class="card" style="margin-top:16px"><h2>🚨 Подозрительно дёшево — модельный антифрод</h2>
+    <table><tr><th>машина</th><th class="num">цена</th><th class="num">справедливый пол</th>
+    <th class="num">ниже пола</th></tr>__SUSPECTS__</table></div>
+
   <footer>Сгенерировано ml_report.py · каждый запуск — новая случайная машина ·
     метрики честные (out-of-fold 5-fold CV)</footer>
 </div></body></html>"""
@@ -177,6 +182,28 @@ def main():
                  f'<td class="num">{r["pred"]/1e6:.1f}М</td>'
                  f'<td class="num">{err:.0f}%</td></tr>')
 
+    # residual-антифрод: квантильный «пол» + гейты (см. residual_detector.py)
+    qm = CatBoostRegressor(iterations=600, learning_rate=0.05, depth=8,
+                           loss_function=f"Quantile:alpha={ALPHA}",
+                           random_seed=42, verbose=False)
+    qm.fit(Pool(X, y, cat_features=CAT_FEATURES))
+    dd = df.copy()
+    Xall = dd[FEATURES].copy()
+    for c in CAT_FEATURES:
+        Xall[c] = Xall[c].astype(str)
+    dd["floor"] = np.exp(qm.predict(Xall))
+    sup = clean.groupby(["brand", "model"]).size()
+    dd["sup"] = [int(sup.get((b, m), 0)) for b, m in zip(dd["brand"], dd["model"])]
+    dd["flag"] = ((dd["price_tenge"] < dd["floor"]) & (dd["sup"] >= MIN_SUPPORT)
+                  & (dd["age"] <= AGE_MAX))
+    dd["under"] = (dd["floor"] - dd["price_tenge"]) / dd["floor"] * 100
+    susp_rows = ""
+    for _, r in dd[dd["flag"]].nlargest(6, "under").iterrows():
+        susp_rows += (f'<tr><td>{r["brand"]} {r["model"]} {int(r["year"])}</td>'
+                      f'<td class="num">{r["price_tenge"]/1e6:.1f}М</td>'
+                      f'<td class="num">{r["floor"]/1e6:.1f}М</td>'
+                      f'<td class="num" style="color:#ff7d7d">−{r["under"]:.0f}%</td></tr>')
+
     stats = (_stat(f"{r2:.3f}", "R² (log) — точность")
              + _stat(f"{mape:.0f}%", "MAPE — средняя ошибка")
              + _stat(f"{mae/1e6:.1f}М", "MAE — ₸ мимо")
@@ -187,7 +214,8 @@ def main():
             .replace("__CAR__", f'{car["brand"]} {car["model"]}')
             .replace("__SPEC__", spec).replace("__VERDICT__", verdict).replace("__BCLS__", bcls)
             .replace("__EST__", f"{est/1e6:.1f}").replace("__ACT__", f"{act/1e6:.1f}")
-            .replace("__STATS__", stats).replace("__BARS__", bars).replace("__ROWS__", rows))
+            .replace("__STATS__", stats).replace("__BARS__", bars).replace("__ROWS__", rows)
+            .replace("__SUSPECTS__", susp_rows))
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"Отчёт → {OUT}   (прожектор: {car['brand']} {car['model']} "
