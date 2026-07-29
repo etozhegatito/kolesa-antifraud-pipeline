@@ -29,7 +29,6 @@ if _p.Path(__file__).name != _expected:
 
 import csv
 import logging
-import random
 import sys
 import time
 
@@ -37,6 +36,7 @@ import pandas as pd
 import requests
 from sqlalchemy import text
 
+import pacing
 from db import get_engine
 from enrich import HEADERS, extract_avg_price, extract_status_badge, ENRICHED_CSV
 
@@ -137,7 +137,7 @@ def main():
             badge_filled += 1
         if i % 20 == 0:
             log.info(f"  {i}/{len(targets)} (avgPrice: {avg_filled}, бейджей: {badge_filled})")
-        time.sleep(random.uniform(*DELAY_RANGE))
+        pacing.polite_sleep(i, DELAY_RANGE, log)
     log.info(f"Готово из {len(targets)}: avgPrice дозаполнено {avg_filled}, "
              f"статус-бейджей найдено {badge_filled}")
 

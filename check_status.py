@@ -34,7 +34,6 @@ if _p.Path(__file__).name != _expected:
 
 import csv
 import logging
-import random
 import sys
 import time
 from datetime import datetime, date
@@ -42,6 +41,7 @@ from pathlib import Path
 
 import requests
 
+import pacing
 from db import upsert
 
 RAW_CSV       = "data/raw/raw_data.csv"
@@ -241,7 +241,7 @@ def main():
         counts[status] += 1
         if i % 25 == 0:
             log.info(f"  {i}/{len(batch)}: {counts}")
-        time.sleep(random.uniform(*DELAY_RANGE))
+        pacing.polite_sleep(i, DELAY_RANGE, log)
 
     log.info(f"Готово: {counts} → {STATUS_CSV}")
 

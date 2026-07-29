@@ -34,7 +34,6 @@ if _p.Path(__file__).name != _expected:
 
 import csv
 import logging
-import random
 import re
 import sys
 import time
@@ -45,6 +44,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+import pacing
 from db import get_engine, upsert
 
 ENRICHED_CSV = "data/enriched/enriched.csv"
@@ -273,7 +273,7 @@ def main():
 
         if i % 20 == 0:
             log.info(f"  {i}/{len(targets)}")
-        time.sleep(random.uniform(*DELAY_RANGE))
+        pacing.polite_sleep(i, DELAY_RANGE, log)
 
     log.info(f"Готово → {ENRICHED_CSV}")
 

@@ -790,3 +790,136 @@ def test_labeling_queue_contains_positive_residual_and_control_strata():
     }
     assert set(q.loc[q["sampling_stratum"] == "random_control",
                      "stratum_population"]) == {20}
+
+
+# ─── pacing.py: вежливый ритм (politeness, не маскировка) ────────────────────
+
+def test_pacing_never_faster_than_base_range():
+    """Главная гарантия: пауза НИКОГДА не короче нижней границы — иначе
+    «человечность» тайком повысила бы частоту запросов, а цель обратная."""
+    import random as _r
+    import pacing
+    lo, hi = 4.0, 8.0
+    rng = _r.Random(0)
+    pauses = [pacing.human_pause(lo, hi, rng=rng) for _ in range(2000)]
+    assert min(pauses) >= lo
+    assert max(pauses) <= hi * pacing.LONG_TAIL_MULT
+    # и в среднем строго медленнее плоского uniform
+    assert sum(pauses) / len(pauses) > (lo + hi) / 2
+
+
+def test_pacing_long_break_cadence():
+    """Перерыв ровно каждые BREAK_EVERY запросов, а не когда попало."""
+    import random as _r
+    import pacing
+    rng = _r.Random(1)
+    hits = [i for i in range(1, 61) if pacing.long_break(i, rng=rng) is not None]
+    assert hits == list(range(pacing.BREAK_EVERY, 61, pacing.BREAK_EVERY))
+    assert pacing.long_break(0, rng=rng) is None       # i с 1, не с 0
+
+
+def test_pacing_mean_pause_accounts_for_breaks():
+    """mean_pause честно учитывает хвост и перерывы (иначе ETA врёт)."""
+    import pacing
+    assert pacing.mean_pause(4.0, 8.0) > 6.0          # больше плоского среднего
+
+
+def test_kolesa_jobs_use_shared_pacing():
+    """Все три kolesa-джоба ходят через pacing, а не через свой time.sleep(
+    random.uniform(...)) — иначе политика ритма разъедется по файлам."""
+    from pathlib import Path
+    for f in ["enrich.py", "check_status.py", "backfill_avgprice.py"]:
+        src = Path(f).read_text(encoding="utf-8")
+        assert "pacing.polite_sleep" in src, f
+        assert "time.sleep(random.uniform" not in src, f
+
+
+# ─── catch_up: настраиваемый бюджет и зоны риска ─────────────────────────────
+
+def test_catch_up_parse_budget_forms():
+    import pytest as _pt
+    import catch_up
+    assert catch_up.parse_budget(["catch_up.py"]) is None
+    assert catch_up.parse_budget(["x", "--budget", "300"]) == 300
+    assert catch_up.parse_budget(["x", "--budget=450"]) == 450
+    for bad in (["x", "--budget", "abc"], ["x", "--budget=0"], ["x", "--budget=-5"]):
+        with _pt.raises(SystemExit):
+            catch_up.parse_budget(bad)
+
+
+def test_catch_up_risk_zones_match_observed_ban():
+    """Зоны откалиброваны на реальном факте: ~270 запросов = бан 2026-07-23.
+    Дефолт обязан лежать в безопасной зоне."""
+    import catch_up
+    assert catch_up.risk_zone(50)[0] == "спокойно"
+    assert catch_up.risk_zone(catch_up.DEFAULT_KOLESA_BUDGET)[0] == "безопасно"
+    assert catch_up.risk_zone(270)[0] == "риск"
+    assert catch_up.risk_zone(500)[0] == "высокий риск"
+    # монотонность: больше запросов не может быть «менее рискованно»
+    order = [z[1] for z in catch_up.RISK_ZONES]
+    seen = [catch_up.risk_zone(n)[0] for n in (1, 100, 101, 200, 201, 270, 271, 10**6)]
+    assert [order.index(s) for s in seen] == sorted(order.index(s) for s in seen)
+
+
+def test_catch_up_eta_grows_with_volume():
+    import catch_up
+    assert catch_up.eta_minutes(0) == 0
+    assert catch_up.eta_minutes(540) > catch_up.eta_minutes(200) > 0
+
+
+# ─── label_cards.py: офлайн-разметка (мёртвые страницы + не жжёт лимит) ──────
+
+def test_label_cards_never_requests_kolesa():
+    """Карточки — офлайн-инструмент: генератор не делает HTTP-запросов
+    вообще (фото подставляются как URL и грузятся браузером с CDN)."""
+    from pathlib import Path
+    src = Path("label_cards.py").read_text(encoding="utf-8")
+    for bad in ("requests.get", "requests.head", "urlopen", "httpx"):
+        assert bad not in src, bad
+
+
+def test_label_cards_help_covers_real_flags():
+    """У каждого флага, который детектор реально ставит, должна быть
+    подсказка «как решать» — иначе разметчик остаётся без критерия."""
+    import label_cards
+    import clean
+    from pathlib import Path
+    src = Path("clean.py").read_text(encoding="utf-8")
+    # флаги подозрения, реально встречающиеся в коде детектора
+    for flag in ["price_anomaly_low", "young_car_cheap", "possible_repost",
+                 "shared_photo_diff_car", "used_but_zero_mileage",
+                 "cheap_and_urgent"]:
+        assert flag in src, f"{flag} исчез из clean.py — обнови FLAG_HELP"
+        assert flag in label_cards.FLAG_HELP, f"нет подсказки для {flag}"
+    # подсказка обязана различать fraud/legit, а не просто описывать флаг
+    for flag, (what, fr, lg) in label_cards.FLAG_HELP.items():
+        assert what and fr and lg, flag
+        assert "fraud" in fr and "legit" in lg, flag
+
+
+def test_label_cards_csv_line_matches_labels_schema():
+    """Строка, которую собирает страница (ad_id + 7 пустых + verdict,comment),
+    должна ложиться ровно в схему manual_labels.csv — иначе clean.py не
+    прочитает вердикт."""
+    import csv
+    from pathlib import Path
+    from io import StringIO
+    header = next(csv.reader(StringIO(
+        Path("data/manual_labels.csv").read_text(encoding="utf-8").splitlines()[0])))
+    assert header[0] == "ad_id"
+    assert header[-2:] == ["verdict", "comment"]
+    # шаблон из JS: id + ',,,,,,,,' + verdict + ',' + comment
+    line = "123" + "," * 8 + "legit,причина"
+    assert len(next(csv.reader(StringIO(line)))) == len(header)
+
+
+def test_label_cards_money_and_fmt_handle_missing():
+    """Пропуски — норма в этих данных (37% без пробега): формат не должен
+    печатать 'nan' в карточке."""
+    import label_cards
+    assert label_cards.money(None) == "—"
+    assert label_cards.money(float("nan")) == "—"
+    assert label_cards.fmt(None) == "—"
+    assert label_cards.fmt(float("nan")) == "—"
+    assert label_cards.fmt("") == "—"
+    assert label_cards.fmt(2007.0) == "2007"      # не 2007.0

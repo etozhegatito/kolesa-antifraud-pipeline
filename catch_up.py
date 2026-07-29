@@ -19,6 +19,10 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
   появился в логах, обрываем оставшиеся сетевые джобы (circuit breaker
   уровня оркестратора, поверх внутренних предохранителей самих джобов).
 
+РИТМ ЗАПРОСОВ (pacing.py): паузы не плоские — базовая 4-8с, изредка
+  затяжная «отвлёкся», каждые 15 запросов длинный перерыв 30-90с. Это
+  politeness (запросов в час МЕНЬШЕ, чем было), а не маскировка бота.
+
 СУТОЧНЫЙ БЮДЖЕТ ЗАПРОСОВ НА ХОСТ (главный анти-бан-рычаг):
   Бан ловится по ОБЪЁМУ запросов с одного IP за сутки, а не по паузе
   между ними (паузы 4-8с уже внутри джобов). Поэтому поверх всего —
@@ -56,6 +60,14 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
                                          УЖЕ обогащённых строк — целится в незапол-
                                          ненные, заполненные пропускает, новые
                                          объявления не обогащает; тоже с --until-done)
+        python catch_up.py --run --backfill --budget 300
+                                        (СКОЛЬКО СПАРСИТЬ: потолок запросов к
+                                         kolesa на эти сутки. Зоны риска печатаются
+                                         при запуске без --run; коротко:
+                                         ≤100 спокойно, ≤200 безопасно (дефолт),
+                                         ≤270 риск, >270 высокий риск — на ~270
+                                         домашний IP уже ложился 2026-07-23.
+                                         Альтернатива: env KOLESA_BUDGET=300)
 """
 
 import pathlib as _p
@@ -66,6 +78,7 @@ if _p.Path(__file__).name != _expected:
 
 import glob
 import json
+import os
 import subprocess
 import sys
 import time
@@ -73,6 +86,7 @@ from datetime import date
 
 import pandas as pd
 
+import pacing
 from db import get_engine
 
 LINE = "─" * 64
@@ -85,8 +99,84 @@ LINE = "─" * 64
 # kolesa НЕ учитывает, а они бьют по тому же IP. В дни добора: run_all --light
 # и не стакать всё разом. При budget 200 обычный --run делает ~одну порцию
 # (по 20 на джоб); точечный добор avgPrice/бейджа — --backfill (порции по 20).
-DAILY_BUDGET = {"kolesa": 200, "cdn": 1200}
+# Дефолт kolesa=200 — БЕЗОПАСНЫЙ потолок для домашнего IP (его и банили).
+# Бюджет НАСТРАИВАЕМЫЙ, приоритет: --budget N  >  env KOLESA_BUDGET  >  200.
+# Зоны риска и рекомендации — в RISK_ZONES/risk_zone() ниже.
+# Реактивная защита (детект 429 + внутренние предохранители джобов) работает
+# независимо от этого числа: даже с огромным бюджетом цепочка оборвётся, если
+# сайт начнёт лимитировать.
+DEFAULT_KOLESA_BUDGET = 200
+DAILY_BUDGET = {"kolesa": int(os.environ.get("KOLESA_BUDGET",
+                                             DEFAULT_KOLESA_BUDGET)),
+                "cdn": 1200}
 BUDGET_FILE  = "logs/.catch_up_budget.json"
+
+# ─── Зоны риска по числу запросов к kolesa за сутки с ОДНОГО IP ──────────────
+# Границы — не из статей, а из собственного опыта (правило проекта: калибруй
+# на своих данных). Единственный жёсткий факт: 2026-07-23 домашний IP словил
+# временный бан на ~270 запросах за сутки. Всё, что ниже 200, гонялось
+# многократно без последствий. Отсюда зоны:
+#   (порог_включительно, метка, пояснение)
+RISK_ZONES = [
+    (100,   "спокойно",
+     "многократно проверено на этом проекте, последствий не было"),
+    (200,   "безопасно",
+     "рабочая зона (дефолт 200); банов на ней не наблюдали"),
+    (270,   "риск",
+     "подходит к зафиксированному бану: 2026-07-23 IP лёг на ~270"),
+    (10**9, "высокий риск",
+     "выше уже случившегося бана — только с динамического IP и осознанно"),
+]
+
+
+def risk_zone(n: int):
+    """(метка, пояснение) для суточного объёма n запросов к kolesa."""
+    for limit, label, note in RISK_ZONES:
+        if n <= limit:
+            return label, note
+    return RISK_ZONES[-1][1], RISK_ZONES[-1][2]
+
+
+def eta_minutes(n: int, lo: float = 4.0, hi: float = 8.0) -> float:
+    """Честная оценка времени на n запросов: пауза по факту (с хвостом и
+    перерывами из pacing) + ~3с на сам запрос. Чтобы «сколько спарсить»
+    сразу переводилось в «сколько это займёт»."""
+    return n * (pacing.mean_pause(lo, hi) + 3.0) / 60
+
+
+def parse_budget(argv) -> int | None:
+    """--budget N | --budget=N → N (None, если флага нет). Валидирует."""
+    for i, a in enumerate(argv):
+        raw = None
+        if a == "--budget" and i + 1 < len(argv):
+            raw = argv[i + 1]
+        elif a.startswith("--budget="):
+            raw = a.split("=", 1)[1]
+        if raw is not None:
+            try:
+                n = int(raw)
+            except ValueError:
+                raise SystemExit(f"--budget: нужно целое число, получено {raw!r}")
+            if n < 1:
+                raise SystemExit("--budget: должно быть >= 1")
+            return n
+    return None
+
+
+def print_risk_help(current: int):
+    """Табличка «сколько запросов = насколько рискованно» + как задать."""
+    print("\nСколько запросов к kolesa за сутки (--budget N):")
+    prev = 0
+    for limit, label, note in RISK_ZONES:
+        rng = f"{prev+1}–{limit}" if limit < 10**8 else f"{prev+1}+"
+        print(f"  {rng:<10} {label:<14} — {note}")
+        prev = limit
+    label, _ = risk_zone(current)
+    print(f"\nСейчас потолок: {current} ({label}); "
+          f"на весь объём ≈{eta_minutes(current):.0f} мин.")
+    print("Задать: python catch_up.py --run --backfill --budget 300")
+    print("Помни: бюджет видит только catch_up — run_all/parser и твой ручной "
+          "браузинг kolesa бьют по тому же IP, но здесь не считаются.")
 
 # Верхняя оценка запросов за ОДНУ порцию джоба (= его MAX_PER_RUN). Держим
 # копией здесь, чтобы не импортировать джобы (у них при импорте открываются
@@ -367,13 +457,22 @@ def main():
     backfill_only = "--backfill" in sys.argv     # уже некуда: только avgPrice+бейдж
     values = "--values" in sys.argv and not backfill_only   # backfill приоритетнее
 
+    # Бюджет настраиваемый: --budget N важнее env KOLESA_BUDGET важнее дефолта.
+    cli_budget = parse_budget(sys.argv)
+    if cli_budget is not None:
+        DAILY_BUDGET["kolesa"] = cli_budget
+
     g = compute_gaps()
     report(g, "ПРОБЕЛЫ СЕЙЧАС (что можно добрать)")
 
     used = load_budget_used()
+    label, note = risk_zone(DAILY_BUDGET["kolesa"])
     print(f"Дневной бюджет запросов (израсходовано сегодня): "
-          f"kolesa {used['kolesa']}/{DAILY_BUDGET['kolesa']}, "
+          f"kolesa {used['kolesa']}/{DAILY_BUDGET['kolesa']} [{label}], "
           f"CDN {used['cdn']}/{DAILY_BUDGET['cdn']}")
+    if label in ("риск", "высокий риск"):
+        print(f"  ⚠ {label}: {note}")
+    print_risk_help(DAILY_BUDGET["kolesa"])
 
     # набор джобов и «нечего делать» — по выбранному фокусу
     if backfill_only:
@@ -391,6 +490,9 @@ def main():
         print(f"\nРежим --backfill: добираю ТОЛЬКО avgPrice+бейдж у обогащённых "
               f"({g['backfill']} из {g['enriched_total']}), заполненные пропускаю.")
         print("enrich (новые), статусы и фото не трогаю.")
+        doable = min(g["backfill"], max(0, DAILY_BUDGET["kolesa"] - used["kolesa"]))
+        print(f"Влезает в остаток бюджета сегодня: {doable} "
+              f"из {g['backfill']} (≈{eta_minutes(doable):.0f} мин).")
     elif values:
         print("\nРежим --values: обогащение + avgPrice/бейдж (enrich + backfill),")
         print("без статусов и фото — быстрая чистка подозрительных под разметку.")
@@ -400,7 +502,8 @@ def main():
         print("\nОдин проход по всем джобам в пределах бюджета. Фокус: --values / --backfill.")
 
     flags = (" --until-done" if until_done else "") \
-        + (" --backfill" if backfill_only else (" --values" if values else ""))
+        + (" --backfill" if backfill_only else (" --values" if values else "")) \
+        + (f" --budget {cli_budget}" if cli_budget is not None else "")
     if "--run" in sys.argv:
         run_gapped_jobs(until_done, kolesa_jobs, do_cdn)
         return
