@@ -923,3 +923,41 @@ def test_label_cards_money_and_fmt_handle_missing():
     assert label_cards.fmt(float("nan")) == "—"
     assert label_cards.fmt("") == "—"
     assert label_cards.fmt(2007.0) == "2007"      # не 2007.0
+
+
+def test_label_cards_money_reads_naturally():
+    """Миллионы — только от миллиона: «0.24М ₸» для 240 000 читается хуже,
+    а дешёвых объявлений среди подозрительных больше всего."""
+    import label_cards as lc
+    assert lc.money(240000) == "240 000 ₸"
+    assert lc.money(95000) == "95 000 ₸"
+    assert lc.money(1_000_000) == "1М ₸"
+    assert lc.money(4_900_000) == "4.9М ₸"
+    assert lc.money(12_000_000) == "12М ₸"
+
+
+def test_label_cards_price_bands_are_monotonic():
+    """Полосы не должны спорить с процентом (был баг: «60% от среднего —
+    цена в норме»). Чем дешевле относительно рынка, тем «ниже» ярлык."""
+    import label_cards as lc
+    labels = [lab for _, lab in lc.PRICE_BANDS]
+    seen = [lc.price_band(r) for r in (0.2, 0.59, 0.61, 0.84, 0.9, 1.2, 1.5, 9.0)]
+    idx = [labels.index(s) for s in seen]
+    assert idx == sorted(idx)
+    assert lc.price_band(0.59) == "сильно дешевле рынка"
+    assert lc.price_band(1.0) == "в пределах среднего"
+    # границы включаются в верхнюю полосу, а не выпадают
+    assert lc.price_band(0.60) == "заметно ниже среднего"
+    assert lc.price_band(1.40).startswith("существенно выше")
+
+
+def test_label_cards_gallery_and_keyboard_present():
+    """Ключевая эргономика: крупное фото + миниатюры + лайтбокс + шорткаты.
+    Раньше были только 190px-миниатюры, по которым состояние не оценить."""
+    from pathlib import Path
+    src = Path("label_cards.py").read_text(encoding="utf-8")
+    for token in ['class="hero"', 'class="thumb', 'id="box"', "openBox",
+                  "setVerdict", "focusCard"]:
+        assert token in src, token
+    # шаблон должен быть СЫРОЙ строкой, иначе \n в JS сломается
+    assert 'TEMPLATE = r"""' in src
