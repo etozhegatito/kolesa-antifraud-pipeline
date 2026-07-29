@@ -961,3 +961,154 @@ def test_label_cards_gallery_and_keyboard_present():
         assert token in src, token
     # шаблон должен быть СЫРОЙ строкой, иначе \n в JS сломается
     assert 'TEMPLATE = r"""' in src
+
+
+def test_catch_up_budget_charges_to_calendar_day(tmp_path, monkeypatch):
+    """Расход списывается на текущие сутки, а не на день старта прогона.
+    Реальный случай 2026-07-30: --until-done пересёк полночь, и 400
+    вчерашних запросов записались сегодняшним числом, съев новую квоту."""
+    import catch_up
+    f = tmp_path / "budget.json"
+    monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
+    assert catch_up.charge_budget("kolesa", 20) == {"kolesa": 20, "cdn": 0}
+    assert catch_up.charge_budget("kolesa", 20) == {"kolesa": 40, "cdn": 0}
+    assert catch_up.charge_budget("cdn", 300)["cdn"] == 300
+    assert catch_up.load_budget_used() == {"kolesa": 40, "cdn": 300}
+    # вчерашняя запись не влияет на сегодняшний расход
+    import json
+    days = json.loads(f.read_text(encoding="utf-8"))["days"]
+    days["2000-01-01"] = {"kolesa": 999, "cdn": 999}
+    f.write_text(json.dumps({"days": days}), encoding="utf-8")
+    assert catch_up.load_budget_used() == {"kolesa": 40, "cdn": 300}
+
+
+def test_catch_up_budget_file_reads_old_format(tmp_path, monkeypatch):
+    """Файл прежнего формата не должен терять сегодняшний расход при
+    обновлении кода — иначе квота молча удвоится."""
+    import catch_up
+    from datetime import date
+    f = tmp_path / "budget.json"
+    monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
+    f.write_text('{"date":"%s","kolesa":180,"cdn":7}' % date.today().isoformat(),
+                 encoding="utf-8")
+    assert catch_up.load_budget_used() == {"kolesa": 180, "cdn": 7}
+    assert catch_up.charge_budget("kolesa", 20)["kolesa"] == 200
+
+
+def test_catch_up_budget_file_keeps_history_bounded(tmp_path, monkeypatch):
+    import catch_up, json
+    f = tmp_path / "budget.json"
+    monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
+    days = {f"2026-01-{d:02d}": {"kolesa": 1, "cdn": 0} for d in range(1, 21)}
+    f.write_text(json.dumps({"days": days}), encoding="utf-8")
+    catch_up.charge_budget("kolesa", 1)
+    kept = json.loads(f.read_text(encoding="utf-8"))["days"]
+    assert len(kept) <= catch_up.BUDGET_KEEP_DAYS
+
+
+def test_catch_up_per_run_cap_blocks_midnight_burst():
+    """Сутки честно обнуляются в полночь, поэтому нужен второй потолок — на
+    сам запуск. Иначе прогон, начатый в 23:50, выдал бы двойную квоту
+    всплеском за двадцать минут, а банят именно за всплеск объёма."""
+    import catch_up
+    B = catch_up.DAILY_BUDGET["kolesa"]
+    fresh_day = {"kolesa": 0, "cdn": 0}          # после полуночи расход суток 0
+    spent_run = {"kolesa": B, "cdn": 0}          # но прогон уже выбрал квоту
+    assert not catch_up.budget_allows("kolesa", "enrich", 10**6,
+                                     fresh_day, spent_run)
+    # без учёта прогона (обычный одиночный запуск) — разрешено
+    assert catch_up.budget_allows("kolesa", "enrich", 10**6, fresh_day)
+    assert catch_up.budget_allows("kolesa", "enrich", 10**6, fresh_day,
+                                 {"kolesa": 0, "cdn": 0})
+
+
+# ─── Сентинелы avgPrice=-1 и бейдж="-" не должны считаться значениями ────────
+
+def test_avgprice_sentinel_never_acts_as_price():
+    """-1 в kolesa_avg_price = «у модели нет эталона», НЕ цена. Кросс-чек
+    обязан его игнорировать: иначе -1 сравнивалось бы с ценой объявления и
+    снимало флаг у всех подряд (price >= 0.80 * -1 верно всегда)."""
+    import numpy as np
+    import pandas as pd
+    from clean import exculpate
+    # exculpate() читает весь набор колонок clean-слоя; наполняем нейтрально,
+    # чтобы проверялся ровно один фактор — сентинел.
+    base = dict(stat_reasons="price_anomaly_low", rule_reasons="",
+                info_flags="", suspicion_reasons="", is_suspicious=1,
+                price_tenge=1_000_000, text_full="", condition="",
+                labels="", customs_cleared="Да")
+    df = pd.DataFrame([
+        {**base, "kolesa_avg_price": -1},          # сентинел → флаг остаётся
+        {**base, "kolesa_avg_price": np.nan},      # не обогащено → остаётся
+        {**base, "kolesa_avg_price": 1_100_000},   # реальный эталон → снимается
+        {**base, "kolesa_avg_price": 5_000_000},   # сильно дешевле → остаётся
+    ])
+    out = exculpate(df.copy())
+    assert list(out["stat_reasons"]) == [
+        "price_anomaly_low", "price_anomaly_low", "", "price_anomaly_low"]
+    assert "kolesa_price_ok" in out.loc[2, "info_flags"]
+    assert "kolesa_price_ok" not in out.loc[0, "info_flags"]
+
+
+def test_badge_sentinel_never_exculpates():
+    """Бейдж "-" = «проверено, бейджа нет». Он не должен попадать под
+    «аварийная/не на ходу» и снимать подозрение."""
+    import numpy as np
+    import pandas as pd
+    from clean import exculpate
+    # exculpate() читает весь набор колонок clean-слоя; наполняем нейтрально,
+    # чтобы проверялся ровно один фактор — сентинел.
+    base = dict(stat_reasons="price_anomaly_low", rule_reasons="",
+                info_flags="", suspicion_reasons="", is_suspicious=1,
+                price_tenge=1_000_000, text_full="", condition="",
+                labels="", customs_cleared="Да")
+    df = pd.DataFrame([
+        {**base, "page_status_badge": "-"},
+        {**base, "page_status_badge": np.nan},
+        {**base, "page_status_badge": "Аварийная/Не на ходу"},
+    ])
+    out = exculpate(df.copy())
+    assert list(out["stat_reasons"]) == ["price_anomaly_low", "price_anomaly_low", ""]
+
+
+def test_avgprice_and_badge_stay_out_of_model():
+    """Оценка kolesa — валидатор детектора, а НЕ признак модели цены:
+    иначе модель просто копировала бы kolesa (target leakage)."""
+    from train_price_model import FEATURES
+    assert "kolesa_avg_price" not in FEATURES
+    assert "page_status_badge" not in FEATURES
+
+
+def test_label_cards_hint_ignores_sentinel():
+    """В карточке разметки сентинел не должен показываться как «средняя цена»."""
+    import label_cards as lc
+    assert lc.price_verdict_hint({"kolesa_avg_price": -1,
+                                  "price_tenge": 1_000_000}) == ""
+    assert lc.price_verdict_hint({"kolesa_avg_price": 2_000_000,
+                                  "price_tenge": 1_000_000}) != ""
+
+
+# ─── Airflow DAG'и: сетевой не должен запускаться сам ────────────────────────
+
+def test_network_dag_is_paused_and_single_run():
+    """DAG, ходящий на kolesa.kz, обязан создаваться ВЫКЛЮЧЕННЫМ: иначе
+    scheduler запустит его по расписанию и пойдёт скрейпить без присмотра
+    (домашний IP уже ловил блокировку за объём 2026-07-23). Проверка по
+    исходнику: airflow не установлен в основной venv."""
+    from pathlib import Path
+    src = Path("airflow/dags/kolesa_pipeline_dag.py").read_text(encoding="utf-8")
+    assert "is_paused_upon_creation=True" in src
+    assert "max_active_runs=1" in src        # два прогона = двойная частота
+    assert "catchup=False" in src            # иначе досчитает все пропущенные дни
+
+
+def test_offline_dag_has_no_network_jobs():
+    """Офлайн-DAG — безопасный способ проверить Airflow. Если в него заедет
+    сетевой джоб, «проверочный» запуск начнёт тратить лимит запросов."""
+    from pathlib import Path
+    src = Path("airflow/dags/kolesa_offline_dag.py").read_text(encoding="utf-8")
+    for net_job in ["parser.py", "enrich.py", "check_status.py",
+                    "photo_dedup.py", "backfill_avgprice.py", "catch_up.py"]:
+        assert net_job not in src, f"{net_job} — сетевой, ему не место в офлайн-DAG"
+    assert "schedule=None" in src                    # сам не стартует
+    assert "is_paused_upon_creation=False" in src    # но ручной запуск исполнится

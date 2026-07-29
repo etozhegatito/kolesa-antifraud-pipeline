@@ -192,22 +192,64 @@ STATUS_STALE_DAYS   = 2     # пропал из листинга дольше �
 STATUS_RECHECK_DAYS = 7     # проверяли напрямую позже → не считаем пробелом
 
 
-def load_budget_used() -> dict:
-    """Сколько запросов на хост уже потрачено СЕГОДНЯ (файл-счётчик с датой;
-    другой день → нули). Битый/отсутствующий файл трактуем как «ещё ноль»."""
+# Расход хранится ПО КАЛЕНДАРНЫМ ДНЯМ: {"days": {"2026-07-29": {...}, ...}}.
+# Раньше в файле был один день, и прогон --until-done, пересёкший полночь,
+# записывал вчерашние запросы датой сегодня — сегодняшняя квота оказывалась
+# съеденной ещё до начала работы (реальный случай 2026-07-30, 400 запросов).
+BUDGET_KEEP_DAYS = 7        # история за неделю, чтобы файл не рос бесконечно
+
+
+def _read_days() -> dict:
+    """Расход по дням из файла; старый однодневный формат читается тоже."""
     try:
         d = json.loads(_p.Path(BUDGET_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        d = {}
-    if d.get("date") != date.today().isoformat():
-        return {"kolesa": 0, "cdn": 0}
-    return {"kolesa": int(d.get("kolesa", 0)), "cdn": int(d.get("cdn", 0))}
+        return {}
+    if isinstance(d.get("days"), dict):
+        return d["days"]
+    if d.get("date"):                      # формат до 2026-07-30
+        return {d["date"]: {"kolesa": int(d.get("kolesa", 0)),
+                            "cdn": int(d.get("cdn", 0))}}
+    return {}
+
+
+def _write_days(days: dict):
+    for old in sorted(days)[:-BUDGET_KEEP_DAYS]:
+        days.pop(old)
+    _p.Path(BUDGET_FILE).write_text(
+        json.dumps({"days": days}, sort_keys=True), encoding="utf-8")
+
+
+def load_budget_used() -> dict:
+    """Сколько запросов на хост уже потрачено СЕГОДНЯ. Другой день или
+    битый/отсутствующий файл → нули (не падаем)."""
+    today = _read_days().get(date.today().isoformat(), {})
+    return {"kolesa": int(today.get("kolesa", 0)),
+            "cdn": int(today.get("cdn", 0))}
 
 
 def save_budget_used(used: dict):
-    _p.Path(BUDGET_FILE).write_text(json.dumps(
-        {"date": date.today().isoformat(),
-         "kolesa": used["kolesa"], "cdn": used["cdn"]}), encoding="utf-8")
+    """Записать расход как сегодняшний (перезапись, не прибавление)."""
+    days = _read_days()
+    days[date.today().isoformat()] = {"kolesa": int(used["kolesa"]),
+                                      "cdn": int(used["cdn"])}
+    _write_days(days)
+
+
+def charge_budget(host: str, cost: int) -> dict:
+    """Списать cost запросов хоста на ТЕКУЩИЙ календарный день и вернуть
+    расход за сегодня.
+
+    Важно, что день берётся в момент списания, а не в момент старта прогона:
+    иначе долгий --until-done, начавшийся вечером, приписывал бы всё
+    сегодняшнему числу и после полуночи блокировал новый день.
+    """
+    days = _read_days()
+    key = date.today().isoformat()
+    cur = days.setdefault(key, {"kolesa": 0, "cdn": 0})
+    cur[host] = int(cur.get(host, 0)) + int(cost)
+    _write_days(days)
+    return {"kolesa": int(cur.get("kolesa", 0)), "cdn": int(cur.get("cdn", 0))}
 
 
 def compute_gaps() -> dict:
@@ -329,16 +371,28 @@ def next_action(gap_before: int, gap_after: int, rc: int, saw_new_429: bool) -> 
     return "continue"
 
 
-def budget_allows(host: str, key: str, gap_before: int, used: dict) -> bool:
-    """Влезает ли ЕЩЁ ОДНА порция джоба в дневной бюджет хоста. Оценка
-    стоимости порции = min(MAX_PER_RUN, оставшийся пробел): для почти
-    добитого джоба это его реальные несколько запросов, а не полный
-    MAX_PER_RUN — иначе near-done джоб голодал бы у края квоты."""
+def budget_allows(host: str, key: str, gap_before: int, used: dict,
+                  run_spent: dict | None = None) -> bool:
+    """Влезает ли ЕЩЁ ОДНА порция джоба в бюджет хоста. Оценка стоимости
+    порции = min(MAX_PER_RUN, оставшийся пробел): для почти добитого джоба
+    это его реальные несколько запросов, а не полный MAX_PER_RUN — иначе
+    near-done джоб голодал бы у края квоты.
+
+    Проверяются ДВА потолка, оба равны DAILY_BUDGET:
+      used      — расход за текущие календарные сутки;
+      run_spent — расход этого запуска.
+    Второй нужен из-за полуночи: расход суток честно обнуляется в 00:00, и
+    без него прогон, начатый в 23:50, мог бы выдать двойную квоту всплеском
+    за двадцать минут — а банят именно за всплеск объёма.
+    """
     cost = min(CHUNK_MAX[key], gap_before)
-    return used[host] + cost <= DAILY_BUDGET[host]
+    if used[host] + cost > DAILY_BUDGET[host]:
+        return False
+    return run_spent is None or run_spent[host] + cost <= DAILY_BUDGET[host]
 
 
-def run_one_chunk(name: str, script: str, key: str, host: str, used: dict) -> str:
+def run_one_chunk(name: str, script: str, key: str, host: str, used: dict,
+                  run_spent: dict | None = None) -> str:
     """Одна порция джоба с учётом дневного бюджета ХОСТА. Возвращает исход:
       done         — пробелов нет;
       budget       — не влезает в остаток суточной квоты хоста (стоп до завтра);
@@ -350,7 +404,7 @@ def run_one_chunk(name: str, script: str, key: str, host: str, used: dict) -> st
     gap_before = compute_gaps()[key]
     if gap_before == 0:
         return "done"
-    if not budget_allows(host, key, gap_before, used):
+    if not budget_allows(host, key, gap_before, used, run_spent):
         return "budget"
 
     cost = min(CHUNK_MAX[key], gap_before)   # верхняя оценка запросов порции
@@ -360,8 +414,12 @@ def run_one_chunk(name: str, script: str, key: str, host: str, used: dict) -> st
     rc = run(script)
     # Списываем сразу после запуска (консервативно: даже если внутри был
     # 429/сбой и реальных запросов меньше — бюджет только НЕ пробьём).
-    used[host] += cost
-    save_budget_used(used)
+    # Списание идёт на текущие сутки, поэтому used переписывается ответом
+    # charge_budget, а не увеличивается вслепую: после полуночи это уже
+    # расход НОВОГО дня.
+    used.update(charge_budget(host, cost))
+    if run_spent is not None:
+        run_spent[host] += cost
 
     saw_429 = count_429() > before_429
     gap_after = compute_gaps()[key]
@@ -371,7 +429,8 @@ def run_one_chunk(name: str, script: str, key: str, host: str, used: dict) -> st
     return "progress" if action == "continue" else action
 
 
-def drain_host(jobs, host: str, used: dict, until_done: bool) -> bool:
+def drain_host(jobs, host: str, used: dict, until_done: bool,
+               run_spent: dict | None = None) -> bool:
     """Гоняет джобы ОДНОГО хоста, деля общий дневной бюджет host.
       until_done=False: один проход — по одной порции на джоб.
       until_done=True: round-robin порциями, пока есть прогресс и бюджет
@@ -387,7 +446,7 @@ def drain_host(jobs, host: str, used: dict, until_done: bool) -> bool:
         for name, script, key in jobs:
             if key in blocked:
                 continue
-            outcome = run_one_chunk(name, script, key, host, used)
+            outcome = run_one_chunk(name, script, key, host, used, run_spent)
             if outcome in ("rate_limited", "breaker"):
                 print(f"\n⚠ {name}: {outcome} — прерываю джобы хоста «{host}» "
                       "(один IP, бережём).")
@@ -432,12 +491,13 @@ def run_gapped_jobs(until_done: bool = False, kolesa_jobs=None, do_cdn: bool = T
     Хосты идут по очереди (kolesa → CDN), у каждого свой бюджет. 429/
     предохранитель на хосте прерывает только ЕГО цепочку."""
     used = load_budget_used()
+    run_spent = {"kolesa": 0, "cdn": 0}   # потолок на сам запуск, см. budget_allows
     t0 = time.time()
 
     kolesa_jobs = KOLESA if kolesa_jobs is None else kolesa_jobs
-    kolesa_aborted = drain_host(kolesa_jobs, "kolesa", used, until_done)
+    kolesa_aborted = drain_host(kolesa_jobs, "kolesa", used, until_done, run_spent)
     if do_cdn:
-        drain_host(CDN, "cdn", used, until_done)
+        drain_host(CDN, "cdn", used, until_done, run_spent)
     if kolesa_aborted:
         print("\n(kolesa прерван по сигналу сайта; CDN — отдельный хост, "
               "его добор это не затрагивает.)")

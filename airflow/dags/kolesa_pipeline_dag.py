@@ -26,10 +26,17 @@ default_args = {
 
 with DAG(
     dag_id="kolesa_antifraud_pipeline",
-    description="Ежедневный сбор kolesa.kz + антифрод-детекция (= run_all.py)",
-    schedule_interval="0 9 * * *",
+    description="Сбор kolesa.kz + антифрод-детекция (= run_all.py)",
+    schedule="0 9 * * *",
     start_date=datetime(2026, 7, 19),
     catchup=False,          # не досчитывать пропущенные дни при первом деплое
+    # ВАЖНО: DAG создаётся ВЫКЛЮЧЕННЫМ. Расписание указано как заготовка, но
+    # пока запуск только ручной («Trigger DAG» в UI) — сетевые таски ходят на
+    # kolesa.kz, и незамеченный автозапуск в 09:00 означал бы скрейпинг без
+    # присмотра. Домашний IP уже ловил блокировку 2026-07-23 именно за объём.
+    # Включать расписание — осознанно, тумблером в UI.
+    is_paused_upon_creation=True,
+    max_active_runs=1,      # два прогона разом удвоили бы частоту запросов
     default_args=default_args,
     tags=["kolesa", "antifraud", "scraping"],
 ) as dag:
