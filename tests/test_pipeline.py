@@ -1113,15 +1113,50 @@ def test_network_dag_is_paused_and_single_run():
 
 
 def test_offline_dag_has_no_network_jobs():
-    """Офлайн-DAG — безопасный способ проверить Airflow. Если в него заедет
-    сетевой джоб, «проверочный» запуск начнёт тратить лимит запросов."""
+    """Офлайн-DAG безопасно запускать в любой момент. Если в него заедет
+    сетевой модуль, «безобидный» пересчёт начнёт тратить суточный лимит."""
     from pathlib import Path
     src = Path("airflow/dags/kolesa_offline_dag.py").read_text(encoding="utf-8")
-    for net_job in ["kz/collect/parser.py", "kz/collect/enrich.py", "kz/collect/check_status.py",
-                    "kz/collect/photo_dedup.py", "kz/collect/backfill_avgprice.py", "kz/ops/catch_up.py"]:
-        assert net_job not in src, f"{net_job} — сетевой, ему не место в офлайн-DAG"
+    for net in ["kz.collect.parser", "kz.collect.enrich", "kz.collect.check_status",
+                "kz.collect.photo_dedup", "kz.collect.backfill_avgprice",
+                "kz.ops.catch_up"]:
+        assert net not in src, f"{net} — сетевой, ему не место в офлайн-DAG"
     assert "schedule=None" in src                    # сам не стартует
     assert "is_paused_upon_creation=False" in src    # но ручной запуск исполнится
+
+
+def test_offline_dag_covers_whole_ml_chain():
+    """DAG и оркестратор не должны разъезжаться: если в run_all появился шаг,
+    а в DAG его нет, Airflow-прогон молча посчитает не всё."""
+    from pathlib import Path
+    from kz.ops.run_all import ML_CHAIN, OFFLINE_CHAIN
+    src = Path("airflow/dags/kolesa_offline_dag.py").read_text(encoding="utf-8")
+    for _, cmd in ML_CHAIN + OFFLINE_CHAIN:
+        assert cmd[-1] in src, f"{cmd[-1]} есть в run_all, но нет в офлайн-DAG"
+
+
+def test_offline_dag_dependencies_respect_artifacts():
+    """Граф DAG'а обязан уважать зависимости по артефактам: графики читают
+    модель цены, отчёт — модель И ценовой пол. Иначе таск упадёт в проде на
+    отсутствующем файле, хотя в UI выглядел независимым."""
+    from pathlib import Path
+    src = Path("airflow/dags/kolesa_offline_dag.py").read_text(encoding="utf-8")
+    assert "clean >> train >> dashboard" in src
+    assert "train >> residual >> report" in src
+    assert "clean >> explore >> cards" in src
+
+
+def test_collect_dag_delegates_budget_to_catch_up():
+    """Сетевой добор должен идти ОДНИМ таском через catch_up, а не отдельными
+    тасками на джоб: иначе Airflow запустил бы их параллельно, и суточный
+    лимит на хост перестал бы соблюдаться — все стучатся в kolesa с одного IP."""
+    from pathlib import Path
+    src = Path("airflow/dags/kolesa_pipeline_dag.py").read_text(encoding="utf-8")
+    assert "kz.ops.catch_up" in src
+    for direct in ["kz.collect.enrich", "kz.collect.check_status",
+                   "kz.collect.photo_dedup", "kz.collect.backfill_avgprice"]:
+        assert direct not in src, (
+            f"{direct} вызван напрямую — обойдёт суточный лимит catch_up")
 
 
 # ─── label_cards: сохранение вердиктов в журнал ──────────────────────────────
@@ -1381,3 +1416,63 @@ def test_dag_commands_use_package_modules():
             if f"python {mod}.py" in text:
                 bad.append(f"{dag.name}: python {mod}.py")
     assert not bad, "DAG ссылается на плоские модули:\n" + "\n".join(bad)
+
+
+def test_learning_curve_subsample_keeps_groups_whole():
+    """Подвыборка для кривой обучения берётся ЦЕЛЫМИ группами дублей: иначе
+    перезалив одной машины попал бы и в train, и в test, и кривая
+    завысила бы качество на малых долях — то есть соврала бы именно там,
+    где мы решаем, стоит ли собирать ещё данные."""
+    import pandas as pd
+    from kz.ml.learning_curve import subsample_by_groups
+    df = pd.DataFrame({"x": range(100)})
+    groups = pd.Series([f"g{i//4}" for i in range(100)])   # по 4 строки в группе
+    part, g = subsample_by_groups(df, groups, 0.5, seed=1)
+    # каждая попавшая группа представлена ПОЛНОСТЬЮ
+    for name, size in g.value_counts().items():
+        assert size == (groups == name).sum(), name
+    assert 0 < len(part) < len(df)
+    whole, gw = subsample_by_groups(df, groups, 1.0)
+    assert len(whole) == len(df)
+
+
+# ─── Оркестратор: порядок шагов задан зависимостями по артефактам ────────────
+
+def test_ml_chain_order_respects_artifacts():
+    """Графики и HTML-отчёт читают СОХРАНЁННЫЕ артефакты, поэтому обучение и
+    калибровка пола обязаны идти раньше, а отчёт — после обоих. Переставь
+    шаги местами, и цепочка упадёт на FileNotFoundError уже в проде."""
+    from kz.ops.run_all import ML_CHAIN
+    order = [cmd[-1] for _, cmd in ML_CHAIN]        # имена модулей по порядку
+    i = {m: n for n, m in enumerate(order)}
+    assert i["kz.ml.train_price_model"] < i["kz.report.ml_dashboard"]
+    assert i["kz.ml.train_price_model"] < i["kz.report.ml_report"]
+    assert i["kz.ml.residual_detector"] < i["kz.report.ml_report"]
+
+
+def test_offline_chain_rebuilds_before_reporting():
+    """clean пересобирает clean_data (в т.ч. подхватывает новые вердикты),
+    очередь строится после него, карточки — последними. Иначе размечать
+    пришлось бы по устаревшему списку."""
+    from kz.ops.run_all import OFFLINE_CHAIN
+    order = [cmd[-1] for _, cmd in OFFLINE_CHAIN]
+    assert order == ["kz.transform.clean", "kz.report.explore",
+                     "kz.report.label_cards"]
+
+
+def test_ml_and_offline_chains_never_touch_network():
+    """--ml и --fast обязаны быть офлайн: пересчёт после разметки не должен
+    тратить суточный лимит запросов к kolesa."""
+    from kz.ops.run_all import ML_CHAIN, OFFLINE_CHAIN
+    net = {"kz.collect.parser", "kz.collect.check_status", "kz.collect.enrich",
+           "kz.collect.photo_dedup", "kz.collect.backfill_avgprice"}
+    for _, cmd in ML_CHAIN + OFFLINE_CHAIN:
+        assert cmd[-1] not in net, cmd[-1]
+
+
+def test_ml_flag_implies_offline_rebuild():
+    """--ml считает по clean_data, поэтому обязан включать пересборку и не
+    обязан ходить в сеть: в коде это выражено как fast = --fast or --ml."""
+    from pathlib import Path
+    src = Path("kz/ops/run_all.py").read_text(encoding="utf-8")
+    assert 'fast  = "--fast" in sys.argv or ml' in src

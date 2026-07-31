@@ -25,14 +25,36 @@ photo_dedup — на CDN картинок (kcdn.kz), это разные хос�
 внутри более длинного enrich). Параллелить два джоба на ОДИН хост
 (например, parser + enrich) — нельзя, это удвоило бы частоту.
 
-Запуск: python run_all.py            (весь пайплайн)
-        python run_all.py --light    (только сбор нового листинга + пересборка
-                                      флагов; per-ad сеть — статусы/обогащение/
-                                      фото — НЕ трогаем, их отдаём бюджетному
-                                      catch_up. Легче и быстрее; во время
-                                      backfill не долбит kolesa мимо бюджета)
-        python run_all.py --fast     (совсем без сети — только пересборка
-                                      clean+EDA из уже собранного raw)
+РЕЖИМЫ — всё, что нужно в обычной работе:
+
+  python -m kz.ops.run_all --collect
+      СБОР ДАННЫХ, единственный безопасный сетевой путь: свежий листинг,
+      затем добор пробелов через catch_up, который считает суточный лимит
+      запросов по хостам и встаёт, когда квота выбрана. В конце —
+      офлайн-пересборка.
+
+  python -m kz.ops.run_all --ml
+      Офлайн-пересборка + переобучение моделей + отчёты + метрики.
+      Это команда «я разметил вердикты, пересчитай всё». Сети не касается.
+
+  python -m kz.ops.run_all --fast
+      Только офлайн-пересборка: clean_data, EDA, карточки разметки.
+      Быстро (секунды), моделей не трогает.
+
+  python -m kz.ops.run_all --light
+      Свежий листинг + пересборка. Per-ad сеть (статусы, обогащение, фото)
+      НЕ трогает — её отдаём бюджетному catch_up, иначе run_all грузил бы
+      kolesa мимо суточного лимита, то есть двойной нагрузкой на один IP.
+
+  python -m kz.ops.run_all
+      Полный цикл, per-ad сеть НАПРЯМУЮ, без сверки с суточным лимитом.
+      Оставлен для полноты; в обычной работе нужен --collect.
+
+Точечный добор только обогащения, когда нужен именно он:
+  python -m kz.ops.catch_up --run --values
+
+В КАЖДОМ режиме в конце идёт офлайн-пересборка (OFFLINE_CHAIN), поэтому
+артефакты никогда не остаются устаревшими относительно raw-слоя.
 """
 
 # ─── Самопроверка файла (защита от путаницы при копировании) ────────────────
@@ -50,12 +72,53 @@ import subprocess
 import sys
 import time
 
-STEP_PARSER  = ("Job 1  · листинг",         [sys.executable, "-m", "kz.collect.parser"])
-STEP_STATUS  = ("Job 1c · статусы",         [sys.executable, "-m", "kz.collect.check_status"])
-STEP_CLEAN   = ("Job 2  · чистка",          [sys.executable, "-m", "kz.transform.clean"])
-STEP_ENRICH  = ("Job 1b · обогащение",      [sys.executable, "-m", "kz.collect.enrich"])
-STEP_PHOTOS  = ("Job 1d · фото-дедуп",      [sys.executable, "-m", "kz.collect.photo_dedup"])
-STEP_EXPLORE = ("Job 3  · EDA/отчёт",       [sys.executable, "-m", "kz.report.explore"])
+def step(name: str, module: str, *args: str):
+    """Шаг = имя для лога плюс команда запуска модуля."""
+    return (name, [sys.executable, "-m", module, *args])
+
+
+# ─── Сетевые шаги (только они ходят в интернет) ──────────────────────────────
+STEP_PARSER  = step("Сбор 1 · листинг",        "kz.collect.parser")
+STEP_STATUS  = step("Сбор 2 · статусы",        "kz.collect.check_status")
+STEP_ENRICH  = step("Сбор 3 · обогащение",     "kz.collect.enrich")
+STEP_PHOTOS  = step("Сбор 4 · фото-дедуп",     "kz.collect.photo_dedup")
+
+# ─── Сбор данных (--collect): единственный БЕЗОПАСНЫЙ сетевой путь ───────────
+# Разница с полным режимом принципиальная. Полный режим гонит статусы,
+# обогащение и фото напрямую, не сверяясь с суточным лимитом запросов —
+# именно такая смесь и положила домашний IP 2026-07-23. Здесь же пробелы
+# добирает catch_up, который считает расход по хостам и встаёт, когда квота
+# выбрана. Поэтому листинг собирается один раз, а всё остальное — порциями
+# под бюджетом.
+COLLECT_CHAIN = [
+    STEP_PARSER,
+    step("Сбор 2 · пробелы под суточным лимитом", "kz.ops.catch_up", "--run"),
+]
+
+# ─── Офлайн-пересборка: выполняется в КАЖДОМ режиме ──────────────────────────
+# Порядок обязателен: clean пересобирает clean_data (в т.ч. подхватывает
+# новые вердикты), explore строит очередь разметки, и только потом карточки —
+# иначе размечать пришлось бы по устаревшему списку.
+STEP_CLEAN   = step("Чистка · clean_data",     "kz.transform.clean")
+OFFLINE_CHAIN = [
+    STEP_CLEAN,
+    step("Отчёт  · EDA и очередь",  "kz.report.explore"),
+    step("Отчёт  · карточки разметки", "kz.report.label_cards"),
+]
+
+# ─── ML-цепочка (--ml) ───────────────────────────────────────────────────────
+# Порядок НЕ произволен, он задан зависимостями по артефактам:
+#   графики читают сохранённую модель цены     → обучение раньше;
+#   HTML-отчёт читает ОБА артефакта             → и модель, и ценовой пол;
+#   метрики антифрода читают clean_data и журнал вердиктов.
+# Проверку этих зависимостей стережёт test_ml_chain_order_respects_artifacts.
+ML_CHAIN = [
+    step("ML 1 · модель цены",       "kz.ml.train_price_model"),
+    step("ML 2 · ценовой пол",       "kz.ml.residual_detector"),
+    step("ML 3 · графики модели",    "kz.report.ml_dashboard"),
+    step("ML 4 · HTML-отчёт",        "kz.report.ml_report"),
+    step("ML 5 · метрики антифрода", "kz.report.evaluate_detector"),
+]
 
 
 def run_step(step) -> None:
@@ -92,23 +155,43 @@ def run_parallel(step_a, step_b) -> None:
 
 def main():
     t0 = time.time()
-    fast  = "--fast" in sys.argv    # совсем без сети (fast «сильнее» light)
-    light = "--light" in sys.argv   # только новый листинг, без per-ad сети
+    ml      = "--ml" in sys.argv        # + переобучение моделей и отчёты
+    collect = "--collect" in sys.argv   # сбор под суточным лимитом
+    # ML считает по clean_data, поэтому пересборка обязательна, а в сеть
+    # ради неё ходить не нужно: --ml подразумевает офлайн-режим.
+    fast  = "--fast" in sys.argv or ml
+    light = "--light" in sys.argv       # только новый листинг, без per-ad сети
 
-    if not fast:
-        run_step(STEP_PARSER)                      # свежий листинг (новьё)
-    if not fast and not light:
-        # Тяжёлые per-ad сетевые джобы. В режиме --light их пропускаем и
-        # отдаём бюджетному catch_up (см. README: иначе run_all грузил бы
-        # kolesa мимо суточного бюджета catch_up — двойная нагрузка на IP).
-        run_step(STEP_STATUS)
-        run_step(STEP_CLEAN)                       # пасс 1: очередь для enrich
-        run_parallel(STEP_ENRICH, STEP_PHOTOS)     # kolesa.kz ∥ kcdn.kz
+    if collect:
+        for s in COLLECT_CHAIN:                    # листинг + пробелы по бюджету
+            run_step(s)
+    else:
+        if not fast:
+            run_step(STEP_PARSER)                  # свежий листинг (новьё)
+        if not fast and not light:
+            # Полный режим: per-ad сеть напрямую, БЕЗ сверки с суточным
+            # лимитом. Оставлен для полноты, но безопасный путь — --collect.
+            print("\n⚠ Полный режим не сверяется с суточным лимитом запросов.\n"
+                  "  Безопаснее: python -m kz.ops.run_all --collect")
+            run_step(STEP_STATUS)
+            run_step(STEP_CLEAN)                   # пасс 1: очередь для enrich
+            run_parallel(STEP_ENRICH, STEP_PHOTOS) # kolesa.kz ∥ kcdn.kz
 
-    run_step(STEP_CLEAN)                           # финальная чистка (пасс 2)
-    run_step(STEP_EXPLORE)
-    mode = "--fast" if fast else ("--light" if light else "полный")
+    for s in OFFLINE_CHAIN:                        # чистка → отчёт → карточки
+        run_step(s)
+    if ml:
+        for s in ML_CHAIN:
+            run_step(s)
+
+    mode = ("--ml" if ml else
+            "--collect" if collect else
+            "--fast" if fast else
+            "--light" if light else "полный")
     print(f"\n✔ Пайплайн ({mode}) завершён за {(time.time()-t0)/60:.1f} мин")
+    if ml:
+        print("  Смотреть: data/eda/ml_report.html, data/eda/ml_dashboard.png")
+    else:
+        print("  Смотреть: data/eda/label_cards.html, data/eda/dashboard.png")
 
 
 if __name__ == "__main__":

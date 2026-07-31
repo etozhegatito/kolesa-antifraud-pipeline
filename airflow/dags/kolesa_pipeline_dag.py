@@ -1,15 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-DAG-версия run_all.py — тот же порядок джобов, что и в
-`FULL` списке run_all.py, один в один. Это demo-слой (портфолио):
-основной способ запуска пайплайна — по-прежнему run_all.py + cron,
-см. README. Здесь просто показано, как та же логика выражается через
-Airflow, если джобов станет много/нужны отдельные retry и backfill
-по каждому шагу.
+Сбор данных — единственный DAG, который ходит в сеть.
 
-PROJECT_DIR примонтирован в контейнер Airflow (см. docker-compose.yaml,
-профиль "airflow") — BashOperator реально исполняет те же .py-файлы,
-ничего не переписано.
+Airflow-версия `run_all --collect`, и порядок здесь тот же по той же причине:
+
+    show_budget ── parser ── catch_up ── clean ── explore ── label_cards
+
+  show_budget    сколько запросов уже потрачено сегодня и где пробелы;
+                 дёшево, офлайн, зато сразу видно, стоит ли вообще идти в сеть;
+  parser         свежий листинг: новые объявления и наблюдения цен;
+  catch_up       добор пробелов (статусы, обогащение, фото) ПОРЦИЯМИ под
+                 суточным лимитом на хост. Он считает расход и встаёт, когда
+                 квота выбрана;
+  дальше         офлайн-пересборка, чтобы собранное сразу попало во флаги.
+
+ПОЧЕМУ ИМЕННО ТАК, А НЕ ОТДЕЛЬНЫМИ ТАСКАМИ НА КАЖДЫЙ СЕТЕВОЙ ДЖОБ.
+Соблазн расписать статусы, обогащение и фото отдельными тасками велик —
+красивее в UI. Но тогда Airflow запускал бы их по своему усмотрению, включая
+параллельно, и суточный лимит перестал бы соблюдаться: все три стучатся в
+kolesa.kz с одного IP. Именно такая смесь и положила домашний IP 2026-07-23.
+Поэтому весь добор отдан catch_up — он один знает бюджет и держит джобы
+строго последовательно. Airflow здесь отвечает за расписание и наблюдаемость,
+а не за темп запросов.
+
+DAG создаётся ВЫКЛЮЧЕННЫМ. Расписание оставлено заготовкой: незамеченный
+автозапуск означал бы скрейпинг без присмотра. Включать — осознанно,
+тумблером в UI.
 """
 
 from datetime import datetime
@@ -19,44 +35,32 @@ from airflow.operators.bash import BashOperator
 
 PROJECT_DIR = "/opt/project"
 
-default_args = {
-    "owner": "kolesa-antifraud",
-    "retries": 1,
-}
+
+def job(task_id: str, module: str, *args: str) -> BashOperator:
+    extra = (" " + " ".join(args)) if args else ""
+    return BashOperator(
+        task_id=task_id,
+        bash_command=f"cd {PROJECT_DIR} && python -m {module}{extra}",
+    )
+
 
 with DAG(
-    dag_id="kolesa_antifraud_pipeline",
-    description="Сбор kolesa.kz + антифрод-детекция (= run_all.py)",
+    dag_id="kolesa_collect",
+    description="Сбор с kolesa.kz под суточным лимитом запросов",
     schedule="0 9 * * *",
     start_date=datetime(2026, 7, 19),
-    catchup=False,          # не досчитывать пропущенные дни при первом деплое
-    # ВАЖНО: DAG создаётся ВЫКЛЮЧЕННЫМ. Расписание указано как заготовка, но
-    # пока запуск только ручной («Trigger DAG» в UI) — сетевые таски ходят на
-    # kolesa.kz, и незамеченный автозапуск в 09:00 означал бы скрейпинг без
-    # присмотра. Домашний IP уже ловил блокировку 2026-07-23 именно за объём.
-    # Включать расписание — осознанно, тумблером в UI.
+    catchup=False,               # не досчитывать пропущенные дни
+    max_active_runs=1,           # два прогона удвоили бы частоту запросов
+    default_args={"owner": "kolesa-antifraud", "retries": 1},
+    tags=["kolesa", "network", "scraping"],
     is_paused_upon_creation=True,
-    max_active_runs=1,      # два прогона разом удвоили бы частоту запросов
-    default_args=default_args,
-    tags=["kolesa", "antifraud", "scraping"],
 ) as dag:
 
-    def job(task_id: str, script: str) -> BashOperator:
-        return BashOperator(
-            task_id=task_id,
-            bash_command=f"cd {PROJECT_DIR} && python {script}",
-        )
+    budget   = job("show_budget",  "kz.ops.pipeline_status")
+    parser   = job("parser",       "kz.collect.parser")
+    catch_up = job("catch_up",     "kz.ops.catch_up", "--run")
+    clean    = job("clean",        "kz.transform.clean")
+    explore  = job("explore",      "kz.report.explore")
+    cards    = job("label_cards",  "kz.report.label_cards")
 
-    # Порядок и состав — точная копия run_all.py, включая параллельную
-    # ветку: enrich (kolesa.kz) и photo_dedup (CDN kcdn.kz) идут
-    # одновременно — разные хосты, вежливость per-host не страдает.
-    t_parser       = job("parser",        "parser.py")
-    t_check_status = job("check_status",  "check_status.py")
-    t_clean_pass1  = job("clean_pass_1",  "clean.py")
-    t_enrich       = job("enrich",        "enrich.py")
-    t_photo_dedup  = job("photo_dedup",   "photo_dedup.py")
-    t_clean_pass2  = job("clean_pass_2",  "clean.py")
-    t_explore      = job("explore",       "explore.py")
-
-    t_parser >> t_check_status >> t_clean_pass1
-    t_clean_pass1 >> [t_enrich, t_photo_dedup] >> t_clean_pass2 >> t_explore
+    budget >> parser >> catch_up >> clean >> explore >> cards
