@@ -38,11 +38,11 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import text
 
-from db import get_engine
+from kz.core.db import get_engine
 # Пороги «пробел статуса» берём из catch_up (а он синхронен с check_status —
 # см. test_catch_up_status_thresholds_match_check_status): единый источник,
 # чтобы пульт, catch_up и сам джоб не разошлись в определении бэклога.
-from catch_up import STATUS_STALE_DAYS, STATUS_RECHECK_DAYS, DAILY_BUDGET
+from kz.ops.catch_up import STATUS_STALE_DAYS, STATUS_RECHECK_DAYS, DAILY_BUDGET
 
 # ETA считаем по СУТОЧНОМУ бюджету хоста (потолок при catch_up --until-done),
 # а не по размеру одной порции — берём из catch_up, чтобы не разъезжалось при
@@ -191,7 +191,7 @@ def main():
 # kolesa.kz, поэтому СТРОГО до enrich, не параллельно!), затем
 # enrich ∥ photo_dedup (kolesa.kz ∥ CDN), затем clean пасс 2 + explore
 # вливают результат в clean_data и отчёт.
-import run_all as _ra
+from kz.ops import run_all as _ra
 
 
 def run_enrichment_jobs():

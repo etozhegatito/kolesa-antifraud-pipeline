@@ -36,9 +36,9 @@ import pandas as pd
 import requests
 from sqlalchemy import text
 
-import pacing
-from db import get_engine
-from enrich import HEADERS, extract_avg_price, extract_status_badge, ENRICHED_CSV
+from kz.core import pacing
+from kz.core.db import get_engine
+from kz.collect.enrich import HEADERS, extract_avg_price, extract_status_badge, ENRICHED_CSV
 
 MAX_PER_RUN           = 20      # мелкая порция (анти-бан, см. catch_up DAILY_BUDGET)
 DELAY_RANGE           = (4.0, 8.0)

@@ -188,15 +188,15 @@ human-in-the-loop разметки.
 
 | Возможность | Состояние сейчас | Где реализовано или запланировано |
 |---|---|---|
-| Оценка цены по характеристикам | работает | `train_price_model.py`, `predict_price.py` |
-| Диапазон «подозрительно дёшево» | работает | `residual_detector.py` |
-| Поиск слов о повреждениях | работает | `damage.py`, `clean.py` |
-| Учёт отрицаний «не бит», «нет гнили» | работает | `damage.py` |
-| Полный текст продавца | частично: покрыт не весь датасет | `enrich.py`, `text_full` |
-| Текстовые ML-признаки цены | эксперимент проведён, в production-модель не вошли | `text_features.py` |
-| Причина исключения текстовых признаков | на текущем покрытии не улучшили CV | комментарии в `train_price_model.py` |
+| Оценка цены по характеристикам | работает | `kz/ml/train_price_model.py`, `kz/ml/predict_price.py` |
+| Диапазон «подозрительно дёшево» | работает | `kz/ml/residual_detector.py` |
+| Поиск слов о повреждениях | работает | `kz/transform/damage.py`, `kz/transform/clean.py` |
+| Учёт отрицаний «не бит», «нет гнили» | работает | `kz/transform/damage.py` |
+| Полный текст продавца | частично: покрыт не весь датасет | `kz/collect/enrich.py`, `text_full` |
+| Текстовые ML-признаки цены | эксперимент проведён, в production-модель не вошли | `kz/transform/text_features.py` |
+| Причина исключения текстовых признаков | на текущем покрытии не улучшили CV | комментарии в `kz/ml/train_price_model.py` |
 | Количество фотографий как признак цены | работает | `photos_count` |
-| Поиск одинаковых/похожих фото | работает | `photo_dedup.py` |
+| Поиск одинаковых/похожих фото | работает | `kz/collect/photo_dedup.py` |
 | Анализ яркости, резкости и разрешения | ещё нет | CV-roadmap |
 | Проверка обязательных ракурсов | ещё нет | CV-roadmap |
 | Поиск видимых вмятин/ржавчины/повреждений | ещё нет | CV-roadmap |
@@ -204,7 +204,7 @@ human-in-the-loop разметки.
 | Совместная модель «таблица + текст + фото» | ещё нет | мультимодальный этап |
 | Автоматические советы, что дописать | ещё нет | seller-assistant этап |
 | Автоматические советы, что переснять | ещё нет | seller-assistant этап |
-| Прогноз времени продажи | есть исследовательский каркас, данных мало | `time_to_sell.py` |
+| Прогноз времени продажи | есть исследовательский каркас, данных мало | `kz/ml/time_to_sell.py` |
 
 Почему текстовые признаки пока не включены в ценовую модель: полный комментарий
 есть только у части объявлений, короткие тексты часто повторяют марку, двигатель
@@ -314,7 +314,7 @@ recall антифрода, поэтому его качество в табли�
 Метрики ниже измерены на срезе от **23 июля 2026 года** (3 871 объявление,
 3 845 строк после очистки) и намеренно не переписываются под новый объём
 данных: цифра без повторного замера была бы выдумкой. Чтобы пересчитать их на
-текущем срезе, запустите `python train_price_model.py`.
+текущем срезе, запустите `python -m kz.ml.train_price_model`.
 
 Данные относятся к Алматы и одному источнику.
 
@@ -379,7 +379,7 @@ train_price_model.py ─► модель справедливой цены
 residual_detector.py ─► калиброванный ценовой пол
 ```
 
-### Шаг 1. `parser.py`: сохранить сырьё
+### Шаг 1. `kz/collect/parser.py`: сохранить сырьё
 
 Сохраняются три разных сущности.
 
@@ -412,7 +412,7 @@ residual_detector.py ─► калиброванный ценовой пол
 long format. Колонки `photo_1`, `photo_2`, ..., `photo_20` были бы неудобны,
 потому что число фотографий у объявлений разное.
 
-### Шаг 2. `check_status.py`: понять жизненный цикл
+### Шаг 2. `kz/collect/check_status.py`: понять жизненный цикл
 
 Объявление может быть:
 
@@ -423,7 +423,7 @@ long format. Колонки `photo_1`, `photo_2`, ..., `photo_20` были бы 
 Статус обновляется отдельно от паспорта. Исторический факт появления машины не
 удаляется только потому, что объявление позже исчезло.
 
-### Шаг 3. `clean.py`: построить воспроизводимый clean-слой
+### Шаг 3. `kz/transform/clean.py`: построить воспроизводимый clean-слой
 
 `clean_data` каждый раз пересобирается из сырья. Наблюдавшиеся исходные значения
 не «исправляются» правилами очистки задним числом. Узкое техническое исключение:
@@ -441,9 +441,9 @@ long format. Колонки `photo_1`, `photo_2`, ..., `photo_20` были бы 
 нашли ошибку → исправили правило clean.py → пересобрали clean_data
 ```
 
-### Шаг 4. `enrich.py` и `photo_dedup.py`: добавить контекст
+### Шаг 4. `kz/collect/enrich.py` и `kz/collect/photo_dedup.py`: добавить контекст
 
-`enrich.py` добавляет поля, которых нет в краткой карточке:
+`kz/collect/enrich.py` добавляет поля, которых нет в краткой карточке:
 
 - растаможку;
 - привод;
@@ -453,16 +453,16 @@ long format. Колонки `photo_1`, `photo_2`, ..., `photo_20` были бы 
 - полный комментарий;
 - структурный бейдж «Аварийная», «Не на ходу» и похожие поля.
 
-`photo_dedup.py` считает perceptual hash изображения и ищет случаи, когда
+`kz/collect/photo_dedup.py` считает perceptual hash изображения и ищет случаи, когда
 похожая фотография используется у разных машин.
 
-### Шаг 5. второй `clean.py`
+### Шаг 5. второй `kz/transform/clean.py`
 
 Первый проход нужен, чтобы понять, какие объявления обогащать первыми. Второй
 проход нужен, чтобы пересчитать правила уже с новым текстом, бейджами и
 фотографиями.
 
-### Шаг 6. `explore.py`
+### Шаг 6. `kz/report/explore.py`
 
 Скрипт:
 
@@ -473,8 +473,8 @@ long format. Колонки `photo_1`, `photo_2`, ..., `photo_20` были бы 
 
 ### Шаг 7. обучение и inference
 
-`train_price_model.py` проверяет модель и сохраняет финальный артефакт.
-`predict_price.py` загружает именно этот артефакт и не обучает скрытую новую
+`kz/ml/train_price_model.py` проверяет модель и сохраняет финальный артефакт.
+`kz/ml/predict_price.py` загружает именно этот артефакт и не обучает скрытую новую
 модель при каждом прогнозе.
 
 ### Как к конвейеру добавятся текст и фотографии
@@ -682,7 +682,7 @@ modified_z > +3.5 → необычно дорого, но не обязател�
 Наивный поиск слова `гнил` ошибочно считает фразу «нет никаких гнилей»
 признанием повреждения.
 
-`damage.py` проверяет небольшое окно слов до и после совпадения:
+`kz/transform/damage.py` проверяет небольшое окно слов до и после совпадения:
 
 ```text
 «кузов гнилой»             → повреждение
@@ -1090,13 +1090,13 @@ market_db_container
 ### Шаг 6. Запустить тесты
 
 ```bash
-python -m pytest test_pipeline.py -q
+python -m pytest tests/ -q
 ```
 
 Ожидаемый результат:
 
 ```text
-70 passed
+`95 passed`
 ```
 
 Эти тесты не доказывают качество модели. Они доказывают, что известные
@@ -1122,17 +1122,17 @@ python -m pytest test_pipeline.py -q
 Без данных можно:
 
 ```bash
-python -m pytest test_pipeline.py -q
+python -m pytest tests/ -q
 ```
 
 Затем изучить:
 
 - этот README;
 - [MODEL_CARD.md](MODEL_CARD.md);
-- `test_pipeline.py`;
-- `train_price_model.py`;
-- `clean.py`;
-- `run_all.py`;
+- `tests/test_pipeline.py`;
+- `kz/ml/train_price_model.py`;
+- `kz/transform/clean.py`;
+- `kz/ops/run_all.py`;
 - SQL-схему `sql/init/01_schema.sql`.
 
 Нельзя воспроизвести опубликованные метрики без обучающего среза. Данные
@@ -1154,13 +1154,13 @@ data/enriched/photo_hashes.csv
 Необязательные файлы можно пропустить. Затем:
 
 ```bash
-python migrate_to_postgres.py
-python clean.py
-python explore.py
-python train_price_model.py
-python residual_detector.py
-python ml_dashboard.py
-python ml_report.py
+python -m kz.ops.migrate_to_postgres
+python -m kz.transform.clean
+python -m kz.report.explore
+python -m kz.ml.train_price_model
+python -m kz.ml.residual_detector
+python -m kz.report.ml_dashboard
+python -m kz.report.ml_report
 ```
 
 Что должно появиться:
@@ -1183,7 +1183,7 @@ data/eda/labeling_queue.csv
 Полный офлайн-пересчёт:
 
 ```bash
-python run_all.py --fast
+python -m kz.ops.run_all --fast
 ```
 
 Он выполняет:
@@ -1195,10 +1195,10 @@ clean.py → explore.py
 После этого модели обучаются отдельно:
 
 ```bash
-python train_price_model.py
-python residual_detector.py
-python ml_dashboard.py
-python ml_report.py
+python -m kz.ml.train_price_model
+python -m kz.ml.residual_detector
+python -m kz.report.ml_dashboard
+python -m kz.report.ml_report
 ```
 
 `--fast` не делает сетевых запросов. Он всё равно требует заполненные raw-таблицы
@@ -1209,7 +1209,7 @@ PostgreSQL.
 Только в этом случае доступны сетевые режимы:
 
 ```bash
-python run_all.py
+python -m kz.ops.run_all
 ```
 
 Порядок:
@@ -1226,20 +1226,20 @@ parser
 Облегчённый режим:
 
 ```bash
-python run_all.py --light
+python -m kz.ops.run_all --light
 ```
 
 Он собирает листинг и выполняет офлайн-пересборку, но пропускает тяжёлые
 per-ad задачи.
 
-`catch_up.py` показывает и дозаполняет пробелы:
+`kz/ops/catch_up.py` показывает и дозаполняет пробелы:
 
 ```bash
-python catch_up.py
-python catch_up.py --run
-python catch_up.py --run --values
-python catch_up.py --run --backfill
-python catch_up.py --run --until-done
+python -m kz.ops.catch_up
+python -m kz.ops.catch_up --run
+python -m kz.ops.catch_up --run --values
+python -m kz.ops.catch_up --run --backfill
+python -m kz.ops.catch_up --run --until-done
 ```
 
 Ограничения частоты и circuit breaker защищают инфраструктуру от случайного
@@ -1248,10 +1248,10 @@ python catch_up.py --run --until-done
 ### Сколько запросов делать за сутки
 
 Главная защита от блокировки — не длина пауз, а суточный **объём** запросов с
-одного IP. Поэтому у `catch_up.py` есть настраиваемый потолок:
+одного IP. Поэтому у `kz/ops/catch_up.py` есть настраиваемый потолок:
 
 ```bash
-python catch_up.py --run --backfill --budget 300
+python -m kz.ops.catch_up --run --backfill --budget 300
 ```
 
 Порядок приоритета: `--budget N`, затем переменная окружения
@@ -1269,13 +1269,13 @@ python catch_up.py --run --backfill --budget 300
 домашний IP получил временную блокировку примерно на 270 запросах за сутки.
 Это то же правило, что и для порогов детектора — калибровать на своих данных.
 
-Важное ограничение: счётчик видит только `catch_up.py`. Запросы `run_all.py`,
-`parser.py` и ручное листание сайта идут с того же IP, но здесь не считаются.
+Важное ограничение: счётчик видит только `kz/ops/catch_up.py`. Запросы `kz/ops/run_all.py`,
+`kz/collect/parser.py` и ручное листание сайта идут с того же IP, но здесь не считаются.
 В дни большого дозаполнения не запускайте всё сразу.
 
 ### Ритм запросов
 
-Все джобы, обращающиеся к kolesa.kz, используют общий модуль `pacing.py`:
+Все джобы, обращающиеся к kolesa.kz, используют общий модуль `kz/core/pacing.py`:
 
 - базовая пауза 4–8 секунд между запросами;
 - изредка затяжная пауза вместо базовой;
@@ -1285,7 +1285,7 @@ python catch_up.py --run --backfill --budget 300
 час становится **меньше**, чем при равномерных паузах. Это снижение нагрузки
 на сайт, а не маскировка: user-agent, отпечаток браузера и IP не подделываются.
 Прогон при этом занимает примерно в полтора раза больше времени, и оценка
-времени в `catch_up.py` учитывает это честно.
+времени в `kz/ops/catch_up.py` учитывает это честно.
 
 ---
 
@@ -1294,13 +1294,13 @@ python catch_up.py --run --backfill --budget 300
 Сначала должен существовать обученный артефакт:
 
 ```bash
-python train_price_model.py
+python -m kz.ml.train_price_model
 ```
 
 Для демонстрации на случайной строке базы:
 
 ```bash
-python predict_price.py
+python -m kz.ml.predict_price
 ```
 
 Для своей машины запустите интерактивный Python:
@@ -1348,7 +1348,7 @@ exit()
 
 ### Что именно размечается
 
-После `explore.py` создаётся:
+После `kz/report/explore.py` создаётся:
 
 ```text
 data/eda/labeling_queue.csv
@@ -1381,8 +1381,8 @@ data/eda/labeling_queue.csv
 ### Рекомендуемый способ: офлайн-карточки
 
 ```bash
-python label_cards.py           # → data/eda/label_cards.html
-python label_cards.py --all     # включить и residual-кандидатов из очереди
+python -m kz.report.label_cards           # → data/eda/label_cards.html
+python -m kz.report.label_cards --all     # включить и residual-кандидатов из очереди
 ```
 
 Откройте получившийся HTML в браузере. На каждое подозрительное объявление в
@@ -1401,7 +1401,7 @@ python label_cards.py --all     # включить и residual-кандидат�
 Всё остальное уже хранится в базе. Поэтому карточка собирается локально.
 
 **Вторая: ручное листание kolesa.kz тратит тот же лимит, что и джобы.**
-Запросы идут с того же IP, но в суточный счётчик `catch_up.py` не попадают.
+Запросы идут с того же IP, но в суточный счётчик `kz/ops/catch_up.py` не попадают.
 Именно смесь автоматических джобов и ручного браузинга привела к временной
 блокировке IP 2026-07-23. Открытие карточек не делает ни одного запроса к
 `kolesa.kz` — грузятся только картинки с CDN. Разметка стала бесплатной с
@@ -1420,9 +1420,9 @@ python label_cards.py --all     # включить и residual-кандидат�
 6. Пересоберите clean-слой:
 
 ```bash
-python clean.py
-python explore.py
-python evaluate_detector.py
+python -m kz.transform.clean
+python -m kz.report.explore
+python -m kz.report.evaluate_detector
 ```
 
 Почему очередь и журнал — разные файлы:
@@ -1435,7 +1435,7 @@ python evaluate_detector.py
 ### Взвешенные метрики
 
 Очередь хранит размер каждого слоя и размер выборки. Когда строки переносятся
-в журнал вместе с этими колонками, `evaluate_detector.py` может рассчитать
+в журнал вместе с этими колонками, `kz/report/evaluate_detector.py` может рассчитать
 population estimate через inverse-probability weights:
 
 ```text
@@ -1452,23 +1452,23 @@ weight = stratum_population / stratum_sample_size
 
 | Команда | Сеть | Что делает | Результат |
 |---|---:|---|---|
-| `python -m pytest test_pipeline.py -q` | нет | регрессионные тесты | `70 passed` |
-| `python pipeline_status.py` | нет | показывает состояние базы | консоль |
-| `python run_all.py --fast` | нет | clean + EDA | `clean_data`, отчёты |
-| `python clean.py` | нет | пересобирает clean-слой | таблица и CSV |
-| `python explore.py` | нет | EDA и очередь разметки | `data/eda/*` |
-| `python train_price_model.py` | нет | CV, baseline, temporal test, fit | `price_model.*` |
-| `python residual_detector.py` | нет | калибрует ценовой пол | `price_floor.*` |
-| `python ml_dashboard.py` | нет | ML-графики | `ml_dashboard.png` |
-| `python ml_report.py` | нет | HTML-отчёт | `ml_report.html` |
-| `python predict_price.py` | нет | пример inference | консоль |
-| `python label_cards.py` | нет | карточки для разметки (фото с CDN) | `data/eda/label_cards.html` |
-| `python evaluate_detector.py` | нет | precision/recall после разметки | консоль |
-| `python time_to_sell.py` | нет | прототип срока продажи | консоль |
-| `python migrate_to_postgres.py` | нет | импорт старых CSV | PostgreSQL |
-| `python run_all.py` | да | полный сетевой конвейер | все слои |
-| `python catch_up.py --run` | да | закрывает сетевые пробелы | raw/enriched |
-| `python catch_up.py --run --backfill --budget N` | да | добор avgPrice и бейджа, N — потолок запросов | `enriched` |
+| `python -m pytest tests/ -q` | нет | регрессионные тесты | `95 passed` |
+| `python -m kz.ops.pipeline_status` | нет | показывает состояние базы | консоль |
+| `python -m kz.ops.run_all --fast` | нет | clean + EDA | `clean_data`, отчёты |
+| `python -m kz.transform.clean` | нет | пересобирает clean-слой | таблица и CSV |
+| `python -m kz.report.explore` | нет | EDA и очередь разметки | `data/eda/*` |
+| `python -m kz.ml.train_price_model` | нет | CV, baseline, temporal test, fit | `price_model.*` |
+| `python -m kz.ml.residual_detector` | нет | калибрует ценовой пол | `price_floor.*` |
+| `python -m kz.report.ml_dashboard` | нет | ML-графики | `ml_dashboard.png` |
+| `python -m kz.report.ml_report` | нет | HTML-отчёт | `ml_report.html` |
+| `python -m kz.ml.predict_price` | нет | пример inference | консоль |
+| `python -m kz.report.label_cards` | нет | карточки для разметки (фото с CDN) | `data/eda/label_cards.html` |
+| `python -m kz.report.evaluate_detector` | нет | precision/recall после разметки | консоль |
+| `python -m kz.ml.time_to_sell` | нет | прототип срока продажи | консоль |
+| `python -m kz.ops.migrate_to_postgres` | нет | импорт старых CSV | PostgreSQL |
+| `python -m kz.ops.run_all` | да | полный сетевой конвейер | все слои |
+| `python -m kz.ops.catch_up --run` | да | закрывает сетевые пробелы | raw/enriched |
+| `python -m kz.ops.catch_up --run --backfill --budget N` | да | добор avgPrice и бейджа, N — потолок запросов | `enriched` |
 
 ---
 
@@ -1539,7 +1539,7 @@ Raw-таблицы ещё не превращены в clean-слой.
 Если база заполнена:
 
 ```bash
-python clean.py
+python -m kz.transform.clean
 ```
 
 Если база пустая, сначала загрузите собственные совместимые данные.
@@ -1549,13 +1549,13 @@ python clean.py
 Решение:
 
 ```bash
-python train_price_model.py
+python -m kz.ml.train_price_model
 ```
 
 Для HTML-антифрод панели также нужен:
 
 ```bash
-python residual_detector.py
+python -m kz.ml.residual_detector
 ```
 
 ### `playwright executable doesn't exist`
@@ -1602,33 +1602,62 @@ Unit-тесты проверяют код, а не бизнес-качество
 
 ## Структура репозитория
 
+Код собран в пакет `kz/`, разбитый по этапам конвейера. Один подпакет —
+один этап, поэтому по названию папки сразу видно, на каком шаге живёт файл.
+
 ```text
-.
-├── parser.py                 # сырой листинг, sightings, фото
-├── check_status.py           # active / archived / deleted
-├── enrich.py                 # дополнительные поля страницы
-├── photo_dedup.py            # perceptual hash фотографий
-├── clean.py                  # правила, статистика, clean_data
-├── damage.py                 # damage-лексикон и отрицания
-├── pacing.py                 # общий вежливый ритм сетевых запросов
-├── explore.py                # EDA, дашборд, очередь разметки
-├── train_price_model.py      # обучение, CV, temporal test, артефакт
-├── residual_detector.py      # калиброванный нижний ценовой квантиль
-├── predict_price.py          # inference сохранённой модели
-├── label_cards.py            # офлайн-карточки для ручной разметки
-├── evaluate_detector.py      # confusion matrix, precision/recall/F1
-├── data_quality.py           # санитария перед ML, Isolation Forest
-├── time_to_sell.py           # прототип срока жизни объявления
-├── run_all.py                # простой оркестратор
-├── catch_up.py               # резюмируемый догоняльщик
-├── pipeline_status.py        # офлайн-пульт состояния
-├── db.py / config.py         # PostgreSQL и конфигурация
-├── sql/init/01_schema.sql    # raw-схема базы
-├── test_pipeline.py          # 70 регрессионных тестов
-├── MODEL_CARD.md             # паспорт модели и ограничения
-├── airflow/                  # демонстрационный DAG, не основной путь
-└── docker-compose.yaml       # PostgreSQL и optional Airflow
+kz/
+├── core/                     # общий фундамент
+│   ├── config.py             #   чтение .env, DATABASE_URL
+│   ├── db.py                 #   тонкий слой Postgres (engine, upsert)
+│   └── pacing.py             #   вежливый ритм сетевых запросов
+├── collect/                  # СБОР: единственные, кто ходит в сеть
+│   ├── parser.py             #   листинг: паспорта, sightings, фото
+│   ├── check_status.py       #   active / archived / deleted
+│   ├── enrich.py             #   дополнительные поля со страницы
+│   ├── photo_dedup.py        #   perceptual hash фотографий (CDN)
+│   └── backfill_avgprice.py  #   добор средней цены и бейджа
+├── transform/                # ОЧИСТКА: из сырья в проверяемую таблицу
+│   ├── clean.py              #   правила, статистика, clean_data
+│   ├── damage.py             #   лексикон повреждений с отрицаниями
+│   ├── data_quality.py       #   санитария перед ML, Isolation Forest
+│   └── text_features.py      #   текстовые признаки (замерены, не в модели)
+├── ml/                       # МОДЕЛИ
+│   ├── train_price_model.py  #   обучение, CV, out-of-time, артефакт
+│   ├── residual_detector.py  #   калиброванный нижний ценовой квантиль
+│   ├── predict_price.py      #   inference сохранённой модели
+│   └── time_to_sell.py       #   прототип срока продажи
+├── report/                   # ВЫВОД для человека
+│   ├── explore.py            #   EDA, дашборд, очередь разметки
+│   ├── ml_report.py          #   HTML-отчёт по модели
+│   ├── ml_dashboard.py       #   графики модели
+│   ├── label_cards.py        #   карточки для ручной разметки
+│   └── evaluate_detector.py  #   precision/recall/F1 по разметке
+└── ops/                      # ЗАПУСК и наблюдение
+    ├── run_all.py            #   оркестратор полного конвейера
+    ├── catch_up.py           #   резюмируемый догоняльщик пробелов
+    ├── pipeline_status.py     #   офлайн-пульт состояния
+    └── migrate_to_postgres.py #   импорт старых CSV
+
+tests/test_pipeline.py        # регрессионные тесты
+docs/                         # паспорт модели и материалы
+airflow/                      # DAG-слой: офлайн-DAG и сетевой (выключен)
+sql/init/01_schema.sql        # схема базы, применяется на чистом volume
+debug/                        # разбор «почему у объявления X пусто поле Y»
+conftest.py                   # чтобы pytest видел пакет kz
+docker-compose.yaml           # Postgres и опциональный Airflow
 ```
+
+Запуск — через `-m`, потому что модули внутри пакета:
+
+```bash
+python -m kz.ops.run_all --fast
+python -m kz.report.label_cards --serve
+```
+
+Так работает и импорт между модулями, и запуск из корня, без правок
+`sys.path`. Данные читаются и пишутся по путям относительно корня проекта,
+поэтому запускать нужно из него.
 
 ---
 
@@ -1697,7 +1726,7 @@ Unit-тесты проверяют код, а не бизнес-качество
 
 ## Airflow — необязательная демонстрация
 
-Основной путь проекта — `run_all.py`. Airflow показывает, как тот же DAG можно
+Основной путь проекта — `kz/ops/run_all.py`. Airflow показывает, как тот же DAG можно
 перенести в промышленный оркестратор.
 
 Запуск:

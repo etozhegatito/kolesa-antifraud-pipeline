@@ -25,8 +25,10 @@ import pandas as pd
 from catboost import CatBoostRegressor, Pool
 from sklearn.model_selection import GroupKFold
 
-from data_quality import scrub_junk_mileage
-from train_price_model import (
+from kz.ml import train_price_model as _tpm
+from kz.transform import data_quality
+from kz.transform.data_quality import scrub_junk_mileage
+from kz.ml.train_price_model import (
     CAT_FEATURES,
     FEATURES,
     coerce_features,
@@ -152,7 +154,7 @@ def main():
         "schema_version": FLOOR_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "training_code_sha256": code_fingerprint(
-            "residual_detector.py", "train_price_model.py", "data_quality.py"
+            __file__, _tpm.__file__, data_quality.__file__
         ),
         "features": FEATURES,
         "alpha": ALPHA,

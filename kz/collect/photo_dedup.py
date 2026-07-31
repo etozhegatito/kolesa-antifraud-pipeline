@@ -53,7 +53,7 @@ import requests
 from PIL import Image
 from sqlalchemy import text
 
-from db import get_engine, upsert
+from kz.core.db import get_engine, upsert
 
 HASHES_CSV      = "data/enriched/photo_hashes.csv"
 DUPLICATES_CSV  = "data/enriched/photo_duplicates.csv"

@@ -35,7 +35,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import text
 
-from db import get_engine
+from kz.core.db import get_engine
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)

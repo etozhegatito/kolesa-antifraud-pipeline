@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from db import get_engine
+from kz.core.db import get_engine
 
 LABELS_CSV = "data/manual_labels.csv"
 LINE = "─" * 64

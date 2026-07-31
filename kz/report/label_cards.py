@@ -19,13 +19,26 @@
 подгрузку картинок с CDN. Бюджет kolesa не тратится вообще.
 
 Запуск:  python label_cards.py            → data/eda/label_cards.html
+         python label_cards.py --serve    → то же + локальный сервер, который
+                                            ДОПИСЫВАЕТ вердикты в журнал сразу
+                                            при нажатии (рекомендуемый режим)
          python label_cards.py --all      → включить и residual-кандидатов
                                             из labeling_queue.csv, не только
                                             правиловых подозрительных
 
-Вердикты НЕ пишутся отсюда автоматически: страница только собирает
-строки, которые ты сам вставишь в data/manual_labels.csv (журнал
-append-only — правило проекта №1, дописывается только руками).
+КАК СОХРАНЯЮТСЯ ВЕРДИКТЫ (три уровня, каждый со своей задачей):
+  1) localStorage браузера — мгновенно, переживает перезагрузку и закрытие
+     вкладки. Работает всегда, даже при открытии файла напрямую.
+  2) data/manual_labels.csv — источник истины, читается clean.py. Пишется
+     ТОЛЬКО в режиме --serve: страница, открытая как file://, писать на
+     диск физически не может (ограничение браузера, не наша лень).
+  3) корзина с копированием — запасной путь для файлового режима.
+
+ОДНА СТРОКА НА ОБЪЯВЛЕНИЕ. Передумал — жми снова, и строка ОБНОВИТСЯ на
+месте, а не продублируется. Смысл правила «журнал не терять» соблюдён:
+перед первой правкой запуска рядом сохраняется предыдущая версия
+(manual_labels.prev.csv), сама запись атомарна, вердикты не пропадают.
+Накопленные ранее дубликаты сворачиваются: python label_cards.py --dedupe
 """
 
 import pathlib as _p
@@ -34,18 +47,24 @@ if _p.Path(__file__).name != _expected:
     raise SystemExit(f"ОШИБКА: этот код — {_expected}, а файл называется "
                      f"{_p.Path(__file__).name}.")
 
+import csv
 import html
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-from db import get_engine
+from kz.core.db import get_engine
 
-OUT_HTML   = "data/eda/label_cards.html"
-QUEUE_CSV  = "data/eda/labeling_queue.csv"
-LABELS_CSV = "data/manual_labels.csv"
+OUT_HTML    = "data/eda/label_cards.html"
+QUEUE_CSV   = "data/eda/labeling_queue.csv"
+LABELS_CSV  = "data/manual_labels.csv"
+# Состояние журнала до правок текущего запуска — точка восстановления.
+# Файл один и перезаписывается, чтобы не разводить гору бэкапов.
+LABELS_PREV = "data/manual_labels.prev.csv"
 
 # Подсказки «как решать» по каждому флагу. Ключевой принцип проекта:
 # fraud = ОБМАН, а не «плохая машина». Честно проданный хлам = legit.
@@ -311,16 +330,21 @@ def card_html(row, idx: int) -> str:
 </article>"""
 
 
-def build(rows: pd.DataFrame) -> str:
+def build(rows: pd.DataFrame, serve_mode: bool = False) -> str:
     cards = "".join(card_html(r, i)
                     for i, (_, r) in enumerate(rows.iterrows()))
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
     n_done = int(rows["existing_verdict"].notna().sum())
+    mode = ("вердикты пишутся в журнал" if serve_mode
+            else "черновик в браузере — журнал не пишется")
     return (TEMPLATE
             .replace("__CARDS__", cards)
             .replace("__N__", str(len(rows)))
             .replace("__NDEAD__", str(n_dead))
             .replace("__NDONE__", str(n_done))
+            .replace("__SERVER__", "true" if serve_mode else "false")
+            .replace("__MODECLS__", "live" if serve_mode else "draft")
+            .replace("__MODE__", mode)
             .replace("__LABELS__", html.escape(LABELS_CSV)))
 
 
@@ -542,7 +566,15 @@ body.hide-done .card[data-verdict], body.hide-done .card.done{display:none}
   border:1px solid var(--line); border-radius:9px; padding:9px 12px; font:inherit;
   font-size:.9375rem}
 .cmt:focus{outline:2px solid var(--accent); outline-offset:-1px; border-color:transparent}
-.picked{color:var(--legit); font-size:.875rem; font-weight:500}
+.picked{font-size:.875rem; font-weight:500; color:var(--muted)}
+.picked[data-state="local"]{color:var(--warn)}
+.picked[data-state="saved"]{color:var(--legit)}
+.picked[data-state="error"]{color:var(--fraud)}
+.mode{font-size:.75rem; padding:3px 10px; border-radius:999px; white-space:nowrap}
+.mode.live{background:var(--legit-bg); border:1px solid var(--legit-line);
+  color:var(--legit)}
+.mode.draft{background:var(--warn-bg); border:1px solid var(--line);
+  color:var(--warn)}
 
 /* ── Лайтбокс ── */
 #box{position:fixed; inset:0; z-index:100; display:none; align-items:center;
@@ -564,6 +596,8 @@ body.hide-done .card[data-verdict], body.hide-done .card.done{display:none}
   <div class="topin">
     <h1>Разметка антифрода</h1>
     <span class="count"><b id="cnt">0</b> из __N__ размечено</span>
+    <span class="count" id="restored"></span>
+    <span class="mode __MODECLS__">__MODE__</span>
     <button class="tbtn" id="filter">скрыть размеченные</button>
     <button class="tbtn" id="theme">тема</button>
   </div>
@@ -612,6 +646,7 @@ __CARDS__
 </div>
 
 <script>
+const SERVER = __SERVER__;   /* true — запущено через --serve, можно писать в журнал */
 const cards = Array.from(document.querySelectorAll('.card'));
 const picks = new Map();
 let cur = 0;
@@ -630,13 +665,46 @@ function render(){
     (cards.length ? picks.size / cards.length * 100 : 0) + '%';
 }
 
+/* Выбор живёт в трёх местах, и это не дублирование, а разные задачи:
+   picks — текущая сессия (корзина/копирование);
+   localStorage — переживает перезагрузку и закрытие вкладки;
+   журнал на диске — единственный источник истины, пишется сервером. */
+const STORE = 'label_cards_picks';
+
+function saveLocal(){
+  const obj = {};
+  for (const [id, v] of picks) obj[id] = v;
+  try { localStorage.setItem(STORE, JSON.stringify(obj)); } catch (e) {}
+}
+
+function loadLocal(){
+  try { return JSON.parse(localStorage.getItem(STORE) || '{}'); }
+  catch (e) { return {}; }
+}
+
+function mark(card, state, text){
+  const el = card.querySelector('.picked');
+  el.dataset.state = state;
+  el.textContent = text;
+}
+
 function setVerdict(card, v){
   if (!card) return;
   const cmt = card.querySelector('.cmt').value.trim();
   picks.set(card.dataset.id, v + ',' + esc(cmt));
   card.dataset.verdict = v;
-  card.querySelector('.picked').textContent = '→ ' + v;
+  mark(card, 'local', '→ ' + v);
+  saveLocal();
   render();
+  if (!SERVER) return;                    /* file:// — только копипаста */
+  fetch('/verdict', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ad_id: card.dataset.id, verdict: v, comment: cmt}),
+  }).then(r => r.json())
+    .then(d => mark(card, d.ok ? 'saved' : 'error',
+                    d.ok ? '✓ в журнале' : '✗ ' + (d.error || 'ошибка')))
+    /* Сеть отвалилась — выбор всё равно в localStorage, не потеряется. */
+    .catch(() => mark(card, 'error', '✗ не сохранено, есть в браузере'));
 }
 
 function focusCard(i){
@@ -730,8 +798,16 @@ document.getElementById('copy').onclick = () => {
   setTimeout(() => b.textContent = 'копировать всё', 1400);
 };
 document.getElementById('clear').onclick = () => {
+  /* Чистит только черновик в браузере. Journal на диске не трогаем никогда —
+     он append-only, и уже записанные вердикты остаются валидными. */
+  if (!confirm('Очистить черновик в браузере? Уже записанные в журнал '
+             + 'вердикты останутся — файл только дописывается.')) return;
   picks.clear();
-  cards.forEach(c => { delete c.dataset.verdict; c.querySelector('.picked').textContent = ''; });
+  try { localStorage.removeItem(STORE); } catch (e) {}
+  cards.forEach(c => {
+    delete c.dataset.verdict;
+    c.querySelector('.picked').textContent = '';
+  });
   render();
 };
 document.getElementById('filter').onclick = e => {
@@ -747,29 +823,280 @@ document.getElementById('theme').onclick = () => {
   root.dataset.theme = now === 'dark' ? 'light' : 'dark';
 };
 
+/* Восстановление черновика: выборы прошлой сессии видны сразу, не надо
+   вспоминать, где остановился. Комментарий тоже возвращаем в поле. */
+(() => {
+  const saved = loadLocal();
+  let n = 0;
+  for (const card of cards){
+    const v = saved[card.dataset.id];
+    if (!v) continue;
+    picks.set(card.dataset.id, v);
+    const i = v.indexOf(',');
+    const verdict = i < 0 ? v : v.slice(0, i);
+    let cmt = i < 0 ? '' : v.slice(i + 1);
+    if (cmt.startsWith('"') && cmt.endsWith('"'))
+      cmt = cmt.slice(1, -1).replace(/""/g, '"');
+    card.dataset.verdict = verdict;
+    card.querySelector('.cmt').value = cmt;
+    mark(card, 'local', '→ ' + verdict);
+    n++;
+  }
+  if (n) document.getElementById('restored').textContent =
+    'восстановлено из браузера: ' + n;
+})();
+
 focusCard(0);
 render();
 </script>
 """
 
 
+VERDICTS = ("fraud", "legit", "unknown")
+
+
+def journal_header() -> list[str]:
+    """Порядок колонок журнала берём из самого файла, а не из константы:
+    файл ведётся руками, и его схема — источник истины."""
+    if Path(LABELS_CSV).exists():
+        with open(LABELS_CSV, newline="", encoding="utf-8") as f:
+            head = next(csv.reader(f), None)
+            if head:
+                return head
+    return ["ad_id", "url", "title", "year", "price_tenge", "mileage_km",
+            "suspicion_reasons", "seller_comment", "verdict", "comment"]
+
+
+def _cell(v) -> str:
+    """Значение для CSV: пропуск → пусто, целое → без «.0».
+
+    Именно из-за «.0» правило проекта запрещает писать журнал через pandas:
+    round-trip превращал 50 в "50.0" и ронял вставку в INTEGER-колонку.
+    """
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    if isinstance(v, float) and float(v).is_integer():
+        return str(int(v))
+    return str(v)
+
+
+_snapshot_done = False
+
+
+def _snapshot_once() -> None:
+    """Один раз за запуск сохранить состояние журнала ДО правок.
+
+    Журнал — ручной ground truth, его нельзя потерять, а он не в git
+    (data/ в .gitignore). Поэтому перед первой записью кладём рядом
+    предыдущую версию: всегда есть точка восстановления, и при этом файл
+    один, а не гора бэкапов.
+    """
+    global _snapshot_done
+    if _snapshot_done:
+        return
+    _snapshot_done = True
+    if Path(LABELS_CSV).exists():
+        shutil.copyfile(LABELS_CSV, LABELS_PREV)
+
+
+def read_journal() -> tuple[list[str], list[dict]]:
+    """Журнал как есть, строками-словарями. Читаем csv-модулем: значения
+    остаются ровно теми строками, что в файле, ничего не переформатируется."""
+    if not Path(LABELS_CSV).exists():
+        return journal_header(), []
+    with open(LABELS_CSV, newline="", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        rows = [dict(x) for x in r]
+        return list(r.fieldnames or journal_header()), rows
+
+
+def write_journal(header: list[str], rows: list[dict]) -> None:
+    """Атомарная запись: сначала во временный файл, потом подмена. Так
+    журнал не останется обрезанным, если процесс умрёт на середине."""
+    Path(LABELS_CSV).parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(LABELS_CSV) + ".tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+        w.writeheader()
+        for row in rows:
+            w.writerow({c: row.get(c, "") for c in header})
+    os.replace(tmp, LABELS_CSV)
+
+
+def upsert_verdict(ad_id: str, verdict: str, comment: str, facts: dict) -> None:
+    """Записать вердикт: строка по этому ad_id уже есть → ОБНОВИТЬ её на
+    месте; нет → дописать новую.
+
+    Раньше здесь был чистый append, и повторные нажатия плодили по несколько
+    строк на одно объявление с противоречивыми вердиктами (fraud, потом
+    legit, потом legit с комментарием). clean.py берёт последнюю, поэтому
+    работало верно, но журнал читался как мусор и глазами не проверялся.
+
+    Обновляется ПЕРВАЯ строка по объявлению — она стоит на своём месте из
+    очереди разметки, и порядок файла не съезжает. Лишние дубликаты того же
+    ad_id при этом убираются: файл сам приходит в порядок по мере разметки.
+
+    Смысл правила «журнал не перезаписывается» сохранён: вердикты не
+    теряются, предыдущая версия файла лежит в manual_labels.prev.csv, а
+    запись атомарна.
+    """
+    if verdict not in VERDICTS:
+        raise ValueError(f"недопустимый вердикт: {verdict!r}")
+    _snapshot_once()
+    header, rows = read_journal()
+    aid = str(ad_id)
+    same = [r for r in rows if str(r.get("ad_id", "")) == aid]
+    if same:
+        target = same[0]                       # первая — её и правим
+        keep = set(id(r) for r in same[1:])     # прочие дубликаты убираем
+        rows = [r for r in rows if id(r) not in keep]
+    else:
+        target = {c: "" for c in header}
+        target.update({c: _cell(facts.get(c)) for c in header if c in facts})
+        target["ad_id"] = aid
+        rows.append(target)
+    target["verdict"] = verdict
+    target["comment"] = comment or ""
+    write_journal(header, rows)
+
+
+def dedupe_journal() -> tuple[int, int]:
+    """Свернуть накопленные дубликаты: одна строка на объявление.
+
+    Побеждает ПОСЛЕДНИЙ непустой вердикт (это и был твой финальный выбор),
+    а место в файле сохраняется за ПЕРВОЙ строкой объявления.
+    Возвращает (сколько строк было, сколько стало).
+    """
+    header, rows = read_journal()
+    before = len(rows)
+    _snapshot_once()
+    order, best = [], {}
+    for r in rows:
+        aid = str(r.get("ad_id", ""))
+        if aid not in best:
+            order.append(aid)
+            best[aid] = dict(r)
+            continue
+        # непустой вердикт перекрывает; пустой не затирает уже выбранный
+        if str(r.get("verdict", "")).strip():
+            best[aid]["verdict"] = r["verdict"]
+            best[aid]["comment"] = r.get("comment", "")
+    out = [best[a] for a in order]
+    write_journal(header, out)
+    return before, len(out)
+
+
+def serve(html: str, facts: dict, port: int = 8765) -> None:
+    """Локальный сервер: отдаёт карточки и дописывает вердикты в журнал.
+
+    Нужен потому, что страница, открытая как file://, писать на диск не может
+    в принципе — а без записи выборы приходилось переносить копипастой.
+    Слушаем только 127.0.0.1: инструмент локальный, наружу его открывать
+    незачем. Пишем строго через append_verdict (валидация + append-only).
+    """
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    page = html.encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, code: int, body: bytes, ctype: str):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path.split("?")[0] in ("/", "/index.html"):
+                self._send(200, page, "text/html; charset=utf-8")
+            else:
+                self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            if self.path != "/verdict":
+                return self._send(404, b'{"error":"not found"}',
+                                  "application/json")
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(n) or b"{}")
+                ad_id = str(data.get("ad_id", ""))
+                # ad_id принимаем только из числа показанных карточек:
+                # запись в журнал не должна зависеть от того, что пришло в теле
+                if ad_id not in facts:
+                    raise ValueError(f"неизвестный ad_id: {ad_id!r}")
+                upsert_verdict(ad_id, str(data.get("verdict", "")),
+                               str(data.get("comment", "")), facts[ad_id])
+            except Exception as e:                  # noqa: BLE001 — ответ клиенту
+                return self._send(400, json.dumps({"error": str(e)},
+                                  ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            self._send(200, b'{"ok":true}', "application/json")
+
+        def log_message(self, *a):                  # тише в консоли
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), Handler)
+    print(f"\nОткрой: http://127.0.0.1:{port}")
+    print(f"Вердикты дописываются в {LABELS_CSV} сразу при нажатии.")
+    print("Остановить: Ctrl+C")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nОстановлено.")
+    finally:
+        srv.server_close()
+
+
+def journal_facts(rows: pd.DataFrame) -> dict:
+    """ad_id → описательные поля для строки журнала."""
+    out = {}
+    for _, r in rows.iterrows():
+        out[str(r["ad_id"])] = {
+            "url": r.get("url") or f"https://kolesa.kz/a/show/{r['ad_id']}",
+            "title": f"{r.get('brand') or ''} {r.get('model') or ''}".strip(),
+            "year": r.get("year"),
+            "price_tenge": r.get("price_tenge"),
+            "mileage_km": r.get("mileage_km"),
+            "suspicion_reasons": r.get("suspicion_reasons"),
+            "seller_comment": r.get("seller_comment"),
+        }
+    return out
+
+
 def main():
     include_queue = "--all" in sys.argv
+    serve_mode = "--serve" in sys.argv
+
+    if "--dedupe" in sys.argv:
+        before, after = dedupe_journal()
+        print(f"Журнал: {before} строк → {after} (одна на объявление).")
+        print(f"Предыдущая версия сохранена в {LABELS_PREV}.")
+        print("Дальше пересобери clean-слой: python clean.py")
+        return
+
     rows = load_rows(include_queue)
     if rows.empty:
         print("Нечего размечать: подозрительных нет.")
         return
+    page = build(rows, serve_mode)
     Path(OUT_HTML).parent.mkdir(parents=True, exist_ok=True)
-    Path(OUT_HTML).write_text(build(rows), encoding="utf-8")
+    Path(OUT_HTML).write_text(page, encoding="utf-8")
 
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
     n_photo = int(rows["photos"].apply(bool).sum())
     print(f"Карточек: {len(rows)} (мёртвых страниц: {n_dead}, "
           f"с фото: {n_photo})")
     print(f"→ {OUT_HTML}")
-    print("Открой в браузере, размечай, потом «копировать всё» и допиши "
-          f"строки в конец {LABELS_CSV} (ТОЛЬКО дописывать!).")
-    print("kolesa.kz при этом не запрашивается — лимит не тратится.")
+    print("kolesa.kz не запрашивается — лимит не тратится.")
+
+    if serve_mode:
+        serve(page, journal_facts(rows))
+        return
+    print("\nВыборы сохраняются в браузере и переживают перезагрузку, но в "
+          f"журнал ({LABELS_CSV}) отсюда не попадут: страница, открытая как "
+          "file://, писать на диск не может.")
+    print("Чтобы вердикты дописывались в журнал сразу: "
+          "python label_cards.py --serve")
 
 
 if __name__ == "__main__":

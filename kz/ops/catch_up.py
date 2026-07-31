@@ -86,8 +86,8 @@ from datetime import date
 
 import pandas as pd
 
-import pacing
-from db import get_engine
+from kz.core import pacing
+from kz.core.db import get_engine
 
 LINE = "─" * 64
 
@@ -299,12 +299,12 @@ def compute_gaps() -> dict:
 
 # джоб → (человекочитаемое имя, скрипт, ключ пробела, хост)
 KOLESA = [
-    ("статусы (check_status)",   "check_status.py",     "status"),
-    ("обогащение (enrich)",      "enrich.py",           "enrich"),
-    ("avgPrice+бейдж (backfill)", "backfill_avgprice.py", "backfill"),
+    ("статусы (check_status)",   "kz.collect.check_status",     "status"),
+    ("обогащение (enrich)",      "kz.collect.enrich",           "enrich"),
+    ("avgPrice+бейдж (backfill)", "kz.collect.backfill_avgprice", "backfill"),
 ]
-CDN = [("фото-хэши (photo_dedup)", "photo_dedup.py", "photo")]   # другой хост
-OFFLINE = [("чистка (clean)", "clean.py"), ("отчёт (explore)", "explore.py")]
+CDN = [("фото-хэши (photo_dedup)", "kz.collect.photo_dedup", "photo")]   # другой хост
+OFFLINE = [("чистка (clean)", "kz.transform.clean"), ("отчёт (explore)", "kz.report.explore")]
 
 # Приоритетный набор для --values: джобы, заполняющие ЦЕННЫЕ для ОПРАВДАНИЯ
 # (exculpation) поля. backfill добирает avgPrice + бейдж у старых строк;
@@ -342,7 +342,7 @@ def count_429() -> int:
 
 def run(script: str) -> int:
     print(f"\n{'═'*60}\n▶ {script}\n{'═'*60}")
-    return subprocess.run([sys.executable, script]).returncode
+    return subprocess.run([sys.executable, "-m", script]).returncode
 
 
 def next_action(gap_before: int, gap_after: int, rc: int, saw_new_429: bool) -> str:

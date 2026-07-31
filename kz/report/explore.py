@@ -35,7 +35,7 @@ import matplotlib
 matplotlib.use("Agg")                      # рендер в файл без окна
 import matplotlib.pyplot as plt
 
-from db import get_engine
+from kz.core.db import get_engine
 
 OUT_PNG  = "data/eda/dashboard.png"
 OUT_SUSP = "data/eda/suspicious_sorted.csv"
@@ -177,13 +177,13 @@ def export_labeling_queue(df: pd.DataFrame):
     work["residual_gap"] = np.nan
     residual_mask = pd.Series(False, index=work.index)
     try:
-        from residual_detector import (
+        from kz.ml.residual_detector import (
             AGE_MAX,
             MIN_SUPPORT,
             load_floor_artifact,
             score_floor,
         )
-        from train_price_model import FEATURES
+        from kz.ml.train_price_model import FEATURES
 
         model, metadata = load_floor_artifact()
         floor = score_floor(model, metadata, work[FEATURES])

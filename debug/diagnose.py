@@ -33,7 +33,7 @@ import requests
 
 # enrich.py лежит в корне репозитория, на уровень выше debug/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from enrich import parse_ad_page, HEADERS
+from kz.collect.enrich import parse_ad_page, HEADERS
 
 
 def read_if_exists(path, **kw):

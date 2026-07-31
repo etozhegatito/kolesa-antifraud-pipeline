@@ -40,7 +40,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-from db import upsert
+from kz.core.db import upsert
 
 # ─── Настройки ────────────────────────────────────────────────────────────────
 OUTPUT_CSV    = "data/raw/raw_data.csv"    # «паспорт» объявления: первая встреча

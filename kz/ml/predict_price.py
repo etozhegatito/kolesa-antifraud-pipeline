@@ -11,7 +11,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from train_price_model import (
+from kz.ml.train_price_model import (
     CAT_FEATURES,
     FEATURES,
     NUM_FEATURES,

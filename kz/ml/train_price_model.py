@@ -33,8 +33,9 @@ from catboost import CatBoostRegressor, Pool
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GroupKFold, KFold
 
-from data_quality import iforest_anomaly, scrub_junk_mileage
-from db import get_engine
+from kz.transform import data_quality
+from kz.transform.data_quality import iforest_anomaly, scrub_junk_mileage
+from kz.core.db import get_engine
 
 NUM_FEATURES = [
     "age", "mileage_km", "engine_volume", "photos_count",
@@ -275,12 +276,17 @@ def _git_dirty() -> bool | None:
 
 
 def code_fingerprint(*paths: str) -> str:
-    """Хэш фактического кода, важный при обучении из dirty worktree."""
+    """Хэш фактического кода, важный при обучении из dirty worktree.
+
+    В хэш идёт только ИМЯ файла, без пути: путь зависит от раскладки проекта
+    и машины, а отпечаток должен зависеть исключительно от самого кода.
+    Раньше здесь были относительные пути-строки, и переезд файлов в пакет
+    ронял обучение с FileNotFoundError — вызывающие теперь передают __file__.
+    """
     digest = hashlib.sha256()
-    for name in sorted(paths):
-        path = Path(name)
-        digest.update(name.encode("utf-8"))
-        digest.update(path.read_bytes())
+    for name in sorted(paths, key=lambda p: Path(p).name):
+        digest.update(Path(name).name.encode("utf-8"))
+        digest.update(Path(name).read_bytes())
     return digest.hexdigest()
 
 
@@ -366,7 +372,7 @@ def main():
         "git_commit": _git_commit(),
         "git_dirty": _git_dirty(),
         "training_code_sha256": code_fingerprint(
-            "train_price_model.py", "data_quality.py"
+            __file__, data_quality.__file__
         ),
         "data_fingerprint_sha256": _data_fingerprint(clean),
         "training_rows": int(len(clean)),

@@ -21,8 +21,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from data_quality import scrub_junk_mileage
-from train_price_model import FEATURES, grouped_oof_predictions, load, load_artifact
+from kz.transform.data_quality import scrub_junk_mileage
+from kz.ml.train_price_model import FEATURES, grouped_oof_predictions, load, load_artifact
 
 OUT_PNG = "data/eda/ml_dashboard.png"
 AGE_ORDER = ["0-3", "4-7", "8-12", "13-20", "21+"]

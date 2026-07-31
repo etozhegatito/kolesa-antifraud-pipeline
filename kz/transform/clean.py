@@ -35,14 +35,14 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from db import get_engine
+from kz.core.db import get_engine
 
 LABELS_CSV   = "data/manual_labels.csv"  # правится человеком руками — остаётся файлом
 OUT_CSV      = "data/clean/clean_data.csv"  # держим и CSV: дёшево, пригодится для отладки/сверки
 
 # Лексикон «убитости» и поиск с учётом отрицаний — в damage.py
 # (единственный источник; раньше список дублировался здесь и в enrich.py).
-from damage import DAMAGE_PATTERNS, has_damage as _has_damage
+from kz.transform.damage import DAMAGE_PATTERNS, has_damage as _has_damage
 
 CURRENT_YEAR = date.today().year
 

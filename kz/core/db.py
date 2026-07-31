@@ -11,7 +11,7 @@ from functools import lru_cache
 import psycopg2.extras
 from sqlalchemy import create_engine, text
 
-from config import DATABASE_URL
+from kz.core.config import DATABASE_URL
 
 
 @lru_cache(maxsize=1)

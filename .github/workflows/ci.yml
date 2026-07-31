@@ -25,4 +25,12 @@ jobs:
       - name: Compile production modules
         run: python -m compileall -q -x '^\./\.venv/' .
       - name: Run offline regression suite
-        run: python -m pytest test_pipeline.py -q
+        run: python -m pytest tests/ -q
+      # Тесты не должны зависеть от data/: каталог в .gitignore, в чистом
+      # клоне его нет. Раньше один тест читал data/manual_labels.csv и падал
+      # только в CI — проверяем это явно, а не надеемся, что не повторится.
+      - name: Suite must not read gitignored data
+        run: |
+          if grep -rnE '(Path|open|read_csv|read_text|copy|copyfile)\(\s*"data/' tests/; then
+            echo "Тест ЧИТАЕТ файл из data/ — в чистом клоне его нет"; exit 1
+          fi

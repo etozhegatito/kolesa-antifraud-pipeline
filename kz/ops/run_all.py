@@ -50,12 +50,12 @@ import subprocess
 import sys
 import time
 
-STEP_PARSER  = ("Job 1  · листинг",         [sys.executable, "parser.py"])
-STEP_STATUS  = ("Job 1c · статусы",         [sys.executable, "check_status.py"])
-STEP_CLEAN   = ("Job 2  · чистка",          [sys.executable, "clean.py"])
-STEP_ENRICH  = ("Job 1b · обогащение",      [sys.executable, "enrich.py"])
-STEP_PHOTOS  = ("Job 1d · фото-дедуп",      [sys.executable, "photo_dedup.py"])
-STEP_EXPLORE = ("Job 3  · EDA/отчёт",       [sys.executable, "explore.py"])
+STEP_PARSER  = ("Job 1  · листинг",         [sys.executable, "-m", "kz.collect.parser"])
+STEP_STATUS  = ("Job 1c · статусы",         [sys.executable, "-m", "kz.collect.check_status"])
+STEP_CLEAN   = ("Job 2  · чистка",          [sys.executable, "-m", "kz.transform.clean"])
+STEP_ENRICH  = ("Job 1b · обогащение",      [sys.executable, "-m", "kz.collect.enrich"])
+STEP_PHOTOS  = ("Job 1d · фото-дедуп",      [sys.executable, "-m", "kz.collect.photo_dedup"])
+STEP_EXPLORE = ("Job 3  · EDA/отчёт",       [sys.executable, "-m", "kz.report.explore"])
 
 
 def run_step(step) -> None:

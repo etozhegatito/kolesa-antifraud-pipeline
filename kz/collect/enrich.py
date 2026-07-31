@@ -44,8 +44,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-import pacing
-from db import get_engine, upsert
+from kz.core import pacing
+from kz.core.db import get_engine, upsert
 
 ENRICHED_CSV = "data/enriched/enriched.csv"
 LOG_FILE     = "logs/enrich.log"
@@ -81,7 +81,7 @@ DT_MAP = {
 
 # Лексикон «убитости» и поиск с учётом отрицаний — в damage.py
 # (единственный источник; раньше список дублировался здесь и в clean.py).
-from damage import DAMAGE_PATTERNS, find_damage_keywords
+from kz.transform.damage import DAMAGE_PATTERNS, find_damage_keywords
 
 FIELDS = ["ad_id", "fetched_at", "http_status", "is_archived",
           "customs_cleared", "drive", "steering", "color", "generation",

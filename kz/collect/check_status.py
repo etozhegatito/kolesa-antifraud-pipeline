@@ -41,8 +41,8 @@ from pathlib import Path
 
 import requests
 
-import pacing
-from db import upsert
+from kz.core import pacing
+from kz.core.db import upsert
 
 RAW_CSV       = "data/raw/raw_data.csv"
 SIGHTINGS_CSV = "data/raw/sightings.csv"

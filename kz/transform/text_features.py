@@ -24,7 +24,7 @@ R²=0.914 без изменений, MAPE 24.0→24.5, суммарная важ
 
 import re
 
-from damage import has_damage as _has_damage
+from kz.transform.damage import has_damage as _has_damage
 
 # Группы премиум-опций (каждая совпавшая группа = +1 к opt_count).
 _OPTION_GROUPS = [

@@ -27,3 +27,9 @@ data/**/*.html
 # воспроизводятся командами train_price_model.py / residual_detector.py
 data/models/*.cbm
 data/models/*.json
+
+# рабочие каталоги локальных инструментов (генерируются, не код проекта)
+output/
+tmp/
+cache/
+browser_state.json

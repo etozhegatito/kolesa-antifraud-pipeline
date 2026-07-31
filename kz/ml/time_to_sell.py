@@ -24,9 +24,9 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
-from data_quality import scrub_junk_mileage
-from db import get_engine
-from train_price_model import FEATURES, load, load_artifact
+from kz.transform.data_quality import scrub_junk_mileage
+from kz.core.db import get_engine
+from kz.ml.train_price_model import FEATURES, load, load_artifact
 
 YEAR = date.today().year
 _MON = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,

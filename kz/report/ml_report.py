@@ -15,9 +15,9 @@ ml_report.py — красивый HTML-отчёт по модели цены (а
 import numpy as np
 import pandas as pd
 
-from data_quality import scrub_junk_mileage
-from residual_detector import AGE_MAX, MIN_SUPPORT, load_floor_artifact, score_floor
-from train_price_model import CAT_FEATURES, FEATURES, load, load_artifact
+from kz.transform.data_quality import scrub_junk_mileage
+from kz.ml.residual_detector import AGE_MAX, MIN_SUPPORT, load_floor_artifact, score_floor
+from kz.ml.train_price_model import CAT_FEATURES, FEATURES, load, load_artifact
 
 OUT = "data/eda/ml_report.html"
 

@@ -46,7 +46,7 @@ with DAG(
         task_id="check_postgres",
         bash_command=(
             f"cd {PROJECT_DIR} && python -c "
-            "\"from db import get_engine; from sqlalchemy import text; "
+            "\"from kz.core.db import get_engine; from sqlalchemy import text; "
             "c=get_engine().connect(); "
             "print('raw_ads:', c.execute(text('SELECT COUNT(*) FROM raw_ads'))"
             ".scalar()); "
@@ -56,15 +56,15 @@ with DAG(
     )
     clean = BashOperator(
         task_id="clean",
-        bash_command=f"cd {PROJECT_DIR} && python clean.py",
+        bash_command=f"cd {PROJECT_DIR} && python -m kz.transform.clean",
     )
     explore = BashOperator(
         task_id="explore",
-        bash_command=f"cd {PROJECT_DIR} && python explore.py",
+        bash_command=f"cd {PROJECT_DIR} && python -m kz.report.explore",
     )
     cards = BashOperator(
         task_id="label_cards",
-        bash_command=f"cd {PROJECT_DIR} && python label_cards.py",
+        bash_command=f"cd {PROJECT_DIR} && python -m kz.report.label_cards",
     )
 
     check_db >> clean >> explore >> cards

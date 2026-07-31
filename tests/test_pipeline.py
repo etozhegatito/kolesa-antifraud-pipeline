@@ -14,11 +14,11 @@
 
 import pandas as pd
 
-import parser as listing_parser
-import clean
-import enrich
-import photo_dedup
-import evaluate_detector
+from kz.collect import parser as listing_parser
+from kz.transform import clean
+from kz.collect import enrich
+from kz.collect import photo_dedup
+from kz.report import evaluate_detector
 
 
 # ─── parse_spec_line: оба формата пробега (реальный баг №1) ──────────────────
@@ -121,7 +121,7 @@ def test_damage_patterns_in_sync():
     тест сторожил синхронность копий. Теперь источник один — damage.py,
     а тест сторожит, что оба файла реально импортируют ЕГО (а не завели
     свою копию заново)."""
-    import damage
+    from kz.transform import damage
     assert clean.DAMAGE_PATTERNS is damage.DAMAGE_PATTERNS
     assert enrich.DAMAGE_PATTERNS is damage.DAMAGE_PATTERNS
 
@@ -132,7 +132,7 @@ def test_negated_damage_not_detected():
     225209601 («На 99% нету никаких гнилей» → 'гнил'),
     225770229 («Вложения не требует» → 'вложения'),
     225838706 («не требует вложений» → 'требует вложений')."""
-    from damage import find_damage_keywords
+    from kz.transform.damage import find_damage_keywords
     assert find_damage_keywords(
         "Машина в идеальном состоянии. На 99% нету никаких гнилей.") == []
     assert find_damage_keywords("Вложения не требует. Обмен не интересует!") == []
@@ -143,7 +143,7 @@ def test_negated_damage_not_detected():
 def test_real_damage_still_detected():
     """Позитивный контроль: настоящая убитость не должна потеряться
     из-за окна отрицаний."""
-    from damage import find_damage_keywords
+    from kz.transform.damage import find_damage_keywords
     assert "гнил" in find_damage_keywords("кузов гнилой, пороги под замену")
     assert "требует вложений" in find_damage_keywords("машина требует вложений")
     assert "не на ходу" in find_damage_keywords("стоит в гараже, не на ходу")
@@ -161,7 +161,7 @@ def test_damage_disclosed_rust_and_gearbox():
     225502216 Chevrolet Aveo): «рыжики» (сленг про ржавчину) и «не
     включается 5-я передача» (общий дефект, брат «не работает»). Обычные
     отрицания ПЕРЕД словом по-прежнему гасят хит (окно 2 токена)."""
-    from damage import find_damage_keywords, has_damage
+    from kz.transform.damage import find_damage_keywords, has_damage
     assert has_damage("есть классические рыжики на порогах")
     assert has_damage("не включается 5-я передача")
     assert has_damage("не включается кондиционер")
@@ -460,7 +460,7 @@ def test_used_zero_mileage_excludes_current_year_new():
     модельного года 0 км — правда «новая со склада» (реальный кейс Changan
     X5 Plus 2026: condition криво распарсился как «б/у», лейбл «первый взнос»,
     коммент «машина новая без пробега»)."""
-    import clean
+    from kz.transform import clean
     cy = clean.CURRENT_YEAR
     df = pd.DataFrame([
         {"year": cy,     "condition": "б/у", "mileage_km": 0, "price_tenge": 7_600_000},
@@ -494,21 +494,26 @@ def test_young_car_cheap_cleared_when_declared_wreck():
 
 
 # ─── catch_up: оркестратор ссылается на реально существующие скрипты ────────
-def test_catch_up_references_real_scripts():
-    """Защита от опечатки в имени джоба — оркестратор упал бы в рантайме."""
-    import os, catch_up
-    scripts = ([s for _, s, _ in catch_up.KOLESA]
-               + [s for _, s, _ in catch_up.CDN]
-               + [s for _, s in catch_up.OFFLINE])
-    for s in scripts:
-        assert os.path.exists(s), f"catch_up ссылается на несуществующий {s}"
+def test_catch_up_references_real_modules():
+    """Защита от опечатки в имени джоба — оркестратор упал бы в рантайме.
+
+    Джобы запускаются как `python -m <модуль>`, поэтому проверяем именно
+    разрешимость модуля, а не наличие файла: путь к файлу опечатку в
+    пакетной части имени не поймал бы."""
+    import importlib.util
+    from kz.ops import catch_up
+    mods = ([s for _, s, _ in catch_up.KOLESA]
+            + [s for _, s, _ in catch_up.CDN]
+            + [s for _, s in catch_up.OFFLINE])
+    for m in mods:
+        assert importlib.util.find_spec(m), f"catch_up ссылается на несуществующий {m}"
 
 
 # ─── data-quality: плейсхолдер-пробег (777777) занулить перед моделью ───────
 def test_junk_mileage_placeholder_detection():
     """Репдигит >300k («забитое» поле 777777) — junk; реальные 99999/111111/
     150000 и 0/None — НЕ junk."""
-    from data_quality import is_junk_mileage
+    from kz.transform.data_quality import is_junk_mileage
     assert is_junk_mileage(777777)          # 777k репдигит → плейсхолдер
     assert is_junk_mileage(999999)
     assert is_junk_mileage(888888)
@@ -523,7 +528,7 @@ def test_junk_mileage_placeholder_detection():
 # ─── time-to-sell (уровень 2): парсинг даты публикации из карточки ──────────
 def test_parse_posted_date():
     from datetime import date
-    from time_to_sell import parse_posted
+    from kz.ml.time_to_sell import parse_posted
     cy = date.today().year
     assert parse_posted("18 июля") == date(cy, 7, 18)
     assert parse_posted("18 июл.") == date(cy, 7, 18)      # сокращение
@@ -535,8 +540,8 @@ def test_parse_posted_date():
 
 # ─── квантильный residual-детектор: конфиг осмыслен, фичи без утечки ────────
 def test_residual_detector_config():
-    import residual_detector as r
-    from train_price_model import FEATURES
+    from kz.ml import residual_detector as r
+    from kz.ml.train_price_model import FEATURES
     assert 0 < r.ALPHA < 0.5              # нижний квантиль (пол цены)
     assert r.MIN_SUPPORT >= 1 and r.AGE_MAX >= 1
     assert r.FEATURES is FEATURES         # те же фичи модели → та же анти-утечка
@@ -544,7 +549,7 @@ def test_residual_detector_config():
 
 # ─── текстовые фичи для модели цены (интерпретируемые keyword-сигналы) ──────
 def test_text_features_extract():
-    from text_features import text_features
+    from kz.transform.text_features import text_features
     f = text_features("Максимальная комплектация, кожа, панорама, камера. "
                       "Не бит не крашен, один хозяин.")
     assert f["txt_opt_count"] >= 3        # макс.компл + кожа + панорама + камера
@@ -563,7 +568,7 @@ def test_price_model_features_no_leakage():
     чужой оценке цены (target leakage, правило №6): kolesa_avg_price, price_z,
     сама цена, is_suspicious. city — константа (Алматы), views_count —
     пост-фактум. Иначе модель «списывала» бы, а не оценивала."""
-    import train_price_model as m
+    from kz.ml import train_price_model as m
     banned = {"price_tenge", "log_price", "price_z", "kolesa_avg_price",
               "is_suspicious", "suspicion_reasons", "city", "views_count"}
     leak = set(m.FEATURES) & banned
@@ -574,13 +579,14 @@ def test_price_model_features_no_leakage():
 def test_catch_up_value_jobs_are_exculpation_fillers():
     """--values гоняет ТОЛЬКО enrich+backfill (заполняют avgPrice/бейдж/цвет/
     damage — поля exculpation), пропуская статусы и фото. Подмножество KOLESA."""
-    import os, catch_up
+    import importlib.util
+    from kz.ops import catch_up
     keys = [k for _, _, k in catch_up.VALUE_JOBS]
     assert keys == ["enrich", "backfill"]
     assert all(j in catch_up.KOLESA for j in catch_up.VALUE_JOBS)   # подмножество KOLESA
     assert "status" not in keys and "photo" not in keys            # не liveness/фото
-    for _, script, _ in catch_up.VALUE_JOBS:
-        assert os.path.exists(script)
+    for _, mod, _ in catch_up.VALUE_JOBS:
+        assert importlib.util.find_spec(mod)
     # --backfill ещё уже: только backfill (чистый добор avgPrice+бейджа),
     # подмножество VALUE_JOBS, без enrich
     bkeys = [k for _, _, k in catch_up.BACKFILL_JOBS]
@@ -593,7 +599,7 @@ def test_catch_up_429_detection_not_fooled_by_numbers():
     """Реальный баг моего же кода: count_429 считал подстроку '429', а она
     есть в ad_id/ценах/таймстемпах («наблюдений: 429») → catch_up ложно
     обрывал бы джобы. Считаем только настоящие rate-limit-строки."""
-    import catch_up
+    from kz.ops import catch_up
     assert catch_up.is_429_line("2026-01-01 12:00:00  INFO  429: пауза 120с")
     assert catch_up.is_429_line("Стоп: 429 подряд — сайт лимитирует")
     assert not catch_up.is_429_line("наблюдений сегодня: 429, всего: 429")
@@ -607,7 +613,7 @@ def test_catch_up_until_done_next_action():
     цикла: если порция отработала чисто (rc=0, без 429), но пробел НЕ
     уменьшился — это 'stuck' (остаток недозаполним: 404/нет данных/сентинелы),
     а не бесконечный повтор тех же строк."""
-    from catch_up import next_action
+    from kz.ops.catch_up import next_action
     # прогресс есть → крутим дальше
     assert next_action(500, 380, 0, False) == "continue"
     # пробел закрыт → готово (даже если формально был 429 на последнем запросе)
@@ -627,7 +633,8 @@ def test_catch_up_chunk_sizes_match_jobs():
     """CHUNK_MAX в catch_up — копия MAX_PER_RUN самих джобов (импорт джобов
     там избегаем ради их import-side-effects). Если в джобе поменяли лимит,
     а тут забыли — бюджет считался бы по устаревшей цифре. Этот тест ловит дрейф."""
-    import catch_up, check_status, enrich, backfill_avgprice, photo_dedup
+    from kz.ops import catch_up
+    from kz.collect import check_status, enrich, backfill_avgprice, photo_dedup
     assert catch_up.CHUNK_MAX["status"]   == check_status.MAX_CHECKS_PER_RUN
     assert catch_up.CHUNK_MAX["enrich"]   == enrich.MAX_PER_RUN
     assert catch_up.CHUNK_MAX["backfill"] == backfill_avgprice.MAX_PER_RUN
@@ -638,7 +645,7 @@ def test_catch_up_budget_allows_near_done_at_edge():
     """Оценка стоимости порции = min(MAX_PER_RUN, пробел): полная порция у
     края квоты НЕ влезает, но почти добитый джоб (маленький пробел) — влезает
     в тот же остаток. Иначе near-done джоб голодал бы у границы бюджета."""
-    import catch_up
+    from kz.ops import catch_up
     B = catch_up.DAILY_BUDGET["kolesa"]
     cm = catch_up.CHUNK_MAX["enrich"]
     assert catch_up.budget_allows("kolesa", "status", 10**6, {"kolesa": 0, "cdn": 0})
@@ -651,7 +658,8 @@ def test_catch_up_status_thresholds_match_check_status():
     """Пороги staleness/recheck в catch_up.compute_gaps должны совпадать с
     check_status — иначе счётчик пробелов разошёлся бы с реальной выборкой
     джоба (показывал бы «есть что добрать», а джоб ничего бы не брал)."""
-    import catch_up, check_status
+    from kz.ops import catch_up
+    from kz.collect import check_status
     assert catch_up.STATUS_STALE_DAYS   == check_status.STALE_DAYS
     assert catch_up.STATUS_RECHECK_DAYS == check_status.RECHECK_DAYS
 
@@ -663,7 +671,7 @@ def test_status_recheck_and_listing_inference():
       infer_active_from_listing — показавшийся в листинге active без запроса;
         уже-active не переписываем; терминал реактивируем ТОЛЬКО если увиден
         ПОСЛЕ пометки терминальным."""
-    from check_status import needs_status_check, infer_active_from_listing
+    from kz.collect.check_status import needs_status_check, infer_active_from_listing
     # needs_status_check(cur_status, seen_days, checked_days)
     assert not needs_status_check("archived", 30, None)     # терминал
     assert not needs_status_check("deleted", 30, 30)        # терминал
@@ -682,7 +690,7 @@ def test_status_recheck_and_listing_inference():
 def test_catch_up_budget_resets_next_day(tmp_path, monkeypatch):
     """Счётчик бюджета сбрасывается с новыми сутками, битый файл = ноль (не
     падаем), сегодняшняя запись читается как есть."""
-    import catch_up
+    from kz.ops import catch_up
     f = tmp_path / "budget.json"
     monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
     f.write_text('{"date":"2000-01-01","kolesa":399,"cdn":5}', encoding="utf-8")
@@ -697,7 +705,7 @@ def test_catch_up_budget_resets_next_day(tmp_path, monkeypatch):
 def test_duplicate_groups_keep_repost_in_one_fold():
     """Цена может поменяться у перезалива, но это всё ещё одна CV-группа."""
     import pandas as pd
-    from train_price_model import duplicate_groups
+    from kz.ml.train_price_model import duplicate_groups
     d = pd.DataFrame([
         {"ad_id": "1", "brand": "Toyota", "model": "Camry", "year": 2020,
          "mileage_km": 80000, "engine_volume": 2.5, "body_type": "седан",
@@ -719,7 +727,7 @@ def test_duplicate_groups_keep_repost_in_one_fold():
 
 def test_temporal_holdout_is_future_and_removes_group_overlap():
     import pandas as pd
-    from train_price_model import duplicate_groups, temporal_holdout
+    from kz.ml.train_price_model import duplicate_groups, temporal_holdout
     rows = []
     for i in range(120):
         rows.append({
@@ -741,7 +749,7 @@ def test_temporal_holdout_is_future_and_removes_group_overlap():
 
 def test_residual_calibration_hits_requested_fraction():
     import numpy as np
-    from residual_detector import calibration_offset
+    from kz.ml.residual_detector import calibration_offset
     y = np.linspace(-2, 2, 1001)
     raw = np.zeros_like(y)
     offset = calibration_offset(y, raw, alpha=0.10)
@@ -750,8 +758,8 @@ def test_residual_calibration_hits_requested_fraction():
 
 
 def test_predict_row_matches_training_schema_and_zero_is_not_missing():
-    from predict_price import make_row
-    from train_price_model import FEATURES
+    from kz.ml.predict_price import make_row
+    from kz.ml.train_price_model import FEATURES
     row = make_row(
         brand="Toyota", model="Camry", year=2020, mileage_km=0,
         engine_volume=2.5,
@@ -771,7 +779,7 @@ def test_model_artifacts_are_runtime_data_not_git_payload():
 def test_labeling_queue_contains_positive_residual_and_control_strata():
     """Без random_control очередь не способна находить false negatives."""
     import pandas as pd
-    from explore import select_labeling_rows
+    from kz.report.explore import select_labeling_rows
     n = 27
     d = pd.DataFrame({
         "ad_id": [str(i) for i in range(n)],
@@ -798,7 +806,7 @@ def test_pacing_never_faster_than_base_range():
     """Главная гарантия: пауза НИКОГДА не короче нижней границы — иначе
     «человечность» тайком повысила бы частоту запросов, а цель обратная."""
     import random as _r
-    import pacing
+    from kz.core import pacing
     lo, hi = 4.0, 8.0
     rng = _r.Random(0)
     pauses = [pacing.human_pause(lo, hi, rng=rng) for _ in range(2000)]
@@ -811,7 +819,7 @@ def test_pacing_never_faster_than_base_range():
 def test_pacing_long_break_cadence():
     """Перерыв ровно каждые BREAK_EVERY запросов, а не когда попало."""
     import random as _r
-    import pacing
+    from kz.core import pacing
     rng = _r.Random(1)
     hits = [i for i in range(1, 61) if pacing.long_break(i, rng=rng) is not None]
     assert hits == list(range(pacing.BREAK_EVERY, 61, pacing.BREAK_EVERY))
@@ -820,7 +828,7 @@ def test_pacing_long_break_cadence():
 
 def test_pacing_mean_pause_accounts_for_breaks():
     """mean_pause честно учитывает хвост и перерывы (иначе ETA врёт)."""
-    import pacing
+    from kz.core import pacing
     assert pacing.mean_pause(4.0, 8.0) > 6.0          # больше плоского среднего
 
 
@@ -828,7 +836,7 @@ def test_kolesa_jobs_use_shared_pacing():
     """Все три kolesa-джоба ходят через pacing, а не через свой time.sleep(
     random.uniform(...)) — иначе политика ритма разъедется по файлам."""
     from pathlib import Path
-    for f in ["enrich.py", "check_status.py", "backfill_avgprice.py"]:
+    for f in ["kz/collect/enrich.py", "kz/collect/check_status.py", "kz/collect/backfill_avgprice.py"]:
         src = Path(f).read_text(encoding="utf-8")
         assert "pacing.polite_sleep" in src, f
         assert "time.sleep(random.uniform" not in src, f
@@ -838,8 +846,8 @@ def test_kolesa_jobs_use_shared_pacing():
 
 def test_catch_up_parse_budget_forms():
     import pytest as _pt
-    import catch_up
-    assert catch_up.parse_budget(["catch_up.py"]) is None
+    from kz.ops import catch_up
+    assert catch_up.parse_budget(["kz/ops/catch_up.py"]) is None
     assert catch_up.parse_budget(["x", "--budget", "300"]) == 300
     assert catch_up.parse_budget(["x", "--budget=450"]) == 450
     for bad in (["x", "--budget", "abc"], ["x", "--budget=0"], ["x", "--budget=-5"]):
@@ -850,7 +858,7 @@ def test_catch_up_parse_budget_forms():
 def test_catch_up_risk_zones_match_observed_ban():
     """Зоны откалиброваны на реальном факте: ~270 запросов = бан 2026-07-23.
     Дефолт обязан лежать в безопасной зоне."""
-    import catch_up
+    from kz.ops import catch_up
     assert catch_up.risk_zone(50)[0] == "спокойно"
     assert catch_up.risk_zone(catch_up.DEFAULT_KOLESA_BUDGET)[0] == "безопасно"
     assert catch_up.risk_zone(270)[0] == "риск"
@@ -862,7 +870,7 @@ def test_catch_up_risk_zones_match_observed_ban():
 
 
 def test_catch_up_eta_grows_with_volume():
-    import catch_up
+    from kz.ops import catch_up
     assert catch_up.eta_minutes(0) == 0
     assert catch_up.eta_minutes(540) > catch_up.eta_minutes(200) > 0
 
@@ -873,7 +881,7 @@ def test_label_cards_never_requests_kolesa():
     """Карточки — офлайн-инструмент: генератор не делает HTTP-запросов
     вообще (фото подставляются как URL и грузятся браузером с CDN)."""
     from pathlib import Path
-    src = Path("label_cards.py").read_text(encoding="utf-8")
+    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
     for bad in ("requests.get", "requests.head", "urlopen", "httpx"):
         assert bad not in src, bad
 
@@ -881,10 +889,10 @@ def test_label_cards_never_requests_kolesa():
 def test_label_cards_help_covers_real_flags():
     """У каждого флага, который детектор реально ставит, должна быть
     подсказка «как решать» — иначе разметчик остаётся без критерия."""
-    import label_cards
-    import clean
+    from kz.report import label_cards
+    from kz.transform import clean
     from pathlib import Path
-    src = Path("clean.py").read_text(encoding="utf-8")
+    src = Path("kz/transform/clean.py").read_text(encoding="utf-8")
     # флаги подозрения, реально встречающиеся в коде детектора
     for flag in ["price_anomaly_low", "young_car_cheap", "possible_repost",
                  "shared_photo_diff_car", "used_but_zero_mileage",
@@ -902,10 +910,11 @@ def test_label_cards_csv_line_matches_labels_schema():
     должна ложиться ровно в схему manual_labels.csv — иначе clean.py не
     прочитает вердикт."""
     import csv
-    from pathlib import Path
     from io import StringIO
-    header = next(csv.reader(StringIO(
-        Path("data/manual_labels.csv").read_text(encoding="utf-8").splitlines()[0])))
+    from kz.report import label_cards as lc
+    # Схему берём из кода, а не из data/manual_labels.csv: тот в .gitignore,
+    # и в CI на чистом клоне его нет — тест падал FileNotFoundError.
+    header = lc.journal_header()
     assert header[0] == "ad_id"
     assert header[-2:] == ["verdict", "comment"]
     # шаблон из JS: id + ',,,,,,,,' + verdict + ',' + comment
@@ -916,7 +925,7 @@ def test_label_cards_csv_line_matches_labels_schema():
 def test_label_cards_money_and_fmt_handle_missing():
     """Пропуски — норма в этих данных (37% без пробега): формат не должен
     печатать 'nan' в карточке."""
-    import label_cards
+    from kz.report import label_cards
     assert label_cards.money(None) == "—"
     assert label_cards.money(float("nan")) == "—"
     assert label_cards.fmt(None) == "—"
@@ -928,7 +937,7 @@ def test_label_cards_money_and_fmt_handle_missing():
 def test_label_cards_money_reads_naturally():
     """Миллионы — только от миллиона: «0.24М ₸» для 240 000 читается хуже,
     а дешёвых объявлений среди подозрительных больше всего."""
-    import label_cards as lc
+    from kz.report import label_cards as lc
     assert lc.money(240000) == "240 000 ₸"
     assert lc.money(95000) == "95 000 ₸"
     assert lc.money(1_000_000) == "1М ₸"
@@ -939,7 +948,7 @@ def test_label_cards_money_reads_naturally():
 def test_label_cards_price_bands_are_monotonic():
     """Полосы не должны спорить с процентом (был баг: «60% от среднего —
     цена в норме»). Чем дешевле относительно рынка, тем «ниже» ярлык."""
-    import label_cards as lc
+    from kz.report import label_cards as lc
     labels = [lab for _, lab in lc.PRICE_BANDS]
     seen = [lc.price_band(r) for r in (0.2, 0.59, 0.61, 0.84, 0.9, 1.2, 1.5, 9.0)]
     idx = [labels.index(s) for s in seen]
@@ -955,7 +964,7 @@ def test_label_cards_gallery_and_keyboard_present():
     """Ключевая эргономика: крупное фото + миниатюры + лайтбокс + шорткаты.
     Раньше были только 190px-миниатюры, по которым состояние не оценить."""
     from pathlib import Path
-    src = Path("label_cards.py").read_text(encoding="utf-8")
+    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
     for token in ['class="hero"', 'class="thumb', 'id="box"', "openBox",
                   "setVerdict", "focusCard"]:
         assert token in src, token
@@ -967,7 +976,7 @@ def test_catch_up_budget_charges_to_calendar_day(tmp_path, monkeypatch):
     """Расход списывается на текущие сутки, а не на день старта прогона.
     Реальный случай 2026-07-30: --until-done пересёк полночь, и 400
     вчерашних запросов записались сегодняшним числом, съев новую квоту."""
-    import catch_up
+    from kz.ops import catch_up
     f = tmp_path / "budget.json"
     monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
     assert catch_up.charge_budget("kolesa", 20) == {"kolesa": 20, "cdn": 0}
@@ -985,7 +994,7 @@ def test_catch_up_budget_charges_to_calendar_day(tmp_path, monkeypatch):
 def test_catch_up_budget_file_reads_old_format(tmp_path, monkeypatch):
     """Файл прежнего формата не должен терять сегодняшний расход при
     обновлении кода — иначе квота молча удвоится."""
-    import catch_up
+    from kz.ops import catch_up
     from datetime import date
     f = tmp_path / "budget.json"
     monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
@@ -996,7 +1005,8 @@ def test_catch_up_budget_file_reads_old_format(tmp_path, monkeypatch):
 
 
 def test_catch_up_budget_file_keeps_history_bounded(tmp_path, monkeypatch):
-    import catch_up, json
+    import json
+    from kz.ops import catch_up
     f = tmp_path / "budget.json"
     monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
     days = {f"2026-01-{d:02d}": {"kolesa": 1, "cdn": 0} for d in range(1, 21)}
@@ -1010,7 +1020,7 @@ def test_catch_up_per_run_cap_blocks_midnight_burst():
     """Сутки честно обнуляются в полночь, поэтому нужен второй потолок — на
     сам запуск. Иначе прогон, начатый в 23:50, выдал бы двойную квоту
     всплеском за двадцать минут, а банят именно за всплеск объёма."""
-    import catch_up
+    from kz.ops import catch_up
     B = catch_up.DAILY_BUDGET["kolesa"]
     fresh_day = {"kolesa": 0, "cdn": 0}          # после полуночи расход суток 0
     spent_run = {"kolesa": B, "cdn": 0}          # но прогон уже выбрал квоту
@@ -1030,7 +1040,7 @@ def test_avgprice_sentinel_never_acts_as_price():
     снимало флаг у всех подряд (price >= 0.80 * -1 верно всегда)."""
     import numpy as np
     import pandas as pd
-    from clean import exculpate
+    from kz.transform.clean import exculpate
     # exculpate() читает весь набор колонок clean-слоя; наполняем нейтрально,
     # чтобы проверялся ровно один фактор — сентинел.
     base = dict(stat_reasons="price_anomaly_low", rule_reasons="",
@@ -1055,7 +1065,7 @@ def test_badge_sentinel_never_exculpates():
     «аварийная/не на ходу» и снимать подозрение."""
     import numpy as np
     import pandas as pd
-    from clean import exculpate
+    from kz.transform.clean import exculpate
     # exculpate() читает весь набор колонок clean-слоя; наполняем нейтрально,
     # чтобы проверялся ровно один фактор — сентинел.
     base = dict(stat_reasons="price_anomaly_low", rule_reasons="",
@@ -1074,14 +1084,14 @@ def test_badge_sentinel_never_exculpates():
 def test_avgprice_and_badge_stay_out_of_model():
     """Оценка kolesa — валидатор детектора, а НЕ признак модели цены:
     иначе модель просто копировала бы kolesa (target leakage)."""
-    from train_price_model import FEATURES
+    from kz.ml.train_price_model import FEATURES
     assert "kolesa_avg_price" not in FEATURES
     assert "page_status_badge" not in FEATURES
 
 
 def test_label_cards_hint_ignores_sentinel():
     """В карточке разметки сентинел не должен показываться как «средняя цена»."""
-    import label_cards as lc
+    from kz.report import label_cards as lc
     assert lc.price_verdict_hint({"kolesa_avg_price": -1,
                                   "price_tenge": 1_000_000}) == ""
     assert lc.price_verdict_hint({"kolesa_avg_price": 2_000_000,
@@ -1107,8 +1117,267 @@ def test_offline_dag_has_no_network_jobs():
     сетевой джоб, «проверочный» запуск начнёт тратить лимит запросов."""
     from pathlib import Path
     src = Path("airflow/dags/kolesa_offline_dag.py").read_text(encoding="utf-8")
-    for net_job in ["parser.py", "enrich.py", "check_status.py",
-                    "photo_dedup.py", "backfill_avgprice.py", "catch_up.py"]:
+    for net_job in ["kz/collect/parser.py", "kz/collect/enrich.py", "kz/collect/check_status.py",
+                    "kz/collect/photo_dedup.py", "kz/collect/backfill_avgprice.py", "kz/ops/catch_up.py"]:
         assert net_job not in src, f"{net_job} — сетевой, ему не место в офлайн-DAG"
     assert "schedule=None" in src                    # сам не стартует
     assert "is_paused_upon_creation=False" in src    # но ручной запуск исполнится
+
+
+# ─── label_cards: сохранение вердиктов в журнал ──────────────────────────────
+
+def _tmp_journal(tmp_path, monkeypatch):
+    """Синтетический журнал в tmp: тесты не касаются настоящего (правило №1)
+    и не зависят от него.
+
+    Раньше здесь копировался реальный data/manual_labels.csv, и в CI тесты
+    падали FileNotFoundError: data/ в .gitignore, в чистом клоне файла нет.
+    Тест, который проверяет логику, не должен требовать чужих данных.
+    """
+    import csv
+    from kz.report import label_cards as lc
+    dst = tmp_path / "manual_labels.csv"
+    header = ["ad_id", "url", "title", "year", "price_tenge", "mileage_km",
+              "suspicion_reasons", "seller_comment", "verdict", "comment"]
+    rows = [
+        # заполненный вердикт и пустые заглушки из очереди — как в жизни
+        ["225936503", "https://kolesa.kz/a/show/225936503", "Chevrolet Onix",
+         "2023", "1700000", "100000", "young_car_cheap", "Оникс аварийный",
+         "legit", "честно битая"],
+        ["225480956", "https://kolesa.kz/a/show/225480956", "Toyota Highlander",
+         "2008", "4900000", "300030", "price_anomaly_low", "на ходу", "", ""],
+        ["226154999", "https://kolesa.kz/a/show/226154999", "Hyundai Accent",
+         "2012", "1500000", "236500", "price_anomaly_low",
+         "Был пожар, документы в порядке", "", ""],
+    ]
+    with dst.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+    monkeypatch.setattr(lc, "LABELS_CSV", str(dst))
+    monkeypatch.setattr(lc, "LABELS_PREV", str(tmp_path / "prev.csv"))
+    monkeypatch.setattr(lc, "_snapshot_done", False)
+    return lc, dst
+
+
+def test_upsert_keeps_one_row_per_ad(tmp_path, monkeypatch):
+    """Повторный вердикт ОБНОВЛЯЕТ строку, а не плодит новую. Было наоборот,
+    и на одно объявление накопилось четыре строки с разными вердиктами —
+    clean.py брал последнюю, то есть считал верно, но журнал стал нечитаемым."""
+    import csv
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    n0 = len(list(csv.DictReader(dst.open(encoding="utf-8"))))
+    lc.upsert_verdict("111", "legit", "сначала так", {})
+    n1 = len(list(csv.DictReader(dst.open(encoding="utf-8"))))
+    lc.upsert_verdict("111", "fraud", "передумал", {})
+    lc.upsert_verdict("111", "unknown", "не понять", {})
+    rows = list(csv.DictReader(dst.open(encoding="utf-8")))
+    assert n1 == n0 + 1                     # новое объявление добавилось один раз
+    assert len(rows) == n1                  # повторы НЕ добавили строк
+    mine = [r for r in rows if r["ad_id"] == "111"]
+    assert len(mine) == 1
+    assert (mine[0]["verdict"], mine[0]["comment"]) == ("unknown", "не понять")
+
+
+def test_upsert_updates_existing_queue_row_in_place(tmp_path, monkeypatch):
+    """Правится строка, уже стоящая в журнале на своём месте из очереди, —
+    порядок файла не съезжает и описательные колонки не теряются."""
+    import csv
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    rows = list(csv.DictReader(dst.open(encoding="utf-8")))
+    existing = next(r for r in rows if not r["verdict"])
+    pos = rows.index(existing)
+    lc.upsert_verdict(existing["ad_id"], "legit", "проверено", {})
+    after = list(csv.DictReader(dst.open(encoding="utf-8")))
+    assert len(after) == len(rows)                    # ни одной новой строки
+    assert after[pos]["ad_id"] == existing["ad_id"]   # осталась на месте
+    assert after[pos]["verdict"] == "legit"
+    assert after[pos]["title"] == existing["title"]   # факты не перезаписаны
+
+
+def test_upsert_preserves_other_rows_and_backup(tmp_path, monkeypatch):
+    """Правка одной строки не должна менять остальные, а прежняя версия
+    журнала обязана остаться рядом: это ручной ground truth, его нельзя
+    потерять, и в git он не лежит (data/ в .gitignore)."""
+    import csv
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    prev = tmp_path / "manual_labels.prev.csv"
+    monkeypatch.setattr(lc, "LABELS_PREV", str(prev))
+    monkeypatch.setattr(lc, "_snapshot_done", False)
+    before_text = dst.read_text(encoding="utf-8")
+    before = list(csv.DictReader(dst.open(encoding="utf-8")))
+    lc.upsert_verdict("111", "legit", "", {})
+    after = list(csv.DictReader(dst.open(encoding="utf-8")))
+    for a, b in zip(before, after):                   # все прежние строки целы
+        assert a == b
+    assert prev.exists() and prev.read_text(encoding="utf-8") == before_text
+
+
+def test_upsert_writes_ints_without_dot_zero(tmp_path, monkeypatch):
+    """pandas round-trip делал из 50 строку "50.0" и ронял вставку в
+    INTEGER-колонку — поэтому журнал пишется csv-модулем (правило №4)."""
+    import csv
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    lc.upsert_verdict("111", "fraud", "", {
+        "year": 1994.0, "price_tenge": 240000.0,
+        "mileage_km": float("nan"),
+        "seller_comment": 'текст с "кавычками", запятой'})
+    row = [r for r in csv.DictReader(dst.open(encoding="utf-8"))
+           if r["ad_id"] == "111"][0]
+    assert row["year"] == "1994"
+    assert row["price_tenge"] == "240000"
+    assert row["mileage_km"] == ""            # пропуск, а не "nan"
+    assert row["seller_comment"] == 'текст с "кавычками", запятой'
+
+
+def test_upsert_rejects_bad_verdict(tmp_path, monkeypatch):
+    """В журнал попадают только fraud/legit/unknown — иначе clean.py молча
+    проигнорирует строку, и разметчик решит, что вердикт учтён."""
+    import pytest as _pt
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    before = dst.read_text(encoding="utf-8")
+    for bad in ("мошенник", "FRAUD", "", "legit "):
+        with _pt.raises(ValueError):
+            lc.upsert_verdict("111", bad, "", {})
+    assert dst.read_text(encoding="utf-8") == before   # файл вообще не тронут
+
+
+def test_dedupe_journal_collapses_and_keeps_last_verdict(tmp_path, monkeypatch):
+    """Сворачивание накопленных дубликатов: одна строка на объявление,
+    побеждает последний НЕПУСТОЙ вердикт (финальный выбор человека), а
+    пустая строка-заглушка из очереди его не затирает."""
+    import csv
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(lc, "LABELS_PREV", str(tmp_path / "prev.csv"))
+    monkeypatch.setattr(lc, "_snapshot_done", False)
+    header, rows = lc.read_journal()
+    base = dict(rows[0])
+    aid = base["ad_id"]
+    for v, c in [("fraud", "раз"), ("legit", "два"), ("", "")]:
+        r = dict(base); r["verdict"] = v; r["comment"] = c
+        rows.append(r)
+    lc.write_journal(header, rows)
+    uniq = len({str(r["ad_id"]) for r in rows})
+    before, after = lc.dedupe_journal()
+    # Точное число снятых строк не фиксируем: в реальном журнале дубликаты
+    # уже могли накопиться. Инвариант — ровно одна строка на объявление.
+    assert after == uniq < before
+    got = [r for r in csv.DictReader(dst.open(encoding="utf-8"))
+           if r["ad_id"] == aid]
+    assert len(got) == 1
+    assert (got[0]["verdict"], got[0]["comment"]) == ("legit", "два")
+
+
+def test_serve_only_accepts_shown_ads(tmp_path, monkeypatch):
+    """Сервер пишет в журнал только по ad_id из показанных карточек: тело
+    запроса не должно решать, что попадёт в ground truth."""
+    import json, threading, time, urllib.error, urllib.request
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    facts = {"111": {"title": "Audi 80", "year": 1994}}
+    threading.Thread(target=lc.serve, args=("<p>x</p>", facts, 8798),
+                     daemon=True).start()
+    time.sleep(0.8)
+
+    def post(payload):
+        req = urllib.request.Request(
+            "http://127.0.0.1:8798/verdict", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    n = dst.read_text(encoding="utf-8").count("\n")
+    assert post({"ad_id": "111", "verdict": "legit", "comment": "ок"}) == 200
+    assert post({"ad_id": "999", "verdict": "legit", "comment": ""}) == 400
+    assert post({"ad_id": "111", "verdict": "hack", "comment": ""}) == 400
+    assert post({}) == 400
+    assert dst.read_text(encoding="utf-8").count("\n") == n + 1   # только валидный
+
+
+def test_file_mode_page_cannot_write_journal():
+    """В файловом режиме SERVER=false: страница не должна делать вид, что
+    пишет в журнал, если писать физически некуда."""
+    from kz.report import label_cards as lc
+    import pandas as pd
+    rows = pd.DataFrame([{
+        "ad_id": "1", "brand": "Audi", "model": "80", "year": 1994,
+        "price_tenge": 240000, "photos": [], "status": "active",
+        "existing_verdict": None, "suspicion_reasons": "price_anomaly_low",
+        "price_z": -4.0,
+    }])
+    assert "const SERVER = false;" in lc.build(rows, serve_mode=False)
+    assert "const SERVER = true;" in lc.build(rows, serve_mode=True)
+
+
+def test_code_fingerprint_survives_file_moves(tmp_path):
+    """Отпечаток обучающего кода не должен зависеть от РАСПОЛОЖЕНИЯ файлов.
+
+    Реальный баг переезда в пакет: fingerprint брался по строкам-путям
+    ("train_price_model.py"), и обучение падало с FileNotFoundError, как
+    только файлы переехали. Теперь передаётся __file__, а в хэш идёт только
+    имя файла — тот же код в другой папке даёт тот же отпечаток."""
+    from kz.ml.train_price_model import code_fingerprint
+    a = tmp_path / "one" / "mod.py"
+    b = tmp_path / "two" / "mod.py"
+    for p in (a, b):
+        p.parent.mkdir(parents=True)
+        p.write_text("x = 1\n", encoding="utf-8")
+    assert code_fingerprint(str(a)) == code_fingerprint(str(b))
+    b.write_text("x = 2\n", encoding="utf-8")
+    assert code_fingerprint(str(a)) != code_fingerprint(str(b))   # код важен
+
+
+def test_fingerprint_inputs_are_resolvable():
+    """Файлы, по которым считается отпечаток, должны реально существовать —
+    иначе обучение падает только в момент сохранения артефакта, в самом конце."""
+    from pathlib import Path
+    from kz.ml import residual_detector, train_price_model
+    from kz.transform import data_quality
+    for m in (train_price_model, residual_detector, data_quality):
+        assert Path(m.__file__).exists(), m.__name__
+
+
+def test_no_flat_module_imports_left():
+    """После переезда в пакет плоских импортов остаться не должно: они
+    сработали бы только при запуске из корня старым способом и тихо
+    разошлись бы с пакетными."""
+    import re
+    from pathlib import Path
+    flat = {"db", "config", "pacing", "clean", "damage", "enrich", "parser",
+            "check_status", "photo_dedup", "backfill_avgprice", "explore",
+            "data_quality", "text_features", "train_price_model",
+            "residual_detector", "predict_price", "time_to_sell",
+            "label_cards", "evaluate_detector", "catch_up", "run_all",
+            "pipeline_status", "migrate_to_postgres", "ml_report",
+            "ml_dashboard"}
+    bad = []
+    for p in list(Path("kz").rglob("*.py")) + list(Path("tests").glob("*.py")):
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            m = re.match(r"\s*(?:from (\w+) import |import (\w+)(?: as \w+)?$)", line)
+            if m and (m.group(1) or m.group(2)) in flat:
+                bad.append(f"{p}:{i}: {line.strip()}")
+    assert not bad, "плоские импорты:\n" + "\n".join(bad)
+
+
+def test_dag_commands_use_package_modules():
+    """DAG'и запускают код строками shell, и переезд в пакет их не правит
+    автоматически. Реальный случай: внутри python -c остался «from db import»,
+    и таск падал ModuleNotFoundError уже в контейнере, а не на тестах."""
+    import re
+    from pathlib import Path
+    flat = ("db", "config", "pacing", "clean", "enrich", "parser", "explore",
+            "check_status", "photo_dedup", "backfill_avgprice", "label_cards",
+            "catch_up", "run_all", "data_quality", "train_price_model")
+    bad = []
+    for dag in Path("airflow/dags").glob("*.py"):
+        text = dag.read_text(encoding="utf-8")
+        for mod in flat:
+            # плоский импорт внутри строки shell-команды
+            if re.search(rf"from {mod} import ", text):
+                bad.append(f"{dag.name}: from {mod} import")
+            # запуск файла вместо модуля
+            if f"python {mod}.py" in text:
+                bad.append(f"{dag.name}: python {mod}.py")
+    assert not bad, "DAG ссылается на плоские модули:\n" + "\n".join(bad)
