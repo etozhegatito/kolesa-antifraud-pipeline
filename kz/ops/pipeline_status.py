@@ -12,8 +12,8 @@ pipeline_status.py — «пульт»: сколько чего собрано, �
   - статусы жизненного цикла (active/archived/deleted/не проверялось);
   - сколько ручных вердиктов уже размечено.
 
-Запуск: python pipeline_status.py          (отчёт + вопрос «запустить обогащение?»)
-        python pipeline_status.py --run    (отчёт + запуск без вопроса)
+Запуск: python -m kz.ops.pipeline_status          (отчёт + вопрос «запустить обогащение?»)
+        python -m kz.ops.pipeline_status --run    (отчёт + запуск без вопроса)
 
 Если бэклог не пуст и скрипт запущен в интерактивном терминале, в конце
 спрашивает, запустить ли джобы обогащения (enrich → photo_dedup →
@@ -214,7 +214,7 @@ def maybe_run_enrichment(pending: int, ph_pending: int):
 
     if not sys.stdin.isatty():
         # пайп/cron: вопрос задавать некому, просто подсказываем
-        print("\nЗапустить обогащение: python pipeline_status.py --run")
+        print("\nЗапустить обогащение: python -m kz.ops.pipeline_status --run")
         return
 
     print(f"\nВ очереди: {pending} страниц (порция ~120) "
@@ -225,7 +225,7 @@ def maybe_run_enrichment(pending: int, ph_pending: int):
     if ans in ("y", "yes", "д", "да"):
         run_enrichment_jobs()
     else:
-        print("Ок, не запускаю. Когда решишь: python pipeline_status.py --run")
+        print("Ок, не запускаю. Когда решишь: python -m kz.ops.pipeline_status --run")
 
 
 if __name__ == "__main__":

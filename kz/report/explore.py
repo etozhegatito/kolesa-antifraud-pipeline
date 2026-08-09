@@ -13,7 +13,7 @@ EDA (exploratory data analysis) — этап, когда ты СМОТРИШЬ �
   3. Дашборд из 6 графиков → dashboard.png
   4. suspicious_sorted.csv — все флаги, отсортированные по силе аномалии.
 
-Запуск: python explore.py
+Запуск: python -m kz.report.explore
 """
 
 # ─── Самопроверка файла (защита от путаницы при копировании) ────────────────

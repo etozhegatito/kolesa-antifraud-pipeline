@@ -36,6 +36,30 @@ MIN_SIMILAR = 8
 
 _model = None
 _meta = None
+_db_warned = False
+
+
+def query(sql: str, params: dict) -> pd.DataFrame | None:
+    """Запрос к базе, который НЕ обязан удаться.
+
+    Оценка цены целиком живёт в артефакте модели, а база нужна только для
+    приятных дополнений: списка похожих машин и позиции среди них. В
+    контейнере, выложенном наружу, базы рядом нет — и это нормально: сервис
+    должен отдать оценку, а не пятисотку. Поэтому недоступность базы здесь
+    ожидаемое состояние, а не ошибка.
+
+    Предупреждение печатается один раз на процесс: иначе каждый запрос
+    засорял бы логи одним и тем же сообщением.
+    """
+    global _db_warned
+    try:
+        return pd.read_sql(sql, get_engine(), params=params)
+    except Exception as e:                      # noqa: BLE001 — любая проблема связи
+        if not _db_warned:
+            print(f"[web] база недоступна ({type(e).__name__}), "
+                  f"оценка работает, похожие машины отключены")
+            _db_warned = True
+        return None
 
 
 def get_model():
@@ -95,9 +119,10 @@ def similar_cars(car: dict, limit: int = 5) -> pd.DataFrame:
            WHERE brand = %(b)s AND model = %(m)s AND is_suspicious = 0
              AND price_tenge > 0 AND ABS(age - %(a)s) <= 2
            ORDER BY ABS(age - %(a)s), price_tenge"""
-    df = pd.read_sql(q, get_engine(),
-                     params={"b": brand, "m": model_name, "a": int(age)},
-                     dtype={"ad_id": str})
+    df = query(q, {"b": brand, "m": model_name, "a": int(age)})
+    if df is None:
+        return pd.DataFrame()
+    df["ad_id"] = df["ad_id"].astype(str)
     return df.head(limit)
 
 
@@ -118,9 +143,8 @@ def price_position(car: dict, asking_price: float | None) -> dict | None:
     q = """SELECT price_tenge FROM clean_data
            WHERE brand = %(b)s AND model = %(m)s AND is_suspicious = 0
              AND price_tenge > 0 AND ABS(age - %(a)s) <= 2"""
-    prices = pd.read_sql(q, get_engine(),
-                         params={"b": brand, "m": model_name, "a": int(age)})
-    if len(prices) < MIN_SIMILAR:
+    prices = query(q, {"b": brand, "m": model_name, "a": int(age)})
+    if prices is None or len(prices) < MIN_SIMILAR:
         return None
     p = prices.price_tenge.to_numpy()
     pct = float((p < asking_price).mean() * 100)

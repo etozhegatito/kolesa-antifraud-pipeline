@@ -21,7 +21,7 @@ Job: фото-дедуп (photo_dedup.py) — ищем ворованные/пе
 у всех остальных раньше, чем более глубокие фото у кого-то одного:
 на старте нужнее широкий охват, а не глубина по паре объявлений.
 
-Запуск: python photo_dedup.py   (после enrich.py, перед clean.py пасс 2)
+Запуск: python -m kz.collect.photo_dedup   (после enrich.py, перед clean.py пасс 2)
 Выход:  photo_hashes.csv (append-only кэш, по строке на фото)
         photo_duplicates.csv (пересобирается каждый прогон, как
         suspicious_sorted.csv — список пар «одно фото, разные машины»)

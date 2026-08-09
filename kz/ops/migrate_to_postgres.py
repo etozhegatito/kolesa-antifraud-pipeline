@@ -17,7 +17,7 @@ Postgres после первого запуска этой миграции), у
     docker compose up -d
     psql "$DATABASE_URL" -f schema.sql
 
-Запуск: python migrate_to_postgres.py
+Запуск: python -m kz.ops.migrate_to_postgres
 """
 
 # ─── Самопроверка файла (защита от путаницы при копировании) ────────────────

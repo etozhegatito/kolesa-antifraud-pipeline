@@ -9,7 +9,7 @@ ml_report.py — красивый HTML-отчёт по модели цены (а
   • свежая выборка предсказаний.
 Всё inline (CSS+SVG) — файл открывается без интернета.
 
-Запуск: python ml_report.py   (офлайн, только Postgres)
+Запуск: python -m kz.report.ml_report   (офлайн, только Postgres)
 """
 
 import numpy as np

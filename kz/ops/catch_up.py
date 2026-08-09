@@ -41,26 +41,26 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
 не ходим в сеть зря). В конце — офлайн-пересборка clean+отчёт, чтобы
 свежие данные попали во флаги.
 
-Запуск: python catch_up.py             (отчёт + вопрос, запускать ли)
-        python catch_up.py --run        (одна порция на джоб, без вопроса)
-        python catch_up.py --run --until-done
+Запуск: python -m kz.ops.catch_up             (отчёт + вопрос, запускать ли)
+        python -m kz.ops.catch_up --run        (одна порция на джоб, без вопроса)
+        python -m kz.ops.catch_up --run --until-done
                                         (использовать всю дневную квоту:
                                          крутит порциями, пока не выбран
                                          суточный бюджет хоста / не закрыты
                                          пробелы / не пришёл 429; резюмируемо
                                          назавтра — идеально под ежедневный крон)
-        python catch_up.py --run --values
+        python -m kz.ops.catch_up --run --values
                                         (приоритетно ТОЛЬКО ценные-для-оправдания
                                          поля: enrich + backfill = avgPrice/бейдж/
                                          цвет/damage/растаможка. Статусы и фото
                                          пропускает. Быстро чистит подозрительных
                                          под разметку; сочетается с --until-done)
-        python catch_up.py --run --backfill
+        python -m kz.ops.catch_up --run --backfill
                                         (ещё уже: ТОЛЬКО добор avgPrice+бейджа у
                                          УЖЕ обогащённых строк — целится в незапол-
                                          ненные, заполненные пропускает, новые
                                          объявления не обогащает; тоже с --until-done)
-        python catch_up.py --run --backfill --budget 300
+        python -m kz.ops.catch_up --run --backfill --budget 300
                                         (СКОЛЬКО СПАРСИТЬ: потолок запросов к
                                          kolesa на эти сутки. Зоны риска печатаются
                                          при запуске без --run; коротко:
@@ -178,7 +178,7 @@ def print_risk_help(current: int):
     label, _ = risk_zone(current)
     print(f"\nСейчас потолок: {current} ({label}); "
           f"на весь объём ≈{eta_minutes(current):.0f} мин.")
-    print("Задать: python catch_up.py --run --backfill --budget 300")
+    print("Задать: python -m kz.ops.catch_up --run --backfill --budget 300")
     print("Помни: бюджет видит только catch_up — run_all/parser и твой ручной "
           "браузинг kolesa бьют по тому же IP, но здесь не считаются.")
 
@@ -572,13 +572,13 @@ def main():
         run_gapped_jobs(until_done, kolesa_jobs, do_cdn)
         return
     if not sys.stdin.isatty():
-        print(f"\nЗапустить: python catch_up.py --run{flags}")
+        print(f"\nЗапустить: python -m kz.ops.catch_up --run{flags}")
         return
     ans = input("\nЗапустить догон сейчас? [y/N] ").strip().lower()
     if ans in ("y", "yes", "д", "да"):
         run_gapped_jobs(until_done, kolesa_jobs, do_cdn)
     else:
-        print(f"Ок, не запускаю. Когда решишь: python catch_up.py --run{flags}")
+        print(f"Ок, не запускаю. Когда решишь: python -m kz.ops.catch_up --run{flags}")
 
 
 if __name__ == "__main__":

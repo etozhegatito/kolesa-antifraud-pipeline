@@ -104,7 +104,7 @@ def save_floor_artifact(model: CatBoostRegressor, metadata: dict) -> None:
 def load_floor_artifact():
     if not FLOOR_MODEL_PATH.exists() or not FLOOR_METADATA_PATH.exists():
         raise FileNotFoundError(
-            "Нет артефакта ценового пола. Сначала: python residual_detector.py"
+            "Нет артефакта ценового пола. Сначала: python -m kz.ml.residual_detector"
         )
     metadata = json.loads(FLOOR_METADATA_PATH.read_text(encoding="utf-8"))
     if metadata.get("schema_version") != FLOOR_SCHEMA_VERSION:

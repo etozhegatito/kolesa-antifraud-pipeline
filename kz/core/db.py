@@ -16,6 +16,19 @@ from kz.core.config import DATABASE_URL
 
 @lru_cache(maxsize=1)
 def get_engine():
+    """Движок SQLAlchemy или внятная ошибка вместо непонятной.
+
+    Настройки могут отсутствовать законно — веб-сервис оценки в облаке
+    работает без базы (см. kz/core/config.py). Поэтому проверка здесь, в
+    точке обращения: тот, кому база не нужна, до неё не дойдёт, а тот, кому
+    нужна, получит понятное объяснение, а не `create_engine(None)` с
+    сообщением про NoneType.
+    """
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "Не заданы настройки Postgres (POSTGRES_USER/PASSWORD/DB). "
+            "Для пайплайна создайте .env по образцу .env.example; "
+            "веб-сервису оценки база не обязательна.")
     return create_engine(DATABASE_URL)
 
 

@@ -13,7 +13,7 @@
 brand/model, brand и общей медианы. Без baseline высокая R² сама по себе
 не доказывает пользу ML.
 
-Запуск: python train_price_model.py   (офлайн, только Postgres)
+Запуск: python -m kz.ml.train_price_model   (офлайн, только Postgres)
 Выход: data/models/price_model.cbm + price_model.metadata.json
 """
 
@@ -326,7 +326,7 @@ def save_artifact(model: CatBoostRegressor, metadata: dict) -> None:
 def load_artifact() -> tuple[CatBoostRegressor, dict]:
     if not MODEL_PATH.exists() or not METADATA_PATH.exists():
         raise FileNotFoundError(
-            f"Нет обученного артефакта {MODEL_PATH}. Сначала: python train_price_model.py"
+            f"Нет обученного артефакта {MODEL_PATH}. Сначала: python -m kz.ml.train_price_model"
         )
     metadata = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
     if metadata.get("schema_version") != ARTIFACT_SCHEMA_VERSION:

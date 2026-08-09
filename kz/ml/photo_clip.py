@@ -124,21 +124,25 @@ def score_photos(paths: list[str], log=print) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build(log=print) -> pd.DataFrame:
+def build(log=print, all_positions: bool = True) -> pd.DataFrame:
     from kz.ml.photo_features import photo_index
 
-    idx = photo_index()
+    idx = photo_index(all_positions=all_positions)
     if idx.empty:
         raise SystemExit("Нет фотографий: python -m kz.collect.photo_fetch")
-    log(f"Фотографий: {len(idx)}")
+    pos = idx["position"].to_numpy() if all_positions else np.ones(len(idx), int)
+    log(f"Фотографий: {len(idx)} у {idx['ad_id'].nunique()} объявлений")
     scores = score_photos(idx["path"].tolist(), log=log)
+    scores.insert(0, "position", pos)
     scores.insert(0, "ad_id", idx["ad_id"].to_numpy())
     CLIP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    value_cols = [c for c in scores.columns if c not in ("ad_id", "position")]
     np.savez_compressed(
         CLIP_PATH,
         ad_id=scores["ad_id"].to_numpy().astype("U32"),
-        scores=scores.drop(columns="ad_id").to_numpy().astype(np.float32),
-        cols=np.array([c for c in scores.columns if c != "ad_id"], dtype="U32"))
+        position=scores["position"].to_numpy().astype(np.int16),
+        scores=scores[value_cols].to_numpy().astype(np.float32),
+        cols=np.array(value_cols, dtype="U32"))
     log(f"Сохранено → {CLIP_PATH}")
     return scores
 
@@ -149,39 +153,139 @@ def load() -> pd.DataFrame:
     z = np.load(CLIP_PATH, allow_pickle=False)
     df = pd.DataFrame(z["scores"], columns=[str(c) for c in z["cols"]])
     df.insert(0, "ad_id", [str(a) for a in z["ad_id"]])
+    # старые файлы позицию не хранили — там всё было обложками
+    df.insert(1, "position",
+              z["position"] if "position" in z.files else 1)
     return df
 
 
-def validate(log=print) -> None:
-    """Проверка на объявлениях, где состояние известно из другого источника.
+def aggregate(per_photo: pd.DataFrame) -> pd.DataFrame:
+    """Оценки кадров → одна строка на объявление.
 
-    Разметки мало, поэтому сравниваем не точность, а распределения: если
-    оценка осмысленна, у машин с damage-словами в тексте она должна быть
-    систематически выше.
+    Две сводки, потому что они отвечают на разные вопросы:
+
+      max  — «есть ли ХОТЬ ОДИН кадр, похожий на битую машину». Именно так
+             и выглядит честное объявление о повреждённой машине: четыре
+             обычных снимка и один с помятым крылом. Среднее такой кадр
+             размажет и потеряет.
+
+      mean — «машина в целом выглядит плохо». Устойчивее к случайному
+             неудачному ракурсу, но слепа к одиночной улике.
+
+      cover — оценка обложки, чтобы было с чем сравнивать: весь смысл
+             затеи в том, помогают ли кадры 2-5 сверх парадного.
     """
+    cols = [c for c in per_photo.columns if c not in ("ad_id", "position")]
+    g = per_photo.groupby("ad_id")
+    out = g[cols].max().add_suffix("_max").join(
+          g[cols].mean().add_suffix("_mean"))
+    cover = (per_photo.sort_values("position")
+                      .drop_duplicates("ad_id")
+                      .set_index("ad_id")[cols].add_suffix("_cover"))
+    out = out.join(cover)
+    out["n_photos"] = g.size()
+    return out.reset_index()
+
+
+def validate(log=print) -> None:
+    """Отличает ли оценка машины, про которые мы знаем правду со стороны.
+
+    Разметки состояния у нас нет, зато есть два внешних свидетеля: бейдж
+    сайта «Аварийная/Не на ходу» и damage-слова в тексте объявления.
+
+    Меряем AUC, а не разницу средних. AUC (площадь под ROC-кривой) читается
+    буквально: возьмём наугад одну битую машину и одну целую — с какой
+    вероятностью оценка у битой окажется выше. 0.5 — монетка, оценка не
+    знает ничего; 1.0 — идеальное разделение. Разница средних этого не
+    показывает: она может быть заметной из-за нескольких выбросов, тогда
+    как ранжирование останется случайным.
+
+    Главный вопрос замера — не «работает ли CLIP вообще», а **добавляют ли
+    кадры 2-5 что-то сверх обложки**. Поэтому три колонки рядом: _cover,
+    _max и _mean.
+    """
+    from sklearn.metrics import roc_auc_score
+
     from kz.core.db import get_engine
 
-    scores = load()
+    per_photo = load()
+    d = aggregate(per_photo)
     cd = pd.read_sql(
         "SELECT ad_id, damage_keywords, page_status_badge, price_tenge, age "
         "FROM clean_data", get_engine(), dtype={"ad_id": str})
-    d = scores.merge(cd, on="ad_id", how="left")
+    d = d.merge(cd, on="ad_id", how="left")
     d["has_damage"] = d.damage_keywords.fillna("").str.len() > 0
     d["bad_badge"] = d.page_status_badge.fillna("-").str.contains(
         "вар|ход|залож", case=False)
 
-    log(f"Машин с оценкой: {len(d)}\n")
+    log(f"Объявлений с оценкой: {len(d)}   кадров: {len(per_photo)}   "
+        f"в среднем {len(per_photo)/max(len(d),1):.1f} на объявление\n")
+
+    bases = sorted({c for c in per_photo.columns
+                    if c not in ("ad_id", "position")})
     for flag, name in [("has_damage", "damage-слова в тексте"),
-                       ("bad_badge", "бейдж «Аварийная»")]:
-        a, b = d[d[flag]], d[~d[flag]]
-        if len(a) < 3:
-            log(f"{name}: примеров {len(a)} — слишком мало")
+                       ("bad_badge", "бейдж «Аварийная/Не на ходу»")]:
+        y = d[flag].to_numpy()
+        if y.sum() < 5 or (~y).sum() < 5:
+            log(f"{name}: примеров {int(y.sum())} — слишком мало для AUC\n")
             continue
-        log(f"{name}: {len(a)} против {len(b)}")
-        for col in [c for c in scores.columns if c != "ad_id"]:
-            log(f"   {col:14} с признаком {a[col].mean():+.4f}   "
-                f"без {b[col].mean():+.4f}   разница {a[col].mean()-b[col].mean():+.4f}")
+        log(f"{name}: {int(y.sum())} против {int((~y).sum())}   (AUC, 0.5 = монетка)")
+        log(f"   {'ось':14} {'обложка':>9} {'максимум':>9} {'среднее':>9}")
+        for base in bases:
+            cells = []
+            for suffix in ("_cover", "_max", "_mean"):
+                col = base + suffix
+                cells.append(f"{roc_auc_score(y, d[col]):9.3f}"
+                             if col in d else f"{'—':>9}")
+            log(f"   {base:14} " + " ".join(cells))
         log("")
+
+    log("Кадры 2-5 полезны ровно настолько, насколько «максимум» и «среднее»")
+    log("обгоняют «обложку»: обложка — парадный ракурс, и если сигнал есть")
+    log("только там, значит повреждения показывают уже на первом снимке.\n")
+    _redundancy_check(d, log=log)
+
+
+def _redundancy_check(d: pd.DataFrame, log=print) -> None:
+    """Не переоткрывает ли CLIP возраст и цену.
+
+    Главная ловушка всего замера. «Ржавая» и «грязная» машина — почти
+    синонимы «старой и дешёвой», а возраст с ценой у модели уже есть.
+    Высокий AUC сам по себе не доказывает пользу: он докажет её только
+    если оценка добавляет что-то СВЕРХ того, что мы и так знаем.
+
+    Поэтому сравниваем две логистические регрессии: на одних возрасте с
+    ценой и на них же плюс оценка CLIP. Прирост AUC и есть вся польза.
+    """
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import StandardScaler
+
+    d = d.copy()
+    d["log_price"] = np.log(pd.to_numeric(d["price_tenge"], errors="coerce"))
+    d["age"] = pd.to_numeric(d["age"], errors="coerce")
+    probes = [c for c in ("clip_damaged_max", "clip_rusty_mean",
+                          "clip_dirty_mean") if c in d]
+
+    log("Добавляет ли CLIP что-то СВЕРХ возраста и цены:")
+    for flag, name in [("has_damage", "damage-слова"),
+                       ("bad_badge", "бейдж «Аварийная»")]:
+        work = d[["age", "log_price", flag] + probes].dropna()
+        y = work[flag].to_numpy().astype(int)
+        if y.sum() < 5:
+            log(f"  {name}: {int(y.sum())} примеров — слишком мало")
+            continue
+        base = StandardScaler().fit_transform(work[["age", "log_price"]])
+        auc0 = roc_auc_score(y, LogisticRegression(max_iter=1000)
+                             .fit(base, y).predict_proba(base)[:, 1])
+        log(f"  {name} ({int(y.sum())} положительных): "
+            f"возраст+цена дают AUC {auc0:.3f}")
+        for c in probes:
+            X = StandardScaler().fit_transform(work[["age", "log_price", c]])
+            auc = roc_auc_score(y, LogisticRegression(max_iter=1000)
+                                .fit(X, y).predict_proba(X)[:, 1])
+            log(f"     + {c:20} {auc:.3f}  ({auc - auc0:+.3f})")
 
 
 def main():

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import html as _html
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -26,6 +27,22 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from kz.report import label_cards
 from kz.web import pages
 from kz.web.service import full_estimate
+
+# Публичный режим для контейнера, выложенного наружу. Оценка цены — вещь
+# безобидная, а вот разметка вердиктов пишет в data/manual_labels.csv, то есть
+# в размеченный вручную ground truth, на котором меряется весь антифрод.
+# Открыть её анониму — значит дать любому желающему испортить единственный
+# источник правды в проекте. Поэтому в публичном режиме /label и /verdict
+# просто не существуют.
+PUBLIC_DEMO = os.getenv("KZ_PUBLIC_DEMO", "").lower() in ("1", "true", "yes")
+
+# Лимит запросов на адрес в публичном режиме. Число взято с большим запасом
+# относительно живого человека: заполнить форму и нажать «оценить» чаще
+# тридцати раз в минуту вручную нельзя. Цель не защита от злого умысла —
+# от неё одним счётчиком не спастись, — а чтобы случайный цикл в чужом
+# скрипте не съел весь процессор бесплатной машины.
+RATE_LIMIT_PER_MIN = 30
+RATE_WINDOW_SEC = 60
 
 app = FastAPI(title="KZ Car Market", docs_url="/api/docs")
 
@@ -47,6 +64,34 @@ def _cards():
         _cards_html = label_cards.build(rows, serve_mode=True)
         _cards_facts = label_cards.journal_facts(rows)
     return _cards_html
+
+
+if PUBLIC_DEMO:
+    import time
+    from collections import defaultdict, deque
+
+    _hits: dict[str, deque] = defaultdict(deque)
+
+    @app.middleware("http")
+    async def rate_limit(request: Request, call_next):
+        """Скользящее окно на адрес: храним времена запросов за последнюю
+        минуту и отбрасываем всё, что старше.
+
+        Счётчик живёт в памяти процесса, поэтому при нескольких машинах
+        лимит становится «столько-то на машину». Для витрины этого хватает,
+        а честный распределённый лимит потребовал бы Redis — лишняя
+        зависимость ради задачи, которой пока нет.
+        """
+        ip = request.client.host if request.client else "?"
+        now = time.monotonic()
+        q = _hits[ip]
+        while q and now - q[0] > RATE_WINDOW_SEC:
+            q.popleft()
+        if len(q) >= RATE_LIMIT_PER_MIN:
+            return JSONResponse({"error": "слишком часто, подождите минуту"},
+                                status_code=429)
+        q.append(now)
+        return await call_next(request)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -111,6 +156,9 @@ def photo(path: str):
 
 @app.get("/label", response_class=HTMLResponse)
 def label_page():
+    if PUBLIC_DEMO:
+        return HTMLResponse("Разметка доступна только в локальном режиме.",
+                            status_code=404)
     return _cards()
 
 
@@ -118,6 +166,8 @@ def label_page():
 async def save_verdict(request: Request):
     """Вердикт разметчика. Путь совпадает с автономным режимом
     label_cards --serve, поэтому один и тот же JS работает в обоих."""
+    if PUBLIC_DEMO:
+        return JSONResponse({"error": "not found"}, status_code=404)
     _cards()                                    # гарантируем, что facts заполнены
     data = await request.json()
     ad_id = str(data.get("ad_id", ""))
@@ -136,8 +186,11 @@ async def save_verdict(request: Request):
 def health():
     from kz.web.service import get_model
     _, meta = get_model()
+    val = meta.get("validation", {}).get("grouped_cv", {}).get("model", {})
     return {
         "ok": True,
         "model_created": meta.get("created_at_utc"),
         "training_rows": meta.get("training_rows"),
+        "model_mape_pct": val.get("mape_pct"),
+        "public_demo": PUBLIC_DEMO,
     }

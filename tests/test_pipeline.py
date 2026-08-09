@@ -1892,3 +1892,136 @@ def test_zero_fraud_is_reported_as_a_bound_not_a_blank():
     src = Path("kz/report/evaluate_detector.py").read_text(encoding="utf-8")
     assert "control_bound_report" in src
     assert "3 / n_ctrl" in src or "3/n_ctrl" in src
+
+
+# ─── Контейнер и публичный режим веб-сервиса ────────────────────────────────
+
+def test_missing_db_settings_do_not_break_import():
+    """Отсутствие настроек Postgres — законное состояние, а не авария.
+
+    Веб-сервис в облаке работает без базы: модель целиком лежит в артефакте.
+    Раньше config.py читал os.environ[...] напрямую и ронял ЛЮБОЙ импорт ещё
+    до старта — контейнер умирал, не успев ответить ни на один запрос.
+    Проверяем поведение при пустом окружении, а не текст файла: файл можно
+    переписать как угодно, лишь бы импорт переживал отсутствие настроек."""
+    import importlib
+    import os
+    import kz.core.config as config
+
+    saved = {k: os.environ.pop(k, None)
+             for k in ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB")}
+    try:
+        reloaded = importlib.reload(config)          # не должно бросить
+        # На машине разработчика load_dotenv вернёт значения из .env, и
+        # проверять будет нечего. В CI и в контейнере .env нет — там условие
+        # выполняется и тест работает по-настоящему.
+        if reloaded.POSTGRES_USER is None:
+            assert reloaded.DATABASE_URL is None
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+        importlib.reload(config)
+
+
+def test_engine_without_settings_explains_itself():
+    """Без настроек get_engine обязан объяснить, что делать, а не отдать
+    create_engine(None) с сообщением про NoneType."""
+    import kz.core.db as db
+    real = db.DATABASE_URL
+    db.get_engine.cache_clear()
+    db.DATABASE_URL = None
+    try:
+        db.get_engine()
+    except RuntimeError as e:
+        assert "POSTGRES" in str(e)
+    else:
+        raise AssertionError("get_engine без настроек обязан упасть внятно")
+    finally:
+        db.DATABASE_URL = real
+        db.get_engine.cache_clear()
+
+
+def test_web_query_survives_dead_database():
+    """Похожие машины — украшение, оценка — суть. Падение базы не должно
+    превращаться в пятисотку на запрос оценки."""
+    import kz.web.service as service
+    import kz.core.db as db
+    real = db.DATABASE_URL
+    db.get_engine.cache_clear()
+    db.DATABASE_URL = None
+    service._db_warned = False
+    try:
+        assert service.query("SELECT 1", {}) is None
+        assert service.similar_cars(
+            {"brand": "X", "model": "Y", "age": 5}).empty
+        assert service.price_position(
+            {"brand": "X", "model": "Y", "age": 5}, 5_000_000) is None
+    finally:
+        db.DATABASE_URL = real
+        db.get_engine.cache_clear()
+        service._db_warned = False
+
+
+def test_public_demo_closes_the_labelling_journal():
+    """Разметка пишет в data/manual_labels.csv — единственный ручной ground
+    truth во всём проекте, на котором меряется антифрод. Открыть её анониму
+    значит дать кому угодно испортить эталон, и восстановить его будет
+    неоткуда."""
+    from pathlib import Path
+    src = Path("kz/web/app.py").read_text(encoding="utf-8")
+    assert "KZ_PUBLIC_DEMO" in src
+    # обе точки записи должны быть закрыты, не только страница
+    assert src.count("if PUBLIC_DEMO:") >= 2
+
+
+def test_image_carries_model_but_not_collected_ads():
+    """В образ едет производная (веса модели), но не сырьё: объявления
+    kolesa.kz не наши, чтобы выкладывать их наружу. По весам дерева
+    объявление не восстановить, поэтому модель везём."""
+    from pathlib import Path
+    docker = Path("Dockerfile").read_text(encoding="utf-8")
+    assert "price_model.cbm" in docker
+    for forbidden in ("COPY data/raw", "COPY data/clean", "COPY data/ ",
+                      "COPY . "):
+        assert forbidden not in docker, forbidden
+    ignore = Path(".dockerignore").read_text(encoding="utf-8")
+    assert "data/*" in ignore and ".env" in ignore
+
+
+def test_web_image_skips_playwright():
+    """Сервису оценки браузер не нужен. Он весит около 300 МБ и качался бы
+    при каждой сборке ради кода, который в контейнере не выполняется."""
+    from pathlib import Path
+    # комментарии отбрасываем: в них playwright как раз и объясняется
+    lines = [l.split("#")[0].strip().lower()
+             for l in Path("requirements-web.txt").read_text(encoding="utf-8")
+                          .splitlines()]
+    pkgs = [l for l in lines if l]
+    assert not any("playwright" in p for p in pkgs)
+    assert any("fastapi" in p for p in pkgs)
+    assert any("catboost" in p for p in pkgs)
+
+
+def test_no_module_advertises_a_command_that_no_longer_works():
+    """Подсказки «Запуск: python X.py» пережили переезд в пакет и врали.
+
+    После реорганизации запускать надо `python -m kz.transform.clean`, а
+    файлы советовали `python clean.py` — команда падает ModuleNotFoundError.
+    Часть таких подсказок ПЕЧАТАЕТСЯ пользователю в момент ошибки: человек
+    упирался в отсутствующий артефакт, получал совет и совет тоже не
+    работал. Ищем по всему пакету, а не по списку файлов: список устареет
+    ровно так же, как устарели подсказки."""
+    import re
+    from pathlib import Path
+    names = {p.name for p in Path("kz").rglob("*.py")
+             if "__pycache__" not in str(p)}
+    bad = []
+    for p in Path("kz").rglob("*.py"):
+        if "__pycache__" in str(p):
+            continue
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            for m in re.finditer(r"python ([a-z_]+)\.py", line):
+                if m.group(1) + ".py" in names:
+                    bad.append(f"{p}:{i}: {m.group(0)}")
+    assert not bad, ("подсказка зовёт файл вместо модуля:\n" + "\n".join(bad))

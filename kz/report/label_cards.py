@@ -18,11 +18,11 @@
 Открытие получившегося HTML делает НОЛЬ запросов к kolesa.kz — только
 подгрузку картинок с CDN. Бюджет kolesa не тратится вообще.
 
-Запуск:  python label_cards.py            → data/eda/label_cards.html
-         python label_cards.py --serve    → то же + локальный сервер, который
+Запуск:  python -m kz.report.label_cards            → data/eda/label_cards.html
+         python -m kz.report.label_cards --serve    → то же + локальный сервер, который
                                             ДОПИСЫВАЕТ вердикты в журнал сразу
                                             при нажатии (рекомендуемый режим)
-         python label_cards.py --all      → включить и residual-кандидатов
+         python -m kz.report.label_cards --all      → включить и residual-кандидатов
                                             из labeling_queue.csv, не только
                                             правиловых подозрительных
 
@@ -38,7 +38,7 @@
 месте, а не продублируется. Смысл правила «журнал не терять» соблюдён:
 перед первой правкой запуска рядом сохраняется предыдущая версия
 (manual_labels.prev.csv), сама запись атомарна, вердикты не пропадают.
-Накопленные ранее дубликаты сворачиваются: python label_cards.py --dedupe
+Накопленные ранее дубликаты сворачиваются: python -m kz.report.label_cards --dedupe
 """
 
 import pathlib as _p
@@ -1207,7 +1207,7 @@ def main():
         before, after = dedupe_journal()
         print(f"Журнал: {before} строк → {after} (одна на объявление).")
         print(f"Предыдущая версия сохранена в {LABELS_PREV}.")
-        print("Дальше пересобери clean-слой: python clean.py")
+        print("Дальше пересобери clean-слой: python -m kz.transform.clean")
         return
 
     rows = load_rows(include_queue)
@@ -1232,7 +1232,7 @@ def main():
           f"журнал ({LABELS_CSV}) отсюда не попадут: страница, открытая как "
           "file://, писать на диск не может.")
     print("Чтобы вердикты дописывались в журнал сразу: "
-          "python label_cards.py --serve")
+          "python -m kz.report.label_cards --serve")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ ml_dashboard.py — визуальный отчёт по МОДЕЛИ цены (
 Метрики честные — out-of-fold (каждая точка предсказана, когда была в
 тест-фолде, а не в обучении). Обучаем только на чистых (is_suspicious=0).
 
-Запуск: python ml_dashboard.py   (офлайн, только Postgres)
+Запуск: python -m kz.report.ml_dashboard   (офлайн, только Postgres)
 """
 
 import matplotlib

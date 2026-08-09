@@ -11,7 +11,7 @@ Kolesa.kz parser — Job 1 (сбор RAW-данных, город Алматы).
      мы имитируем одного неторопливого человека: паузы, перерывы,
      один запуск в день, остановка при первых признаках блокировки.
 
-Запуск:  python parser.py
+Запуск:  python -m kz.collect.parser
 Зависимости:  pip install playwright beautifulsoup4
               playwright install chromium
 """

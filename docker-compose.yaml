@@ -17,6 +17,34 @@ services:
       # сам, без ручного psql -f
       - ./sql/init:/docker-entrypoint-initdb.d:ro
 
+  # ─── Веб-сервис оценки цены ───────────────────────────────────────────────
+  # Тот же образ, что уезжает в облако, только здесь рядом стоит база и
+  # видны «похожие машины». Поднимается явно, чтобы обычная работа с
+  # пайплайном не тянула за собой сборку образа:
+  #     docker compose --profile web up -d --build
+  # Дальше http://localhost:8000
+  web:
+    build: .
+    profiles: ["web"]
+    depends_on:
+      - postgres
+    environment:
+      # внутри compose-сети база зовётся именем сервиса, а не localhost
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # локально разметка нужна, поэтому публичный режим НЕ включаем
+      KZ_PUBLIC_DEMO: "0"
+    ports:
+      - "8000:8000"
+    volumes:
+      # фотографии и журнал вердиктов остаются на хосте: в образ они не
+      # попадают (см. .dockerignore), а локально без них не разметить
+      - ./data/photos:/app/data/photos:ro
+      - ./data/manual_labels.csv:/app/data/manual_labels.csv
+
   # ─── Airflow demo-слой (портфолио, НЕ путь по умолчанию) ──────────────────
   # Основной способ запуска — run_all.py + cron (см. README). Этот блок
   # поднимается ТОЛЬКО явно: `docker compose --profile airflow up -d`.

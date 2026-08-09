@@ -40,18 +40,31 @@ N_COMPONENTS = 48          # во сколько чисел сжимаем эм�
 IMAGE_SIZE = 224           # вход ResNet
 
 
-def photo_index() -> pd.DataFrame:
-    """Какие фотографии лежат на диске: ad_id → путь к обложке."""
+def photo_index(all_positions: bool = False) -> pd.DataFrame:
+    """Какие фотографии лежат на диске: ad_id → путь.
+
+    По умолчанию одна обложка на объявление — так задумано для признаков
+    модели цены: пять кадров одной машины дали бы пять строк на один
+    объект, и любая агрегация должна быть осознанной, а не побочным
+    эффектом чтения индекса.
+
+    all_positions=True возвращает ВСЕ кадры вместе с позицией. Это нужно
+    для оценки состояния: обложка — парадный кадр, продавец ставит туда
+    лучший ракурс, а повреждения, если их вообще показывают, попадают на
+    снимки 2-5.
+    """
     from kz.collect.photo_fetch import MANIFEST
 
+    cols = ["ad_id", "position", "path"] if all_positions else ["ad_id", "path"]
     if not MANIFEST.exists():
-        return pd.DataFrame(columns=["ad_id", "path"])
+        return pd.DataFrame(columns=cols)
     man = pd.read_csv(MANIFEST, dtype={"ad_id": str})
     ok = man[(man["http_status"] == 200) & man["path"].notna()].copy()
     ok = ok[ok["path"].map(lambda p: Path(str(p)).exists())]
-    # одна обложка на объявление: берём минимальную позицию
-    ok = ok.sort_values(["ad_id", "position"]).drop_duplicates("ad_id")
-    return ok[["ad_id", "path"]]
+    ok = ok.sort_values(["ad_id", "position"])
+    if not all_positions:
+        ok = ok.drop_duplicates("ad_id")     # минимальная позиция = обложка
+    return ok[cols]
 
 
 def quality_metrics(path: str) -> dict:

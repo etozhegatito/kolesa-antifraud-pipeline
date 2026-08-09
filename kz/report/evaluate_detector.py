@@ -13,7 +13,7 @@ Ground truth: verdict='fraud' → положительный класс, 'legit'
 отрицательный, 'unknown' и без вердикта → исключаются из счёта.
 Предсказание модели: is_suspicious из clean_data.
 
-Запуск: python evaluate_detector.py         (читает Postgres + CSV)
+Запуск: python -m kz.report.evaluate_detector         (читает Postgres + CSV)
 Полностью офлайн, ни одного запроса к сайту.
 """
 
