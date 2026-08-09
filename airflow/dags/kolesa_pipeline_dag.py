@@ -70,7 +70,6 @@ with DAG(
     listing  = job("parse_listing",   "kz.collect.parser")
     gaps     = job("fill_gaps",       "kz.ops.catch_up", "--run")
     photos   = job("fetch_photos",    "kz.collect.photo_fetch")
-    imgfeat  = job("photo_features",  "kz.ml.photo_features")
     clean    = job("clean",           "kz.transform.clean")
     explore  = job("explore",         "kz.report.explore")
     cards    = job("label_cards",     "kz.report.label_cards")
@@ -78,7 +77,9 @@ with DAG(
     state    = job("report_backlog",  "kz.ops.pipeline_status")
 
     # Photos come after the gap filling but live on a CDN, a different host,
-    # so they do not compete for the listing site's quota. Features are
-    # computed right after the download and only for newly arrived images.
-    snapshot >> listing >> gaps >> photos >> imgfeat
-    imgfeat >> clean >> explore >> cards >> delta >> state
+    # so they do not compete for the listing site's quota. Deriving features
+    # from them is deliberately not a pipeline step: measurement showed the
+    # features do not improve price prediction, and running a network over
+    # thousands of images on every collection would buy nothing.
+    snapshot >> listing >> gaps >> photos
+    photos >> clean >> explore >> cards >> delta >> state

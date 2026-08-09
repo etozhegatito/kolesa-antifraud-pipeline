@@ -73,10 +73,17 @@ with DAG(
     residual  = job("residual_detector", "kz.ml.residual_detector")
     dashboard = job("ml_dashboard",      "kz.report.ml_dashboard")
     report    = job("ml_report",         "kz.report.ml_report")
+    monitor   = job("data_drift",        "kz.ml.monitoring")
+    survival  = job("time_on_market",    "kz.ml.survival")
     state     = job("report_state",      "kz.ops.pipeline_status")
 
     clean >> explore >> cards
     clean >> evaluate
     clean >> train >> dashboard
     train >> residual >> report
-    [cards, evaluate, dashboard, report] >> state
+    # Drift comparison needs the model that is currently deployed, so it waits
+    # for training. Time-on-market only needs the clean layer and the price
+    # model, so it runs alongside the reports.
+    train >> monitor
+    train >> survival
+    [cards, evaluate, dashboard, report, monitor, survival] >> state

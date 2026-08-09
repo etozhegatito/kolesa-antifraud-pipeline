@@ -130,7 +130,8 @@ def live_hosts(urls) -> set[str]:
     return alive
 
 
-def pick_targets(limit: int, covers_only: bool = True) -> pd.DataFrame:
+def pick_targets(limit: int, covers_only: bool = True,
+                 complete_only: bool = False) -> pd.DataFrame:
     """Что качать: сначала обложки — они есть у всех объявлений, и по одной
     на каждое даёт максимальный охват на единицу трафика."""
     ph = pd.read_sql("SELECT ad_id, position, url FROM photos", get_engine(),
@@ -140,6 +141,9 @@ def pick_targets(limit: int, covers_only: bool = True) -> pd.DataFrame:
         ph = ph[ph["position"] == ph.groupby("ad_id")["position"].transform("min")]
 
     man = load_manifest()
+    if complete_only and len(man):
+        started = set(man.loc[man["http_status"] == 200, "ad_id"])
+        ph = ph[ph["ad_id"].isin(started)]
     if len(man):
         done = set(man.loc[man["http_status"].isin(PERMANENT_STATUSES), "url"])
         ph = ph[~ph["url"].isin(done)]
@@ -170,6 +174,12 @@ def main():
     if "--limit" in sys.argv:
         limit = int(sys.argv[sys.argv.index("--limit") + 1])
     covers_only = "--all-positions" not in sys.argv
+    # Дополнить уже начатые объявления: позиции 2-5 там, где обложка есть.
+    # Полный комплект по части машин полезнее, чем по одной картинке у всех:
+    # гипотеза о видимых повреждениях проверяется только на комплектах.
+    complete_only = "--complete" in sys.argv
+    if complete_only:
+        covers_only = False
 
     used = load_budget_used()
     left = DAILY_BUDGET["cdn"] - used["cdn"]
@@ -179,7 +189,7 @@ def main():
         return
     limit = min(limit, left)
 
-    targets = pick_targets(limit, covers_only)
+    targets = pick_targets(limit, covers_only, complete_only)
     if targets.empty:
         log.info("Нечего качать: всё скачано или помечено как недоступное.")
         return

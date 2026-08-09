@@ -106,9 +106,13 @@ LINE = "─" * 64
 # независимо от этого числа: даже с огромным бюджетом цепочка оборвётся, если
 # сайт начнёт лимитировать.
 DEFAULT_KOLESA_BUDGET = 200
+# CDN раздаёт статические файлы и к блокировке 2026-07-23 отношения не имел —
+# та случилась на сайте объявлений. Потолок здесь консервативный по привычке,
+# и он тоже настраивается: CDN_BUDGET.
+DEFAULT_CDN_BUDGET = 1200
 DAILY_BUDGET = {"kolesa": int(os.environ.get("KOLESA_BUDGET",
                                              DEFAULT_KOLESA_BUDGET)),
-                "cdn": 1200}
+                "cdn": int(os.environ.get("CDN_BUDGET", DEFAULT_CDN_BUDGET))}
 BUDGET_FILE  = "logs/.catch_up_budget.json"
 
 # ─── Зоны риска по числу запросов к kolesa за сутки с ОДНОГО IP ──────────────

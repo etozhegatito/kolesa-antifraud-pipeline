@@ -1129,8 +1129,10 @@ def test_offline_dag_dependencies_respect_artifacts():
     assert "clean >> train >> dashboard" in src
     assert "train >> residual >> report" in src
     assert "clean >> explore >> cards" in src
-    # финальный таск логирует состояние и обязан ждать все ветки
-    assert "[cards, evaluate, dashboard, report] >> state" in src
+    # финальный таск логирует состояние и обязан ждать ВСЕ ветки
+    assert "monitor, survival] >> state" in src
+    # мониторинг сравнивает с выборкой текущей модели, значит ждёт обучение
+    assert "train >> monitor" in src
 
 
 def test_collect_dag_delegates_budget_to_catch_up():
@@ -1662,3 +1664,86 @@ def test_photo_ablation_compares_on_same_rows():
     src = Path("kz/ml/photo_ablation.py").read_text(encoding="utf-8")
     assert 'how="inner"' in src          # только машины с фото
     assert "GroupKFold" in src           # и те же разбиения по группам дублей
+
+
+# ─── Анализ выживаемости: срок жизни объявления ─────────────────────────────
+
+def test_survival_uses_posted_date_not_first_sighting():
+    """Начало отсчёта — дата публикации из карточки, а не первая встреча в
+    нашем сборе: иначе срок жизни зависел бы от нашего расписания, а не от
+    рынка. Объявление, размещённое до старта проекта, получило бы срок 0."""
+    from pathlib import Path
+    src = Path("kz/ml/survival.py").read_text(encoding="utf-8")
+    assert "parse_posted" in src
+    assert 'd["start"]' in src
+
+
+def test_survival_respects_events_per_feature_rule():
+    """Модель Кокса на малом числе событий переобучается. Общепринятое
+    правило — не меньше десяти событий на признак, и код обязан его
+    соблюдать, а не молча брать все признаки."""
+    from kz.ml import survival
+    assert survival.MIN_EVENTS_PER_FEATURE >= 10
+
+
+def test_survival_horizon_is_bounded():
+    """Выводы за пределами окна наблюдения — экстраполяция. Горизонт должен
+    быть явной константой, а не подразумеваться."""
+    from kz.ml import survival
+    assert 7 <= survival.HORIZON <= 60
+
+
+# ─── Мониторинг: дрейф данных относительно обучающей выборки ────────────────
+
+def test_psi_zero_for_identical_distributions():
+    """Одинаковые выборки не должны давать сдвига."""
+    import numpy as np
+    from kz.ml.monitoring import psi
+    x = np.random.RandomState(0).normal(size=5000)
+    assert abs(psi(x, x.copy())) < 1e-6
+
+
+def test_psi_grows_with_shift():
+    """Чем сильнее сдвинулось распределение, тем больше индекс. Без этого
+    свойства метрика бесполезна как сигнал тревоги."""
+    import numpy as np
+    from kz.ml.monitoring import psi
+    rng = np.random.RandomState(0)
+    base = rng.normal(size=5000)
+    small = psi(base, rng.normal(loc=0.2, size=5000))
+    big = psi(base, rng.normal(loc=1.5, size=5000))
+    assert 0 <= small < big
+    assert big > 0.25          # сильный сдвиг обязан попасть в тревожную зону
+
+
+def test_psi_survives_empty_bins():
+    """Пустая корзина не должна ронять расчёт бесконечным логарифмом —
+    реальная ситуация, когда новая выборка не покрывает часть диапазона."""
+    import numpy as np
+    from kz.ml.monitoring import psi
+    base = np.arange(1000, dtype=float)
+    shifted = np.arange(500, 1000, dtype=float)      # половина диапазона пуста
+    v = psi(base, shifted)
+    assert np.isfinite(v) and v > 0
+
+
+def test_psi_thresholds_are_the_standard_ones():
+    """Пороги 0.1 и 0.25 — общепринятые, из банковского скоринга. Менять их
+    произвольно значит потерять сопоставимость с чужими отчётами."""
+    from kz.ml import monitoring
+    assert monitoring.PSI_WATCH == 0.10
+    assert monitoring.PSI_ALERT == 0.25
+    assert monitoring.level(0.05) == "стабильно"
+    assert "заметный" in monitoring.level(0.15)
+    assert "СИЛЬНЫЙ" in monitoring.level(0.4)
+
+
+def test_categorical_psi_detects_new_categories():
+    """Появление новых марок — типичный дрейф, и он обязан быть заметен."""
+    import pandas as pd
+    from kz.ml.monitoring import categorical_psi
+    old = pd.Series(["Toyota"] * 80 + ["Lada"] * 20)
+    same = categorical_psi(old, old.copy())
+    new = categorical_psi(old, pd.Series(["BYD"] * 60 + ["Toyota"] * 40))
+    assert abs(same) < 1e-6
+    assert new > 0.25
