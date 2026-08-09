@@ -33,26 +33,78 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from kz.core.db import get_engine
-from kz.ml.time_to_sell import parse_posted
 
 OUT_PNG = Path("data/eda/survival.png")
 HORIZON = 21          # дней: дальше данных почти нет, экстраполировать нечестно
 MIN_EVENTS_PER_FEATURE = 10   # общепринятое правило для модели Кокса
+EVENT_STATUSES = ("archived", "deleted")
+
+_MON = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
+        "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
+
+
+def parse_posted(s, today: date | None = None):
+    """'18 июля' / '18 июл.' → date. Иначе None.
+
+    Kolesa пишет дату публикации без года, поэтому год приходится
+    домысливать. Наивное «текущий год» ломается на стыке: объявление от
+    28 декабря, разобранное 3 января, получило бы дату на год вперёд, срок
+    жизни вышел бы отрицательным и строка молча выпала бы из анализа. Здесь
+    дата из будущего трактуется как прошлогодняя — единственное прочтение,
+    которое имеет смысл для уже опубликованного объявления.
+
+    today параметром, а не через date.today() внутри: иначе тест на этот
+    самый стык года пришлось бы запускать 1 января.
+    """
+    m = re.match(r"\s*(\d{1,2})\s+([а-яё]+)", str(s).lower())
+    if not m:
+        return None
+    day, mon = int(m.group(1)), _MON.get(m.group(2)[:3])
+    if not mon:
+        return None
+    today = today or date.today()
+    try:
+        parsed = date(today.year, mon, day)
+    except ValueError:
+        return None
+    return date(today.year - 1, mon, day) if parsed > today else parsed
+
+
+def build_lifespans(cd: pd.DataFrame, st: pd.DataFrame,
+                    sg: pd.DataFrame) -> pd.DataFrame:
+    """Три таблицы → «сколько прожило и случилось ли событие».
+
+    Вынесено из load_survival отдельной чистой функцией: вся логика
+    цензурирования живёт здесь, и её можно проверить без базы. Ошибка
+    именно тут самая дорогая — если цензурированное объявление посчитать
+    ушедшим, кривая выживания поедет вниз, и метод соврёт ровно в том, ради
+    чего его брали.
+
+    Начало отсчёта — дата публикации из карточки, а не дата, когда мы
+    впервые увидели объявление: сбор начался позже, чем часть объявлений
+    появилась, и от нашего расписания срок жизни зависеть не должен.
+    """
+    d = cd.merge(st, on="ad_id", how="left").merge(sg, on="ad_id", how="left")
+    d["start"] = pd.to_datetime(d["posted_date"].map(parse_posted))
+    d["event"] = d["status"].isin(EVENT_STATUSES).astype(int)
+    # конец наблюдения: дата проверки для ушедших, последняя встреча для живых
+    d["end"] = pd.to_datetime(
+        np.where(d["event"] == 1, d["checked_at"], d["last_seen"]))
+    d["days"] = (d["end"] - d["start"]).dt.days
+    d = d[d["days"].notna() & (d["days"] >= 0) & d["price_tenge"].notna()]
+    return d.reset_index(drop=True)
 
 
 def load_survival() -> pd.DataFrame:
-    """Таблица «сколько прожило и случилось ли событие».
-
-    Начало отсчёта — дата публикации из карточки, а не дата, когда мы впервые
-    увидели объявление: сбор начался позже, чем часть объявлений появилась,
-    и от нашего расписания срок жизни зависеть не должен.
-    """
+    """То же самое, но с чтением из базы."""
     eng = get_engine()
     # Берём все колонки: дальше по этой же таблице считается справедливая цена
     # моделью, а ей нужен полный набор признаков.
@@ -63,16 +115,7 @@ def load_survival() -> pd.DataFrame:
                      dtype={"ad_id": str})
     sg = pd.read_sql("SELECT ad_id, MAX(seen_date) AS last_seen FROM sightings "
                      "GROUP BY ad_id", eng, dtype={"ad_id": str})
-
-    d = cd.merge(st, on="ad_id", how="left").merge(sg, on="ad_id", how="left")
-    d["start"] = pd.to_datetime(d["posted_date"].map(parse_posted))
-    d["event"] = d["status"].isin(["archived", "deleted"]).astype(int)
-    # конец наблюдения: дата проверки для ушедших, последняя встреча для живых
-    d["end"] = pd.to_datetime(
-        np.where(d["event"] == 1, d["checked_at"], d["last_seen"]))
-    d["days"] = (d["end"] - d["start"]).dt.days
-    d = d[d["days"].notna() & (d["days"] >= 0) & d["price_tenge"].notna()]
-    return d.reset_index(drop=True)
+    return build_lifespans(cd, st, sg)
 
 
 def add_price_position(d: pd.DataFrame) -> pd.DataFrame:

@@ -1110,13 +1110,18 @@ def dedupe_journal() -> tuple[int, int]:
     return before, len(out)
 
 
-def serve(html: str, facts: dict, port: int = 8765) -> None:
+def serve(html: str, facts: dict, port: int = 8765, on_ready=None) -> None:
     """Локальный сервер: отдаёт карточки и дописывает вердикты в журнал.
 
     Нужен потому, что страница, открытая как file://, писать на диск не может
     в принципе — а без записи выборы приходилось переносить копипастой.
     Слушаем только 127.0.0.1: инструмент локальный, наружу его открывать
     незачем. Пишем строго через append_verdict (валидация + append-only).
+
+    port=0 означает «любой свободный», а on_ready(port) вызывается сразу
+    после привязки. Это ради тестов: с жёстким портом два одновременных
+    прогона дрались за него, а фиксированная пауза «подождём, наверное
+    поднялся» превращала тест в лотерею на медленной машине.
     """
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import unquote
@@ -1171,6 +1176,9 @@ def serve(html: str, facts: dict, port: int = 8765) -> None:
             pass
 
     srv = HTTPServer(("127.0.0.1", port), Handler)
+    port = srv.server_address[1]        # при port=0 настоящий выбрала ОС
+    if on_ready:
+        on_ready(port)
     print(f"\nОткрой: http://127.0.0.1:{port}")
     print(f"Вердикты дописываются в {LABELS_CSV} сразу при нажатии.")
     print("Остановить: Ctrl+C")

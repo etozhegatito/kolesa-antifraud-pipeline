@@ -525,17 +525,115 @@ def test_junk_mileage_placeholder_detection():
     assert not is_junk_mileage(float("nan"))
 
 
-# ─── time-to-sell (уровень 2): парсинг даты публикации из карточки ──────────
+# ─── Анализ выживаемости: дата публикации и цензурирование ──────────────────
 def test_parse_posted_date():
     from datetime import date
-    from kz.ml.time_to_sell import parse_posted
-    cy = date.today().year
-    assert parse_posted("18 июля") == date(cy, 7, 18)
-    assert parse_posted("18 июл.") == date(cy, 7, 18)      # сокращение
-    assert parse_posted("5 мая") == date(cy, 5, 5)
-    assert parse_posted("сегодня") is None                 # относительная — не дата
-    assert parse_posted(None) is None
-    assert parse_posted("99 июля") is None                 # невалидный день
+    from kz.ml.survival import parse_posted
+    today = date(2026, 8, 10)
+    assert parse_posted("18 июля", today) == date(2026, 7, 18)
+    assert parse_posted("18 июл.", today) == date(2026, 7, 18)   # сокращение
+    assert parse_posted("5 мая", today) == date(2026, 5, 5)
+    assert parse_posted("сегодня", today) is None    # относительная — не дата
+    assert parse_posted(None, today) is None
+    assert parse_posted("99 июля", today) is None    # невалидный день
+
+
+def test_posted_date_rolls_back_over_new_year():
+    """Kolesa пишет дату без года. Наивное «текущий год» ломается на стыке:
+    объявление от 28 декабря, разобранное 3 января, получало дату на год
+    вперёд. Дальше срок жизни выходил отрицательным, и строка молча
+    выпадала из анализа выживаемости — потеря данных без единого warning."""
+    from datetime import date
+    from kz.ml.survival import parse_posted
+    jan = date(2026, 1, 3)
+    assert parse_posted("28 декабря", jan) == date(2025, 12, 28)
+    assert parse_posted("2 января", jan) == date(2026, 1, 2)     # уже было
+    assert parse_posted("3 января", jan) == date(2026, 1, 3)     # сегодня
+
+
+def _survival_fixture():
+    """Три таблицы в том же виде, в каком их отдаёт база."""
+    cd = pd.DataFrame({
+        "ad_id": ["a", "b", "c", "d"],
+        "posted_date": ["1 июля", "1 июля", "1 июля", "1 июля"],
+        "status": ["archived", "deleted", "active", "active"],
+        "price_tenge": [5e6, 6e6, 7e6, None],
+    })
+    st = pd.DataFrame({
+        "ad_id": ["a", "b", "c", "d"],
+        "checked_at": ["2026-07-11", "2026-07-06", None, None],
+    })
+    sg = pd.DataFrame({
+        "ad_id": ["a", "b", "c", "d"],
+        "last_seen": ["2026-07-11", "2026-07-06", "2026-07-21", "2026-07-21"],
+    })
+    return cd, st, sg
+
+
+def test_censored_ads_are_not_counted_as_sold():
+    """Главная ошибка, ради которой и берут анализ выживаемости.
+
+    Объявление, которое ещё висит, — это НЕ «продано сегодня» и не строка
+    для выбрасывания. Оно наблюдалось столько-то дней и всё ещё живо. Если
+    посчитать его событием, кривая выживания поедет вниз и метод соврёт
+    ровно в том, ради чего его брали."""
+    from kz.ml.survival import build_lifespans
+    d = build_lifespans(*_survival_fixture())
+
+    ev = dict(zip(d.ad_id, d.event))
+    assert ev["a"] == 1 and ev["b"] == 1      # archived и deleted — события
+    assert ev["c"] == 0                       # active — цензурировано, не событие
+    assert "d" not in ev                      # без цены в анализ не берём
+
+    days = dict(zip(d.ad_id, d.days))
+    assert days["a"] == 10                    # 1 → 11 июля, дата проверки
+    assert days["c"] == 20                    # 1 → 21 июля, последняя встреча
+
+
+def test_lifespan_end_comes_from_the_right_column():
+    """Для ушедших конец наблюдения — дата проверки, для живых — последняя
+    встреча в листинге. Перепутать эти две колонки означает мерить не срок
+    жизни объявления, а расписание нашего парсера."""
+    from kz.ml.survival import build_lifespans
+    cd, st, sg = _survival_fixture()
+    # у живого объявления checked_at заполнен И отличается от last_seen
+    st.loc[st.ad_id == "c", "checked_at"] = "2026-07-05"
+    d = build_lifespans(cd, st, sg)
+    assert dict(zip(d.ad_id, d.days))["c"] == 20   # взяли last_seen, не checked_at
+
+
+def test_kaplan_meier_matches_plain_fraction_without_censoring():
+    """Проверка на понятном частном случае: когда цензурирования нет,
+    Каплан-Мейер обязан совпасть с обычной долей ещё живых. Если бы
+    совпадения не было, ошибка сидела бы в самом методе, а не в данных."""
+    from kz.ml.survival import kaplan_meier
+    d = pd.DataFrame({"days": [2, 4, 6, 8, 10], "event": [1, 1, 1, 1, 1]})
+    km = kaplan_meier(d, log=lambda *a, **k: None)
+    assert abs(float(km.survival_function_at_times(5).iloc[0]) - 0.6) < 1e-9
+    assert abs(float(km.survival_function_at_times(9).iloc[0]) - 0.2) < 1e-9
+
+
+def test_cox_features_limited_by_event_count():
+    """Правило десяти событий на признак. Модель Кокса живёт не на числе
+    строк, а на числе СОБЫТИЙ: девятьсот висящих объявлений и восемь
+    ушедших дают восемь событий, и четыре признака на них — это переобучение
+    с доверительными интервалами шире самого эффекта."""
+    import numpy as np
+    from kz.ml.survival import MIN_EVENTS_PER_FEATURE, cox_model
+    assert MIN_EVENTS_PER_FEATURE >= 10
+
+    rng = np.random.default_rng(0)
+    n = 60
+    d = pd.DataFrame({
+        "days": rng.integers(1, 40, n),
+        "event": [1] * 15 + [0] * (n - 15),      # ровно 15 событий → 1 признак
+        "price_ratio": rng.normal(1.0, 0.2, n),
+        "age": rng.integers(1, 25, n),
+        "photos_count": rng.integers(1, 15, n),
+        "is_vip": rng.integers(0, 2, n),
+    })
+    cph = cox_model(d, log=lambda *a, **k: None)
+    assert len(cph.params_) == 15 // MIN_EVENTS_PER_FEATURE == 1, list(cph.params_)
 
 
 # ─── квантильный residual-детектор: конфиг осмыслен, фичи без утечки ────────
@@ -1299,16 +1397,27 @@ def test_dedupe_journal_collapses_and_keeps_last_verdict(tmp_path, monkeypatch):
 def test_serve_only_accepts_shown_ads(tmp_path, monkeypatch):
     """Сервер пишет в журнал только по ad_id из показанных карточек: тело
     запроса не должно решать, что попадёт в ground truth."""
-    import json, threading, time, urllib.error, urllib.request
+    import json, threading, urllib.error, urllib.request
     lc, dst = _tmp_journal(tmp_path, monkeypatch)
     facts = {"111": {"title": "Audi 80", "year": 1994}}
-    threading.Thread(target=lc.serve, args=("<p>x</p>", facts, 8798),
-                     daemon=True).start()
-    time.sleep(0.8)
+
+    # Порт выбирает ОС, а сигнал готовности приходит событием. С жёстким
+    # портом и паузой «подождём 0.8с» тест падал, когда рядом шёл второй
+    # прогон, — а в CI падал бы просто от медленной машины.
+    ready, box = threading.Event(), {}
+
+    def on_ready(p):
+        box["port"] = p
+        ready.set()
+
+    threading.Thread(target=lc.serve, args=("<p>x</p>", facts, 0),
+                     kwargs={"on_ready": on_ready}, daemon=True).start()
+    assert ready.wait(10), "сервер не поднялся за 10 секунд"
 
     def post(payload):
         req = urllib.request.Request(
-            "http://127.0.0.1:8798/verdict", data=json.dumps(payload).encode(),
+            f"http://127.0.0.1:{box['port']}/verdict",
+            data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
@@ -1376,7 +1485,7 @@ def test_no_flat_module_imports_left():
     flat = {"db", "config", "pacing", "clean", "damage", "enrich", "parser",
             "check_status", "photo_dedup", "backfill_avgprice", "explore",
             "data_quality", "train_price_model",
-            "residual_detector", "predict_price", "time_to_sell",
+            "residual_detector", "predict_price", "survival",
             "label_cards", "evaluate_detector", "catch_up", "run_all",
             "pipeline_status", "migrate_to_postgres", "ml_report",
             "ml_dashboard"}
@@ -2025,3 +2134,155 @@ def test_no_module_advertises_a_command_that_no_longer_works():
                 if m.group(1) + ".py" in names:
                     bad.append(f"{p}:{i}: {m.group(0)}")
     assert not bad, ("подсказка зовёт файл вместо модуля:\n" + "\n".join(bad))
+
+
+# ─── Вежливый ритм запросов: инвариант «частота только падает» ──────────────
+
+class _FakeRandom:
+    """Подставной генератор: тесты про ритм не должны зависеть от везения.
+
+    Ради этого в pacing.py и заведён параметр rng — он там был с самого
+    начала, а тестов, ради которых его добавляли, не было."""
+
+    def __init__(self, randoms=(), uniforms=()):
+        self._r, self._u = list(randoms), list(uniforms)
+        self.calls = []
+
+    def random(self):
+        return self._r.pop(0) if self._r else 0.99
+
+    def uniform(self, a, b):
+        self.calls.append((a, b))
+        return self._u.pop(0) if self._u else (a + b) / 2
+
+
+def test_pause_never_shortens_below_the_floor():
+    """Главное обещание модуля: это politeness, а не маскировка. Средняя
+    пауза обязана быть НЕ МЕНЬШЕ прежней, то есть запросов в час становится
+    меньше, а не больше. Если бы «человечность» умела делать паузы короче
+    нижней границы, мы бы под видом вежливости увеличили нагрузку на сайт."""
+    from kz.core.pacing import human_pause, LONG_TAIL_MULT
+
+    lo, hi = 4.0, 8.0
+    # обычный случай: попадает в исходный диапазон
+    assert human_pause(lo, hi, _FakeRandom(randoms=[0.99])) == (lo + hi) / 2
+    # «отвлёкся»: диапазон ТОЛЬКО вверх, нижняя граница не опускается
+    rng = _FakeRandom(randoms=[0.0])
+    assert human_pause(lo, hi, rng) >= hi
+    assert rng.calls == [(hi, hi * LONG_TAIL_MULT)]
+
+
+def test_long_break_fires_on_schedule_and_not_at_zero():
+    """Перерыв каждые N запросов. Нулевой запрос — не повод для перерыва:
+    иначе джоб засыпал бы, ещё ничего не сделав."""
+    from kz.core.pacing import long_break, BREAK_RANGE
+
+    rng = _FakeRandom()
+    assert long_break(0, every=15, rng=rng) is None
+    assert long_break(14, every=15, rng=rng) is None
+    got = long_break(15, every=15, rng=rng)
+    assert got is not None and BREAK_RANGE[0] <= got <= BREAK_RANGE[1]
+    assert long_break(30, every=15, rng=rng) is not None
+    assert long_break(7, every=0, rng=rng) is None       # выключенные перерывы
+
+
+def test_mean_pause_is_strictly_slower_than_flat_uniform():
+    """Оценка времени прогона должна учитывать и хвост, и перерывы. Раньше
+    пользователю обещали «4-8 секунд на запрос», а реальный ритм был
+    разреженнее — и прогноз «это займёт полчаса» врал в полтора раза."""
+    from kz.core.pacing import mean_pause
+
+    lo, hi = 4.0, 8.0
+    flat = (lo + hi) / 2
+    assert mean_pause(lo, hi) > flat
+    # реже перерывы → быстрее в среднем, но всё равно не быстрее плоского
+    assert flat < mean_pause(lo, hi, every=120) < mean_pause(lo, hi, every=15)
+
+
+def test_polite_sleep_prefers_the_break_over_the_short_pause():
+    """На шаге, где положен перерыв, спим перерыв, а не обычную паузу —
+    иначе перерывы просто не наступали бы."""
+    import kz.core.pacing as pacing
+
+    slept = []
+    real_sleep = pacing.time.sleep
+    pacing.time.sleep = slept.append
+    try:
+        brk = pacing.polite_sleep(15, (4.0, 8.0), rng=_FakeRandom(),
+                                  break_every=15)
+        assert brk >= pacing.BREAK_RANGE[0] and slept == [brk]
+        slept.clear()
+        short = pacing.polite_sleep(3, (4.0, 8.0), rng=_FakeRandom(randoms=[0.99]),
+                                    break_every=15)
+        assert short == 6.0 and slept == [6.0]
+    finally:
+        pacing.time.sleep = real_sleep
+
+
+def test_every_import_is_declared_in_some_requirements_file():
+    """Пакет, который код импортирует, обязан быть где-то объявлен.
+
+    Реальный случай: survival.py импортирует lifelines, а в requirements.txt
+    его не было. Локально всё работало — пакет стоял в venv с прошлых
+    экспериментов. В чистом клоне и в CI (`pip install -r requirements.txt`
+    и сразу pytest) прогон падал бы на импорте, и виноватым выглядел бы тест,
+    а не забытая строка в списке зависимостей.
+
+    Проверяем ВСЕ файлы зависимостей: тяжёлые CV-пакеты живут отдельно
+    (см. requirements-photos.txt), и это законно."""
+    import ast
+    import re as _re
+    import sys
+    from pathlib import Path
+
+    declared = set()
+    for req in Path(".").glob("requirements*.txt"):
+        for line in req.read_text(encoding="utf-8").splitlines():
+            line = line.split("#")[0].strip()
+            if line:
+                declared.add(_re.split(r"[><=\[]", line)[0].strip().lower())
+
+    # имя для импорта не всегда совпадает с именем пакета
+    alias = {"sklearn": "scikit-learn", "PIL": "pillow", "dotenv": "python-dotenv",
+             "psycopg2": "psycopg2-binary", "open_clip": "open_clip_torch",
+             "bs4": "beautifulsoup4", "cv2": "opencv-python", "yaml": "pyyaml"}
+    stdlib = set(sys.stdlib_module_names)
+
+    missing = {}
+    for p in list(Path("kz").rglob("*.py")) + list(Path("tests").glob("*.py")):
+        if "__pycache__" in str(p):
+            continue
+        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                mods = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                mods = [node.module.split(".")[0]]
+            else:
+                continue
+            for m in mods:
+                if m in stdlib or m in ("kz", "__future__"):
+                    continue
+                pkg = alias.get(m, m).lower()
+                if pkg not in declared:
+                    missing.setdefault(pkg, set()).add(str(p))
+    assert not missing, "импортируется, но нигде не объявлено:\n" + "\n".join(
+        f"  {pkg} ← {', '.join(sorted(files))}" for pkg, files in sorted(missing.items()))
+
+
+def test_dag_docstring_lists_every_task_it_defines():
+    """Схема в докстринге DAG'а — первое, что читает человек, и она обязана
+    совпадать с кодом ниже. Задачи добавлялись (fetch_photos, data_drift,
+    time_on_market), а нарисованный граф остался прежним: читатель видел
+    конвейер, которого уже нет."""
+    import ast
+    import re as _re
+    from pathlib import Path
+
+    bad = []
+    for dag in sorted(Path("airflow/dags").glob("*.py")):
+        text = dag.read_text(encoding="utf-8")
+        doc = ast.get_docstring(ast.parse(text)) or ""
+        for task_id in _re.findall(r'job\(\s*"([a-z_]+)"', text):
+            if task_id not in doc:
+                bad.append(f"{dag.name}: задача {task_id} не описана в докстринге")
+    assert not bad, "\n".join(bad)

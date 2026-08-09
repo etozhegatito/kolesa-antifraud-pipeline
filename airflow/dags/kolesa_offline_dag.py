@@ -7,9 +7,11 @@ chain: here the real dependency graph is spelled out, so independent branches
 run at the same time. That is the reason to use an orchestrator at all —
 otherwise it would just be an expensive cron.
 
-    clean ──┬── explore ── label_cards
-            ├── evaluate_detector
-            └── train_price_model ──┬── ml_dashboard
+    clean ──┬── explore ── label_cards ───────────────────────┐
+            ├── evaluate_detector ────────────────────────────┤
+            └── train_price_model ──┬── ml_dashboard ─────────┤
+                                    ├── data_drift ───────────┤
+                                    ├── time_on_market ───────┤
                                     └── residual_detector ── ml_report
                                                                  │
                                        report_state <────────────┘
@@ -21,6 +23,11 @@ Why the graph looks like this:
   evaluate_detector only needs clean_data, so it does not wait for training;
   ml_dashboard reads the price model, while ml_report needs both the price
     model and the calibrated price floor — hence the different branch depths;
+  data_drift compares today's feature distributions against the sample the
+    deployed model was trained on, so it has to wait for training;
+  time_on_market fits Kaplan-Meier and Cox on the clean layer but needs the
+    price model to place each ad against its fair price, so it waits too —
+    and then runs alongside the reports rather than behind them;
   report_state runs last and logs coverage, backlogs and verdict counts, so a
     finished run says what the state is rather than just "success".
 

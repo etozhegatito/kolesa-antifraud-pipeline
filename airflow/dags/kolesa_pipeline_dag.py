@@ -5,18 +5,25 @@ Data collection from kolesa.kz — the only DAG that touches the network.
 This is the Airflow counterpart of `run_all --collect`, and the task order is
 the same:
 
-    db_snapshot -> parse_listing -> fill_gaps -> clean -> explore
-                -> label_cards -> report_new_rows
+    db_snapshot -> parse_listing -> fill_gaps -> fetch_photos -> clean
+                -> explore -> label_cards -> report_new_rows -> report_backlog
 
   db_snapshot        record current row counts, so the run can report at the
                      end how much data actually arrived;
   parse_listing      fresh listing pages: new ads and price observations;
   fill_gaps          top up statuses, page enrichment and photo hashes in
                      small batches, staying inside the daily request budget;
+  fetch_photos       download images to disk while the links are still alive.
+                     This is collection, not feature engineering: one of the
+                     two CDN hosts was decommissioned and took the photos of
+                     1610 ads with it, so the raw files are worth having even
+                     though the features derived from them did not help;
   clean / explore    rebuild the clean layer and reports offline, so whatever
                      was collected is reflected in the flags right away;
   label_cards        regenerate the labelling cards for the fresh list;
-  report_new_rows    print the delta per table: ads parsed, rows stored.
+  report_new_rows    print the delta per table: ads parsed, rows stored;
+  report_backlog     what is still missing — statuses, enrichment, hashes —
+                     so the next run's size is a number, not a guess.
 
 Why gap filling is a single task instead of one task per job
 ------------------------------------------------------------
