@@ -1144,6 +1144,8 @@ def test_offline_dag_dependencies_respect_artifacts():
     assert "clean >> train >> dashboard" in src
     assert "train >> residual >> report" in src
     assert "clean >> explore >> cards" in src
+    # финальный таск логирует состояние и обязан ждать все ветки
+    assert "[cards, evaluate, dashboard, report] >> state" in src
 
 
 def test_collect_dag_delegates_budget_to_catch_up():
@@ -1476,3 +1478,116 @@ def test_ml_flag_implies_offline_rebuild():
     from pathlib import Path
     src = Path("kz/ops/run_all.py").read_text(encoding="utf-8")
     assert 'fast  = "--fast" in sys.argv or ml' in src
+
+
+# ─── db_stats: логирование дельт для DAG'ов ──────────────────────────────────
+
+def test_db_stats_tables_cover_pipeline_layers():
+    """Отчёт должен покрывать все слои: сырьё, обогащение, clean. Иначе после
+    прогона не видно, куда именно ушли новые строки."""
+    from kz.ops import db_stats
+    names = [t for t, _ in db_stats.TABLES]
+    for must in ["raw_ads", "sightings", "photos", "enriched", "clean_data"]:
+        assert must in names, must
+
+
+def test_db_stats_snapshot_roundtrip(tmp_path, monkeypatch):
+    """Снимок нужен потому, что каждый таск Airflow — отдельный процесс:
+    передать счётчики следующему шагу можно только через файл."""
+    import json
+    from kz.ops import db_stats
+    f = tmp_path / "snap.json"
+    monkeypatch.setattr(db_stats, "SNAPSHOT_FILE", str(f))
+    monkeypatch.setattr(db_stats, "table_counts", lambda: {"raw_ads": 10})
+    saved = db_stats.save_snapshot(str(f))
+    assert saved == {"raw_ads": 10}
+    loaded = db_stats.load_snapshot(str(f))
+    assert loaded["counts"] == {"raw_ads": 10}
+    assert "taken_at_utc" in loaded
+    assert db_stats.load_snapshot(str(tmp_path / "missing.json")) is None
+
+
+def test_db_stats_delta_formatting():
+    """Дельта — это главное, что нужно после прогона: сколько строк пришло."""
+    from kz.ops import db_stats
+    out = db_stats.format_counts({"raw_ads": 4200, "sightings": 5000},
+                                 {"raw_ads": 4000, "sightings": 5000})
+    assert "+200" in out              # выросло
+    assert "no change" in out         # не изменилось — тоже сигнал
+    plain = db_stats.format_counts({"raw_ads": 4200})
+    assert "+" not in plain           # без baseline колонки дельты нет
+
+
+def test_dags_are_in_english():
+    """DAG'и читают на собеседовании и в портфолио — держим их на английском.
+    Проверяем по кириллице в исходнике."""
+    import re
+    from pathlib import Path
+    for dag in Path("airflow/dags").glob("*.py"):
+        cyr = re.findall(r"[а-яА-ЯёЁ]+", dag.read_text(encoding="utf-8"))
+        assert not cyr, f"{dag.name}: кириллица в DAG — {cyr[:5]}"
+
+
+# ─── Веб-интерфейс: логика проверяется без поднятия сервера ──────────────────
+
+def test_web_jsonable_handles_numpy_and_nan():
+    """pandas отдаёт int64/float64, а json.dumps их не умеет — ответ падал с
+    «Object of type int64 is not JSON serializable». NaN тоже недопустим:
+    в JSON его нет, браузер получил бы невалидный ответ."""
+    import numpy as np
+    from kz.web.service import jsonable
+    out = jsonable({"a": np.int64(5), "b": np.float64(1.5), "c": float("nan"),
+                    "d": [np.int64(1), np.bool_(True)], "e": "текст", "f": None})
+    assert out == {"a": 5, "b": 1.5, "c": None, "d": [1, True], "e": "текст",
+                   "f": None}
+    assert isinstance(out["a"], int) and not isinstance(out["a"], np.integer)
+    import json
+    json.dumps(out)          # главное: результат обязан сериализоваться
+
+
+def test_web_listing_warnings_are_evidence_based():
+    """Замечания продавцу опираются на замеры по базе, а не на выдумку.
+    Формулировки «смотрят чаще» — про корреляцию, обещаний срока продажи
+    здесь быть не должно."""
+    from kz.web.service import listing_warnings
+    w = listing_warnings({"mileage_km": None, "photos_count": 2},
+                         asking_price=1_000_000, fair=5_000_000, text="")
+    joined = " ".join(w)
+    assert "пробег" in joined.lower()
+    assert "фотограф" in joined.lower()
+    assert "ниже" in joined.lower()              # дёшево без объяснения
+    for promise in ("продаст", "за день", "гарант"):
+        assert promise not in joined.lower(), f"обещание срока: {promise}"
+    # полное объявление по нормальной цене — без замечаний
+    clean = listing_warnings({"mileage_km": 90000, "photos_count": 9},
+                             asking_price=5_000_000, fair=5_000_000,
+                             text="x" * 120)
+    assert clean == []
+
+
+def test_web_price_position_needs_enough_similar():
+    """Позиция среди похожих без достаточной выборки — обман: по трём машинам
+    нельзя сказать «дешевле большинства»."""
+    from kz.web import service
+    assert service.MIN_SIMILAR >= 8
+    assert service.price_position({"brand": None}, 1_000_000) is None
+    assert service.price_position({"brand": "X", "model": "Y", "age": 5}, None) is None
+
+
+def test_web_app_routes_exist():
+    """Маршруты не должны молча пропасть при рефакторинге."""
+    from kz.web.app import app
+    paths = {r.path for r in app.routes}
+    for p in ("/", "/estimate", "/api/estimate", "/label", "/verdict",
+              "/api/health"):
+        assert p in paths, p
+
+
+def test_web_binds_localhost_only():
+    """Приложение локальное: ни аутентификации, ни лимита запросов в нём нет,
+    наружу открывать нельзя."""
+    from pathlib import Path
+    from kz.web.__main__ import HOST
+    assert HOST == "127.0.0.1"
+    src = Path("kz/web/__main__.py").read_text(encoding="utf-8")
+    assert "0.0.0.0" not in src

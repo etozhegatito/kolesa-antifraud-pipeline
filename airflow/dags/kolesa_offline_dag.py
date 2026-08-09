@@ -1,28 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-Пересборка и переобучение — офлайн, БЕЗ единого запроса к kolesa.kz.
+Rebuild and retrain — fully offline, no requests to kolesa.kz.
 
-Это Airflow-версия `run_all --ml`, но не копия его линейной цепочки: здесь
-выражен НАСТОЯЩИЙ граф зависимостей, и независимые ветки идут параллельно.
-Ради этого Airflow и нужен — иначе он был бы дорогим cron'ом.
+This is the Airflow counterpart of `run_all --ml`, but not a copy of its linear
+chain: here the real dependency graph is spelled out, so independent branches
+run at the same time. That is the reason to use an orchestrator at all —
+otherwise it would just be an expensive cron.
 
-Граф и почему он такой:
+    clean ──┬── explore ── label_cards
+            ├── evaluate_detector
+            └── train_price_model ──┬── ml_dashboard
+                                    └── residual_detector ── ml_report
+                                                                 │
+                                       report_state <────────────┘
 
-    clean ──┬── explore ── label_cards      очередь, потом карточки по ней
-            ├── evaluate_detector           метрики: нужен только clean_data
-            └── train ──┬── ml_dashboard    графики читают модель цены
-                        └── residual ── ml_report   отчёт читает ОБА артефакта
+Why the graph looks like this:
 
-  clean первым: он пересобирает clean_data и подхватывает новые вердикты,
-    поэтому всё остальное считается по свежим данным;
-  evaluate_detector и train не зависят друг от друга — идут одновременно;
-  ml_dashboard читает только модель цены, поэтому ждать калибровку пола ему
-    незачем, а вот ml_report требует и модель, и пол.
+  clean runs first because it rebuilds clean_data and picks up any new manual
+    verdicts, so everything downstream is computed on fresh data;
+  evaluate_detector only needs clean_data, so it does not wait for training;
+  ml_dashboard reads the price model, while ml_report needs both the price
+    model and the calibrated price floor — hence the different branch depths;
+  report_state runs last and logs coverage, backlogs and verdict counts, so a
+    finished run says what the state is rather than just "success".
 
-Безопасно запускать в любой момент: сетевых тасков нет, суточный лимит
-запросов не расходуется. Поэтому DAG включён и запускается вручную
-(schedule=None) — расписание тут не нужно, пересборка нужна после разметки,
-а не по будильнику.
+Each task prints its own numbers into the Airflow task log: rows cleaned, how
+many ads look suspicious, cross-validated error of the price model, precision
+of the rule-based detector. Safe to run at any time — nothing here touches the
+network, so no request budget is spent.
+
+Scheduling is intentionally left off (`schedule=None`): a rebuild is something
+you want after labelling, not on a timer.
 """
 
 from datetime import datetime
@@ -33,27 +41,27 @@ from airflow.operators.bash import BashOperator
 PROJECT_DIR = "/opt/project"
 
 
-def job(task_id: str, module: str) -> BashOperator:
-    """Таск = запуск модуля пакета из корня проекта."""
+def job(task_id: str, module: str, *args: str) -> BashOperator:
+    """One task = one package module, run from the project root."""
+    extra = (" " + " ".join(args)) if args else ""
     return BashOperator(
         task_id=task_id,
-        bash_command=f"cd {PROJECT_DIR} && python -m {module}",
+        bash_command=f"cd {PROJECT_DIR} && python -m {module}{extra}",
     )
 
 
 with DAG(
     dag_id="kolesa_offline_rebuild",
-    description="Пересборка clean_data, отчёты и переобучение моделей (без сети)",
-    schedule=None,               # только вручную
+    description="Rebuild clean layer, refresh reports and retrain models (offline)",
+    schedule=None,          # manual runs only
     start_date=datetime(2026, 7, 19),
     catchup=False,
-    max_active_runs=1,           # два прогона писали бы в одни таблицы
+    max_active_runs=1,      # two runs would write to the same tables
     default_args={"owner": "kolesa-antifraud", "retries": 1},
-    tags=["kolesa", "offline", "ml", "safe"],
-    # В отличие от сетевого DAG'а этот создаётся ВКЛЮЧЁННЫМ, и это безопасно:
-    # schedule=None означает, что сам он не стартует никогда. А выключенный
-    # DAG в Airflow не исполнится даже при ручном «Trigger» — прогон повис бы
-    # в очереди, что выглядит как поломка.
+    tags=["kolesa", "offline", "ml"],
+    # Created unpaused, which is safe here: with schedule=None it never starts
+    # on its own. A paused DAG would not run even when triggered by hand — the
+    # run would sit queued, which looks like a failure.
     is_paused_upon_creation=False,
 ) as dag:
 
@@ -65,8 +73,10 @@ with DAG(
     residual  = job("residual_detector", "kz.ml.residual_detector")
     dashboard = job("ml_dashboard",      "kz.report.ml_dashboard")
     report    = job("ml_report",         "kz.report.ml_report")
+    state     = job("report_state",      "kz.ops.pipeline_status")
 
     clean >> explore >> cards
     clean >> evaluate
     clean >> train >> dashboard
     train >> residual >> report
+    [cards, evaluate, dashboard, report] >> state

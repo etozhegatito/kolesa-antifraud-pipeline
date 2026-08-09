@@ -1,31 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-Сбор данных — единственный DAG, который ходит в сеть.
+Data collection from kolesa.kz — the only DAG that touches the network.
 
-Airflow-версия `run_all --collect`, и порядок здесь тот же по той же причине:
+This is the Airflow counterpart of `run_all --collect`, and the task order is
+the same:
 
-    show_budget ── parser ── catch_up ── clean ── explore ── label_cards
+    db_snapshot -> parse_listing -> fill_gaps -> clean -> explore
+                -> label_cards -> report_new_rows
 
-  show_budget    сколько запросов уже потрачено сегодня и где пробелы;
-                 дёшево, офлайн, зато сразу видно, стоит ли вообще идти в сеть;
-  parser         свежий листинг: новые объявления и наблюдения цен;
-  catch_up       добор пробелов (статусы, обогащение, фото) ПОРЦИЯМИ под
-                 суточным лимитом на хост. Он считает расход и встаёт, когда
-                 квота выбрана;
-  дальше         офлайн-пересборка, чтобы собранное сразу попало во флаги.
+  db_snapshot        record current row counts, so the run can report at the
+                     end how much data actually arrived;
+  parse_listing      fresh listing pages: new ads and price observations;
+  fill_gaps          top up statuses, page enrichment and photo hashes in
+                     small batches, staying inside the daily request budget;
+  clean / explore    rebuild the clean layer and reports offline, so whatever
+                     was collected is reflected in the flags right away;
+  label_cards        regenerate the labelling cards for the fresh list;
+  report_new_rows    print the delta per table: ads parsed, rows stored.
 
-ПОЧЕМУ ИМЕННО ТАК, А НЕ ОТДЕЛЬНЫМИ ТАСКАМИ НА КАЖДЫЙ СЕТЕВОЙ ДЖОБ.
-Соблазн расписать статусы, обогащение и фото отдельными тасками велик —
-красивее в UI. Но тогда Airflow запускал бы их по своему усмотрению, включая
-параллельно, и суточный лимит перестал бы соблюдаться: все три стучатся в
-kolesa.kz с одного IP. Именно такая смесь и положила домашний IP 2026-07-23.
-Поэтому весь добор отдан catch_up — он один знает бюджет и держит джобы
-строго последовательно. Airflow здесь отвечает за расписание и наблюдаемость,
-а не за темп запросов.
+Why gap filling is a single task instead of one task per job
+------------------------------------------------------------
+Splitting statuses, enrichment and photos into separate tasks would look
+nicer in the UI, but Airflow would then be free to schedule them however it
+likes, including in parallel. They all talk to the same host from the same IP,
+so the daily request budget would stop being respected. `catch_up` is the only
+component that tracks that budget, so it owns the whole top-up and keeps the
+jobs strictly sequential. Airflow handles scheduling and observability here,
+not request pacing.
 
-DAG создаётся ВЫКЛЮЧЕННЫМ. Расписание оставлено заготовкой: незамеченный
-автозапуск означал бы скрейпинг без присмотра. Включать — осознанно,
-тумблером в UI.
+The DAG is created paused on purpose. The schedule below is a starting point,
+not an instruction: an unattended run would scrape without anyone watching, so
+enabling it is a deliberate click in the UI.
 """
 
 from datetime import datetime
@@ -37,6 +42,11 @@ PROJECT_DIR = "/opt/project"
 
 
 def job(task_id: str, module: str, *args: str) -> BashOperator:
+    """One task = one package module, run from the project root.
+
+    Module stdout becomes the Airflow task log, so whatever the job prints
+    (rows written, pages fetched, batches skipped) is visible per task.
+    """
     extra = (" " + " ".join(args)) if args else ""
     return BashOperator(
         task_id=task_id,
@@ -46,21 +56,23 @@ def job(task_id: str, module: str, *args: str) -> BashOperator:
 
 with DAG(
     dag_id="kolesa_collect",
-    description="Сбор с kolesa.kz под суточным лимитом запросов",
+    description="Collect data from kolesa.kz within the daily request budget",
     schedule="0 9 * * *",
     start_date=datetime(2026, 7, 19),
-    catchup=False,               # не досчитывать пропущенные дни
-    max_active_runs=1,           # два прогона удвоили бы частоту запросов
+    catchup=False,          # do not backfill missed days
+    max_active_runs=1,      # two concurrent runs would double the request rate
     default_args={"owner": "kolesa-antifraud", "retries": 1},
-    tags=["kolesa", "network", "scraping"],
+    tags=["kolesa", "network", "collection"],
     is_paused_upon_creation=True,
 ) as dag:
 
-    budget   = job("show_budget",  "kz.ops.pipeline_status")
-    parser   = job("parser",       "kz.collect.parser")
-    catch_up = job("catch_up",     "kz.ops.catch_up", "--run")
-    clean    = job("clean",        "kz.transform.clean")
-    explore  = job("explore",      "kz.report.explore")
-    cards    = job("label_cards",  "kz.report.label_cards")
+    snapshot = job("db_snapshot",     "kz.ops.db_stats", "--save")
+    listing  = job("parse_listing",   "kz.collect.parser")
+    gaps     = job("fill_gaps",       "kz.ops.catch_up", "--run")
+    clean    = job("clean",           "kz.transform.clean")
+    explore  = job("explore",         "kz.report.explore")
+    cards    = job("label_cards",     "kz.report.label_cards")
+    delta    = job("report_new_rows", "kz.ops.db_stats", "--diff")
+    state    = job("report_backlog",  "kz.ops.pipeline_status")
 
-    budget >> parser >> catch_up >> clean >> explore >> cards
+    snapshot >> listing >> gaps >> clean >> explore >> cards >> delta >> state
