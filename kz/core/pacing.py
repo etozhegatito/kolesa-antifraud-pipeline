@@ -75,13 +75,20 @@ def mean_pause(lo: float, hi: float, every: int = BREAK_EVERY) -> float:
 
 
 def polite_sleep(i: int, delay_range: tuple[float, float], log=None,
-                 rng=random) -> float:
+                 rng=random, break_every: int = BREAK_EVERY) -> float:
     """Пауза ПОСЛЕ i-го запроса (i с 1): либо длинный перерыв, либо базовая.
 
     Единственная функция, которую зовут джобы — вся политика ритма живёт
     здесь, а не размазана по четырём файлам.
+
+    break_every настраивается, потому что нагрузка бывает разной природы.
+    Страницы объявлений парсит человекоподобный сценарий, там перерыв каждые
+    15 запросов уместен. А статичные картинки с CDN — обычная раздача файлов,
+    для неё такая частота перерывов означает, что три четверти времени job
+    просто спит. Реже перерывы для CDN — не спешка, а соответствие тому, как
+    этот ресурс используется в норме.
     """
-    brk = long_break(i, rng=rng)
+    brk = long_break(i, every=break_every, rng=rng)
     if brk is not None:
         if log:
             log.info(f"  ☕ перерыв {brk:.0f}s (после {i} запросов)")

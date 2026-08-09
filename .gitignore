@@ -27,9 +27,13 @@ data/**/*.html
 # воспроизводятся командами train_price_model.py / residual_detector.py
 data/models/*.cbm
 data/models/*.json
+# признаки из фотографий: производные от чужого контента,
+# пересчитываются kz.ml.photo_features и kz.ml.photo_clip
+data/models/*.npz
 
 # рабочие каталоги локальных инструментов (генерируются, не код проекта)
 output/
 tmp/
 cache/
 browser_state.json
+data/photos/

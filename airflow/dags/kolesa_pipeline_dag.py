@@ -69,10 +69,16 @@ with DAG(
     snapshot = job("db_snapshot",     "kz.ops.db_stats", "--save")
     listing  = job("parse_listing",   "kz.collect.parser")
     gaps     = job("fill_gaps",       "kz.ops.catch_up", "--run")
+    photos   = job("fetch_photos",    "kz.collect.photo_fetch")
+    imgfeat  = job("photo_features",  "kz.ml.photo_features")
     clean    = job("clean",           "kz.transform.clean")
     explore  = job("explore",         "kz.report.explore")
     cards    = job("label_cards",     "kz.report.label_cards")
     delta    = job("report_new_rows", "kz.ops.db_stats", "--diff")
     state    = job("report_backlog",  "kz.ops.pipeline_status")
 
-    snapshot >> listing >> gaps >> clean >> explore >> cards >> delta >> state
+    # Photos come after the gap filling but live on a CDN, a different host,
+    # so they do not compete for the listing site's quota. Features are
+    # computed right after the download and only for newly arrived images.
+    snapshot >> listing >> gaps >> photos >> imgfeat
+    imgfeat >> clean >> explore >> cards >> delta >> state

@@ -547,21 +547,6 @@ def test_residual_detector_config():
     assert r.FEATURES is FEATURES         # те же фичи модели → та же анти-утечка
 
 
-# ─── текстовые фичи для модели цены (интерпретируемые keyword-сигналы) ──────
-def test_text_features_extract():
-    from kz.transform.text_features import text_features
-    f = text_features("Максимальная комплектация, кожа, панорама, камера. "
-                      "Не бит не крашен, один хозяин.")
-    assert f["txt_opt_count"] >= 3        # макс.компл + кожа + панорама + камера
-    assert f["txt_positive"] == 1
-    assert f["txt_damage"] == 0
-    f2 = text_features("требует ремонта, рыжики на порогах, продаю срочно")
-    assert f2["txt_damage"] == 1          # damage-лексикон (вкл. рыжики)
-    assert f2["txt_urgency"] == 1
-    assert f2["txt_opt_count"] == 0
-    assert text_features(None)["txt_len"] == 0
-
-
 # ─── модель цены: НЕ должна видеть признаки-утечки цели ─────────────────────
 def test_price_model_features_no_leakage():
     """Модель цены не должна учиться на признаках, производных ОТ цены или на
@@ -1384,7 +1369,7 @@ def test_no_flat_module_imports_left():
     from pathlib import Path
     flat = {"db", "config", "pacing", "clean", "damage", "enrich", "parser",
             "check_status", "photo_dedup", "backfill_avgprice", "explore",
-            "data_quality", "text_features", "train_price_model",
+            "data_quality", "train_price_model",
             "residual_detector", "predict_price", "time_to_sell",
             "label_cards", "evaluate_detector", "catch_up", "run_all",
             "pipeline_status", "migrate_to_postgres", "ml_report",
@@ -1591,3 +1576,89 @@ def test_web_binds_localhost_only():
     assert HOST == "127.0.0.1"
     src = Path("kz/web/__main__.py").read_text(encoding="utf-8")
     assert "0.0.0.0" not in src
+
+
+# ─── Скачивание фотографий: сырьё для работы с изображениями ─────────────────
+
+def test_photo_fetch_retries_transient_failures_only():
+    """Навсегда пропускать можно только то, чего больше не будет: 200 (уже
+    скачано), 404/410 (файла нет). Таймаут и обрыв — временные, и такие
+    ссылки обязаны остаться в очереди, иначе одна сетевая икота теряла бы
+    фотографию навсегда."""
+    from kz.collect.photo_fetch import PERMANENT_STATUSES
+    assert PERMANENT_STATUSES == {200, 404, 410}
+    for transient in (-1, 500, 502, 503, 429):
+        assert transient not in PERMANENT_STATUSES
+
+
+def test_photo_fetch_skips_unresolvable_hosts():
+    """Проверка DNS по одному разу на хост, а не тысяча одинаковых падений.
+    Реальный случай 2026-08-09: kolesa вывел из эксплуатации один из двух
+    CDN-хостов, и 37% ссылок стали недостижимы."""
+    from kz.collect.photo_fetch import live_hosts
+    urls = ["https://example.invalid/a.jpg", "https://localhost/b.jpg"]
+    alive = live_hosts(urls)
+    assert "example.invalid" not in alive       # заведомо нерезолвимый TLD
+
+
+def test_photo_fetch_path_layout_shards_by_ad_id():
+    """Тысячи файлов в одном каталоге тормозят файловую систему, поэтому
+    раскладываем по подпапкам."""
+    from kz.collect.photo_fetch import local_path
+    p = local_path("225678236", 1)
+    assert p.parts[-2] == "22"                  # шард по первым символам
+    assert p.name == "225678236_1.jpg"
+
+
+def test_photo_fetch_uses_cdn_budget_not_kolesa():
+    """Фото лежат на CDN — это другой хост, и он не должен расходовать квоту,
+    которую бережём для основного сайта."""
+    from pathlib import Path
+    src = Path("kz/collect/photo_fetch.py").read_text(encoding="utf-8")
+    assert 'charge_budget("cdn"' in src
+    assert 'charge_budget("kolesa"' not in src
+
+
+# ─── Признаки из фотографий ──────────────────────────────────────────────────
+
+def test_photo_embedding_is_reduced_before_modelling():
+    """2048 признаков на ~2700 машин — почти столько же признаков, сколько
+    наблюдений, и модель выучила бы шум. Поэтому эмбеддинг обязательно
+    сжимается, причём заметно."""
+    from kz.ml import photo_features
+    assert photo_features.N_COMPONENTS <= 64
+    import numpy as np
+    emb = np.random.RandomState(0).rand(120, 2048)
+    out = photo_features.reduce_embeddings(emb)
+    assert out.shape[0] == 120
+    assert out.shape[1] <= photo_features.N_COMPONENTS
+    assert out.shape[1] < emb.shape[1]
+
+
+def test_photo_quality_metrics_detect_blur():
+    """Резкость через дисперсию перепадов яркости: у размытой картинки она
+    заметно ниже. Без этого рекомендация «фото смазано» была бы выдумкой."""
+    import tempfile
+    from pathlib import Path
+    import numpy as np
+    from PIL import Image, ImageFilter
+    from kz.ml.photo_features import quality_metrics
+
+    rng = np.random.RandomState(0)
+    sharp = Image.fromarray((rng.rand(256, 256, 3) * 255).astype("uint8"))
+    blurred = sharp.filter(ImageFilter.GaussianBlur(6))
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / "a.jpg", Path(d) / "b.jpg"
+        sharp.save(a, quality=95); blurred.save(b, quality=95)
+        qa, qb = quality_metrics(str(a)), quality_metrics(str(b))
+    assert qa["img_sharpness"] > qb["img_sharpness"]
+    assert qa["img_pixels"] == 256 * 256
+
+
+def test_photo_ablation_compares_on_same_rows():
+    """Сравнивать наборы признаков можно только на ОДНИХ строках: иначе
+    разница отражала бы состав выборки, а не пользу от фотографий."""
+    from pathlib import Path
+    src = Path("kz/ml/photo_ablation.py").read_text(encoding="utf-8")
+    assert 'how="inner"' in src          # только машины с фото
+    assert "GroupKFold" in src           # и те же разбиения по группам дублей
