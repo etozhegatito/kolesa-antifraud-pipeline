@@ -156,10 +156,18 @@ def listing_warnings(car: dict, asking_price: float | None,
             out.append("Цена примерно на {:.0f}% выше похожих машин — "
                        "объявление может провисеть долго."
                        .format((ratio - 1) * 100))
-    if car.get("mileage_km") in (None, "", 0):
+    def num(key, default=0.0):
+        """Число из поля, каким бы оно ни пришло. Функция публичная, и падать
+        от строки в поле она не должна — вызвать её могут не только из формы."""
+        try:
+            return float(car.get(key))
+        except (TypeError, ValueError):
+            return default
+
+    if not num("mileage_km"):
         out.append("Не указан пробег. Объявления с пробегом смотрят примерно "
                    "на 16% чаще.")
-    if (car.get("photos_count") or 0) < 5:
+    if num("photos_count") < 5:
         out.append("Меньше пяти фотографий. Объявления с пятью и более "
                    "смотрят примерно на 77% чаще.")
     if len(text.strip()) < 50:

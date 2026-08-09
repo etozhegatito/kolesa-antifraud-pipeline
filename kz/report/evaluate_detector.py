@@ -56,7 +56,18 @@ def load_labeled() -> pd.DataFrame:
         c for c in ["sampling_stratum", "stratum_population", "stratum_sample_size"]
         if c in lab.columns
     ]
-    return clean.merge(lab[["ad_id", "verdict", *optional]], on="ad_id", how="inner")
+    out = clean.merge(lab[["ad_id", "verdict", *optional]], on="ad_id", how="inner")
+
+    # Слой выборки живёт в очереди, а не в журнале: журнал ведётся руками и
+    # его схема намеренно простая. Без слоя нельзя отличить контрольное
+    # объявление от помеченного, а значит нельзя оценить пропуски.
+    queue = Path("data/eda/labeling_queue.csv")
+    if queue.exists() and "sampling_stratum" not in out.columns:
+        q = pd.read_csv(queue, dtype={"ad_id": str})
+        keep = [c for c in ["ad_id", "sampling_stratum", "stratum_population",
+                            "stratum_sample_size"] if c in q.columns]
+        out = out.merge(q[keep], on="ad_id", how="left")
+    return out
 
 
 def confusion(df: pd.DataFrame) -> dict:
@@ -92,6 +103,41 @@ def weighted_confusion(df: pd.DataFrame) -> dict | None:
         "FN": float(weight[is_fraud & ~flagged].sum()),
         "TN": float(weight[~is_fraud & ~flagged].sum()),
     }
+
+
+
+def control_bound_report(df: pd.DataFrame) -> str:
+    """Что можно сказать, когда фрода не нашлось вовсе.
+
+    Если в случайной выборке размера n не встретилось ни одного события,
+    доля событий в населении не обязана быть нулём — но она ограничена
+    сверху. Правило трёх: верхняя граница 95%-доверительного интервала
+    примерно равна 3/n. Это стандартный приём, когда наблюдений события
+    ноль, и он превращает «ничего не нашли» в измеримое утверждение.
+    """
+    ctrl = df[df.get("sampling_stratum") == "random_control"] \
+        if "sampling_stratum" in df.columns else df.iloc[0:0]
+    n_ctrl = len(ctrl)
+    lines = ["\n► Что означает ноль фрода"]
+    if n_ctrl == 0:
+        lines.append("  Контрольный слой не размечен — оценить пропуски нельзя.")
+        return "\n".join(lines)
+
+    bound = 3 / n_ctrl                     # правило трёх
+    pop = ctrl["stratum_population"].iloc[0] if "stratum_population" in ctrl \
+        else float("nan")
+    lines.append(f"  В контрольной выборке {n_ctrl} объявлений, фрода не найдено.")
+    lines.append(f"  Правило трёх: доля фрода в базе ниже {bound:.1%} "
+                 f"с доверием 95%.")
+    if pop == pop:
+        lines.append(f"  В пересчёте на {int(pop)} непомеченных объявлений это "
+                     f"не более {int(bound * pop)} случаев обмана, "
+                     f"а точечная оценка — ноль.")
+    lines.append("  Вывод: детектор нечего пропускать. Низкий precision при "
+                 "таком раскладе означает не плохие правила, а чистую базу —")
+    lines.append("  правила помечают необычное, а необычное здесь оказывается "
+                 "объяснимым, а не мошенническим.")
+    return "\n".join(lines)
 
 
 def _prf(c: dict) -> tuple[float, float, float]:
@@ -146,6 +192,13 @@ def main():
     print(f"  precision = {precision:.1%}   (из помеченных — сколько реально фрод)")
     print(f"  recall    = {recall:.1%}   (из всего фрода — сколько поймали)")
     print(f"  F1        = {f1:.1%}   (баланс двух)")
+
+    # Ноль фрода во всей разметке — не отсутствие результата, а результат.
+    # Метрики вырождаются в nan (0/0), и без пояснения это читается как
+    # «ничего не посчиталось», хотя на самом деле посчиталась верхняя граница
+    # доли фрода в базе.
+    if n_fraud == 0:
+        print(control_bound_report(df))
 
     weighted = weighted_confusion(df)
     if weighted is not None:

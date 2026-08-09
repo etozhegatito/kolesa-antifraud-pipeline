@@ -901,9 +901,13 @@ def test_label_cards_csv_line_matches_labels_schema():
     # и в CI на чистом клоне его нет — тест падал FileNotFoundError.
     header = lc.journal_header()
     assert header[0] == "ad_id"
-    assert header[-2:] == ["verdict", "comment"]
-    # шаблон из JS: id + ',,,,,,,,' + verdict + ',' + comment
-    line = "123" + "," * 8 + "legit,причина"
+    # verdict и comment стоят сразу после описательных колонок, а колонки
+    # слоя дописаны в конец — так старые журналы читаются без миграции.
+    i = header.index("verdict")
+    assert header[i + 1] == "comment"
+    assert header[i - 1] == "seller_comment"
+    # шаблон из JS: id + 7 пустых + verdict,comment + пустые колонки слоя
+    line = "123" + "," * 8 + "legit,причина" + "," * (len(header) - 10)
     assert len(next(csv.reader(StringIO(line)))) == len(header)
 
 
@@ -1747,3 +1751,144 @@ def test_categorical_psi_detects_new_categories():
     new = categorical_psi(old, pd.Series(["BYD"] * 60 + ["Toyota"] * 40))
     assert abs(same) < 1e-6
     assert new > 0.25
+
+
+def test_label_cards_show_which_stratum_each_ad_is_from():
+    """Разметчик должен понимать, ЧТО он проверяет. У помеченного правилами
+    вопрос «флаг верен?», у контрольного — «не пропустили ли обман?». Это
+    разные задачи, и без пометки слоя контрольные выглядели бы как ошибочно
+    попавшие в очередь."""
+    from pathlib import Path
+    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    assert "random_control" in src and "rule_positive" in src
+    assert "residual_candidate" in src
+    # у контрольных подсказка обязана говорить, что legit — ожидаемый ответ
+    assert "ожидаемый" in src
+    # и объяснять, зачем их вообще размечают
+    assert "recall" in src or "полнот" in src
+
+
+def test_residual_detector_respects_exculpation():
+    """Оправдание из clean-слоя действует и в модельном детекторе.
+
+    Реальный случай: Camry 2019 за 5.3 млн с разбитым передом. Правила её
+    оправдали по слову «аварийная» в тексте, а квантильный пол об этом не
+    знал и всё равно тащил в кандидаты — хотя дёшево она стоит именно
+    потому, что разбита. Разнобой между двумя детекторами на одних данных
+    хуже, чем отсутствие второго."""
+    from pathlib import Path
+    src = Path("kz/ml/residual_detector.py").read_text(encoding="utf-8")
+    assert "low_price_explained" in src
+    assert "~explained" in src
+
+
+def test_web_labelling_includes_control_group():
+    """Веб-интерфейс обязан показывать полную очередь, а не только помеченных
+    детектором. Иначе размечается лишь то, что он сам нашёл, и полнота
+    (recall) остаётся неизмеримой — а именно ради неё в очередь кладут
+    случайные обычные объявления."""
+    from pathlib import Path
+    src = Path("kz/web/app.py").read_text(encoding="utf-8")
+    assert "include_queue=True" in src
+
+
+def test_label_cards_can_filter_control_group():
+    """Контрольные лежат вперемешку с помеченными, а размечать их надо
+    отдельно: только по ним считается полнота. Без фильтра их пришлось бы
+    выискивать глазами среди сотни карточек."""
+    from pathlib import Path
+    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    assert 'data-stratum="{st}"' in src
+    assert "only-control" in src
+    assert 'not([data-stratum="random_control"])' in src
+
+
+def test_photo_src_prefers_local_and_drops_dead_hosts():
+    """Локальная копия важнее ссылки: она грузится мгновенно и не зависит от
+    того, жив ли сервер kolesa. Один из двух хостов раздачи отключён, и для
+    таких ссылок надо вернуть None, чтобы карточка честно сказала «фото
+    недоступны», а не показывала пустые рамки без объяснения."""
+    from kz.report.label_cards import DEAD_HOSTS, photo_src
+    dead = f"https://{sorted(DEAD_HOSTS)[0]}/webp/aa/x.jpg"
+    live = "https://alaps-photos-kl.kcdn.kz/webp/bb/y.jpg"
+    assert photo_src("999999999", 1, dead, False) is None
+    assert photo_src("999999999", 1, live, False) == live
+
+
+def test_photo_route_blocks_directory_traversal():
+    """Маршрут отдаёт файлы с диска по пути из URL, поэтому обязан проверять,
+    что путь не вылезает за каталог фотографий: иначе через ../ читался бы
+    любой файл, включая .env."""
+    from pathlib import Path
+    for f in ("kz/web/app.py", "kz/report/label_cards.py"):
+        src = Path(f).read_text(encoding="utf-8")
+        assert ".resolve()" in src and "parents" in src, f
+
+
+def test_basket_hint_matches_the_mode():
+    """В серверном режиме вердикты уже в журнале, и советовать копипасту
+    значит путать: пользователь решит, что разметка не сохранилась. Текст
+    подсказки обязан зависеть от режима."""
+    from pathlib import Path
+    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    assert "baskethint" in src
+    assert "SERVER\n  ?" in src or "SERVER ?" in src
+
+
+def test_counter_reflects_journal_not_just_draft():
+    """Счётчик «размечено» должен показывать итог с журналом. У localStorage
+    своя память на каждый адрес, поэтому при открытии на другом порту
+    черновик пуст — и счётчик, считавший только его, выглядел так, будто
+    разметка пропала."""
+    from pathlib import Path
+    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    assert "ALREADY" in src
+    assert "ALREADY.size" in src
+
+
+def test_web_coerces_numeric_fields_from_forms():
+    """Из HTML-формы всё приходит строками. Сравнение «8» < 5 роняло оценку
+    с невнятным «'<' not supported between instances of 'str' and 'int'» —
+    пользователь видел ошибку про типы вместо цены."""
+    from kz.web.service import listing_warnings
+    # строки в числовых полях не должны ронять проверку
+    assert listing_warnings({"mileage_km": "95000", "photos_count": "8"},
+                            11_000_000, 12_000_000, "x" * 120) == []
+    # и мусор тоже: функция публичная, вызвать могут не только из формы
+    w = listing_warnings({"mileage_km": "абв", "photos_count": None},
+                         11_000_000, 12_000_000, "")
+    assert any("пробег" in x.lower() for x in w)
+
+
+def test_web_converts_every_numeric_feature_not_a_hand_list():
+    """Список числовых признаков берётся из модели, а не переписывается в
+    обработчике: иначе новый признак однажды приедет строкой, и ошибка
+    вылезет у пользователя, а не в тестах."""
+    from pathlib import Path
+    src = Path("kz/web/app.py").read_text(encoding="utf-8")
+    assert "NUM_FEATURES" in src
+    assert 'for k in list(NUM_FEATURES)' in src
+
+
+def test_journal_stores_sampling_stratum():
+    """Слой выборки обязан лежать В ЖУРНАЛЕ. Очередь — список работы, она
+    пересобирается и выкидывает размеченное; после разметки контрольных
+    выяснить, что они были контрольными, стало невозможно, а без этого не
+    оценить пропуски. Колонки добавляются к существующему заголовку, чтобы
+    старые журналы продолжали читаться."""
+    from kz.report.label_cards import BASE_HEADER, STRATUM_COLS, journal_header
+    h = journal_header()
+    for c in STRATUM_COLS:
+        assert c in h, c
+    for c in BASE_HEADER:
+        assert c in h, c
+
+
+def test_zero_fraud_is_reported_as_a_bound_not_a_blank():
+    """Ноль фрода в случайной выборке — это результат, а не отсутствие
+    результата: правило трёх даёт верхнюю границу доли. Без пояснения nan
+    читается как «ничего не посчиталось»."""
+    from pathlib import Path
+    src = Path("kz/report/evaluate_detector.py").read_text(encoding="utf-8")
+    assert "control_bound_report" in src
+    assert "3 / n_ctrl" in src or "3/n_ctrl" in src

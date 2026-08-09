@@ -144,10 +144,24 @@ def main():
     support = clean.groupby(["brand", "model"]).size().rename("support").reset_index()
     df = df.merge(support, on=["brand", "model"], how="left")
     df["support"] = df["support"].fillna(0).astype(int)
+    # Оправдание из clean-слоя действует и здесь. Иначе получается разнобой:
+    # правила снимают подозрение с честно битой машины («Машина аварийная» в
+    # тексте, бейдж сайта, «Растаможен: Нет»), а модельный детектор о причине
+    # не знает и тащит ту же машину в кандидаты на разметку.
+    #
+    # Реальный случай: Camry 2019 за 5.3 млн с разбитым передом. Правила её
+    # оправдали, а квантильный пол всё равно счёл подозрительно дешёвой —
+    # разумеется, ведь дёшево она стоит именно потому, что разбита.
+    #
+    # Берём готовый признак из clean.py, а не повторяем логику: источник
+    # правды должен быть один.
+    explained = df.get("info_flags", pd.Series("", index=df.index)) \
+                  .fillna("").str.contains("low_price_explained")
     df["flag"] = (
         df["below_floor"]
         & (df["support"] >= MIN_SUPPORT)
         & (df["age"] <= AGE_MAX)
+        & ~explained
     )
 
     metadata = {

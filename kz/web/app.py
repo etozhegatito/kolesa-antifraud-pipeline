@@ -38,7 +38,12 @@ _cards_facts: dict = {}
 def _cards():
     global _cards_html, _cards_facts
     if _cards_html is None:
-        rows = label_cards.load_rows()
+        # Берём ПОЛНУЮ очередь разметки, а не только помеченных детектором.
+        # Без контрольного слоя считается лишь precision: чтобы узнать, сколько
+        # обмана детектор пропустил, надо проверять и те объявления, которые он
+        # не трогал. Веб-интерфейс расходился здесь с консольным режимом
+        # label_cards --serve --all, что тихо меняло смысл разметки.
+        rows = label_cards.load_rows(include_queue=True)
         _cards_html = label_cards.build(rows, serve_mode=True)
         _cards_facts = label_cards.journal_facts(rows)
     return _cards_html
@@ -58,12 +63,22 @@ def estimate_form():
 async def api_estimate(request: Request):
     """Оценка по характеристикам машины."""
     data = await request.json()
-    car = {k: data.get(k) for k in (
-        "brand", "model", "engine_type", "transmission", "body_type",
-        "condition", "photos_count", "is_vip", "has_monthly_price")}
-    for k in ("age", "year", "mileage_km", "engine_volume"):
-        if data.get(k) not in (None, ""):
-            car[k] = float(data[k])
+    from kz.ml.train_price_model import CAT_FEATURES, NUM_FEATURES
+
+    car = {k: data.get(k) for k in CAT_FEATURES}
+    # Все числовые поля приводим к числу здесь, на границе. Из формы они
+    # приходят строками, и «8» < 5 роняет проверку объявления с невнятным
+    # «'<' not supported between instances of 'str' and 'int'». Перечислять
+    # поля руками нельзя: список признаков растёт, а забытое поле снова
+    # приедет строкой.
+    for k in list(NUM_FEATURES) + ["year"]:
+        v = data.get(k)
+        if v not in (None, ""):
+            try:
+                car[k] = float(v)
+            except (TypeError, ValueError):
+                return JSONResponse({"error": f"поле {k}: ожидается число, "
+                                              f"получено {v!r}"}, status_code=400)
     if "year" in car and "age" not in car:
         from datetime import date
         car["age"] = date.today().year - int(car.pop("year")) + 1
@@ -75,6 +90,23 @@ async def api_estimate(request: Request):
     except Exception as e:                      # noqa: BLE001 — ответ клиенту
         return JSONResponse({"error": str(e)}, status_code=400)
     return JSONResponse(result)
+
+
+@app.get("/photos/{path:path}")
+def photo(path: str):
+    """Локально скачанная фотография.
+
+    Отдаём с диска, а не ссылкой на CDN: один из хостов kolesa уже отключён,
+    и для 39% карточек внешние ссылки ведут в никуда.
+    """
+    from fastapi.responses import FileResponse
+    from kz.collect.photo_fetch import PHOTO_DIR
+
+    target = (PHOTO_DIR / path).resolve()
+    # защита от выхода за каталог через ../
+    if PHOTO_DIR.resolve() not in target.parents or not target.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(target, media_type="image/jpeg")
 
 
 @app.get("/label", response_class=HTMLResponse)

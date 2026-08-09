@@ -55,6 +55,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from kz.core.db import get_engine
@@ -111,10 +112,18 @@ def load_rows(include_queue: bool = False) -> pd.DataFrame:
     eng = get_engine()
     cd = pd.read_sql("SELECT * FROM clean_data", eng, dtype={"ad_id": str})
     ids = set(cd.loc[cd["is_suspicious"] == 1, "ad_id"])
+    stratum = {}
     if include_queue and Path(QUEUE_CSV).exists():
         q = pd.read_csv(QUEUE_CSV, dtype={"ad_id": str})
         ids |= set(q["ad_id"])
+        stratum = dict(zip(q["ad_id"], q["sampling_stratum"]))
     rows = cd[cd["ad_id"].isin(ids)].copy()
+    # Из какого слоя очереди объявление. Без этого разметчик не понимает,
+    # ЧТО именно проверяет: у правиловых вопрос «верен ли флаг», а у
+    # контрольных — «не пропустили ли мы обман», и это разные задачи.
+    default = pd.Series(np.where(rows["is_suspicious"] == 1, "rule_positive", ""),
+                        index=rows.index)
+    rows["stratum"] = rows["ad_id"].map(stratum).fillna(default)
 
     # Доп. поля со страницы, которых нет в clean_data.
     enr = pd.read_sql("SELECT ad_id, options_text, page_condition, has_vin, "
@@ -124,10 +133,16 @@ def load_rows(include_queue: bool = False) -> pd.DataFrame:
     photos = pd.read_sql("SELECT ad_id, position, url FROM photos", eng,
                          dtype={"ad_id": str})
     photos = photos[photos["url"].fillna("").str.startswith("http")]
-    gal = (photos.sort_values(["ad_id", "position"])
-           .groupby("ad_id")["url"].apply(list))
+    photos = photos.sort_values(["ad_id", "position"])
+    gal = photos.groupby("ad_id")["url"].apply(list)
+    pos = photos.groupby("ad_id")["position"].apply(list)
     rows["photos"] = rows["ad_id"].map(gal)
     rows["photos"] = rows["photos"].apply(lambda v: v if isinstance(v, list) else [])
+    # Позиции нужны, чтобы найти локально скачанный файл: он назван по
+    # ad_id и позиции, а не по URL.
+    rows["photo_positions"] = rows["ad_id"].map(pos)
+    rows["photo_positions"] = rows["photo_positions"].apply(
+        lambda v: v if isinstance(v, list) else [])
 
     # Уже размеченные помечаем, но НЕ выкидываем: удобно перепроверить.
     if Path(LABELS_CSV).exists():
@@ -138,6 +153,29 @@ def load_rows(include_queue: bool = False) -> pd.DataFrame:
     else:
         rows["existing_verdict"] = None
     return rows.sort_values(["existing_verdict", "price_z"], na_position="first")
+
+
+DEAD_HOSTS = {"alakt-photos-kl.kcdn.kz"}   # выведен из эксплуатации ~август 2026
+
+
+def photo_src(ad_id: str, position: int, url: str, serve_mode: bool) -> str | None:
+    """Откуда браузеру брать картинку.
+
+    Приоритет у локальной копии: она грузится мгновенно и не зависит от того,
+    жив ли сервер kolesa. Один из двух хостов раздачи уже исчез, и для 39%
+    карточек ссылки ведут в никуда — там вернём None, чтобы карточка честно
+    сказала «фото недоступны», а не показывала молча пустые рамки.
+    """
+    from kz.collect.photo_fetch import local_path
+
+    p = local_path(ad_id, position)
+    if p.exists():
+        # в режиме сервера — через маршрут, в файловом — путь относительно
+        # data/eda/, где лежит сама страница
+        return f"/photos/{p.relative_to('data/photos')}" if serve_mode \
+            else f"../photos/{p.relative_to('data/photos')}"
+    host = url.split("/")[2] if "//" in url else ""
+    return None if host in DEAD_HOSTS else url
 
 
 def money(v) -> str:
@@ -195,7 +233,7 @@ def price_verdict_hint(row) -> str:
             f"{price_band(ratio)}")
 
 
-def card_html(row, idx: int) -> str:
+def card_html(row, idx: int, serve_mode: bool = False) -> str:
     """Одна карточка объявления.
 
     Компоновка подчинена задаче: главное — крупное фото (по миниатюре
@@ -209,7 +247,12 @@ def card_html(row, idx: int) -> str:
     badge = row.get("page_status_badge")
     has_badge = badge not in (None, "-", "") and not pd.isna(badge)
 
-    photos = row["photos"]
+    raw_photos = row["photos"]
+    positions = row.get("photo_positions") or list(range(1, len(raw_photos) + 1))
+    pairs = [(photo_src(str(row["ad_id"]), pos, u, serve_mode), u)
+             for pos, u in zip(positions, raw_photos)]
+    photos = [src for src, _ in pairs if src]
+    n_dead = sum(1 for src, _ in pairs if src is None)
     if photos:
         thumbs = "".join(
             f'<button class="thumb{" on" if i == 0 else ""}" data-i="{i}" '
@@ -223,6 +266,10 @@ def card_html(row, idx: int) -> str:
             f'    <span class="counter"><b>1</b>/{len(photos)}</span></div>'
             f'  <div class="thumbs">{thumbs}</div>'
             f'</div>')
+    elif n_dead:
+        gallery = ('<div class="gal"><div class="empty">Фотографии недоступны: '
+                   f'сервер kolesa, где они лежали, отключён (было {n_dead} шт.). '
+                   'Скачать их уже нельзя — решай по тексту и цифрам.</div></div>')
     else:
         gallery = '<div class="gal"><div class="empty">фото-URL не сохранены</div></div>'
 
@@ -285,6 +332,26 @@ def card_html(row, idx: int) -> str:
     if hint:
         notes += f'<div class="note price-note">{hint}</div>'
 
+    STRATUM_HELP = {
+        "rule_positive": ("правила пометили",
+                          "Вопрос: флаг верный? Обман — или объяснимая дешевизна."),
+        "residual_candidate": ("модель: подозрительно дёшево",
+                               "Правила молчат, но цена ниже ожидаемой для такой "
+                               "машины. Вопрос тот же: обман или объяснимо."),
+        "random_control": ("контрольное, детектор НЕ помечал",
+                           "Почти наверняка legit — и это нормальный, ожидаемый "
+                           "ответ. Смысл проверки в другом: найти обман, который "
+                           "детектор пропустил. Без этого нельзя посчитать "
+                           "полноту (recall)."),
+    }
+    st = str(row.get("stratum") or "")
+    stratum_html = ""
+    if st in STRATUM_HELP:
+        title, hint = STRATUM_HELP[st]
+        cls = "s-control" if st == "random_control" else "s-flagged"
+        stratum_html = (f'<div class="stratum {cls}"><b>{title}</b>'
+                        f'<span>{hint}</span></div>')
+
     ev = row.get("existing_verdict")
     ev_html = (f'<div class="note done-note">уже размечено: '
                f'<b>{html.escape(str(ev))}</b><span>можно перепроверить</span></div>'
@@ -300,7 +367,7 @@ def card_html(row, idx: int) -> str:
              f'{html.escape(str(row.get("model") or ""))}').strip()
 
     return f"""
-<article class="card" id="ad{aid}" data-id="{aid}" data-idx="{idx}">
+<article class="card" id="ad{aid}" data-id="{aid}" data-idx="{idx}" data-stratum="{st}">
   <header>
     <div class="ttl">
       <h2>{title} <span class="yr">{fmt(row.get("year"))}</span></h2>
@@ -310,6 +377,7 @@ def card_html(row, idx: int) -> str:
       {"".join(f'<span class="flag">{html.escape(r)}</span>' for r in reasons)}
     </div>
   </header>
+  {stratum_html}
   {ev_html}
   <div class="body">
     <div class="left">{gallery}</div>
@@ -331,16 +399,21 @@ def card_html(row, idx: int) -> str:
 
 
 def build(rows: pd.DataFrame, serve_mode: bool = False) -> str:
-    cards = "".join(card_html(r, i)
+    cards = "".join(card_html(r, i, serve_mode)
                     for i, (_, r) in enumerate(rows.iterrows()))
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
     n_done = int(rows["existing_verdict"].notna().sum())
+    n_nophoto = sum(1 for _, r in rows.iterrows()
+                    if r["photos"] and not any(
+                        photo_src(str(r["ad_id"]), p, u, serve_mode)
+                        for p, u in zip(r.get("photo_positions") or [], r["photos"])))
     mode = ("вердикты пишутся в журнал" if serve_mode
             else "черновик в браузере — журнал не пишется")
     return (TEMPLATE
             .replace("__CARDS__", cards)
             .replace("__N__", str(len(rows)))
             .replace("__NDEAD__", str(n_dead))
+            .replace("__NOPHOTO__", str(n_nophoto))
             .replace("__NDONE__", str(n_done))
             .replace("__SERVER__", "true" if serve_mode else "false")
             .replace("__MODECLS__", "live" if serve_mode else "draft")
@@ -465,6 +538,7 @@ kbd{background:var(--surface2); border:1px solid var(--line); border-bottom-widt
 .card[data-verdict="legit"]{border-left-color:var(--legit)}
 .card[data-verdict="unknown"]{border-left-color:var(--faint)}
 body.hide-done .card[data-verdict], body.hide-done .card.done{display:none}
+body.only-control .card:not([data-stratum="random_control"]){display:none}
 
 .card header{display:flex; justify-content:space-between; align-items:flex-start;
   gap:16px; flex-wrap:wrap; margin-bottom:14px}
@@ -524,6 +598,13 @@ body.hide-done .card[data-verdict], body.hide-done .card.done{display:none}
 .legit-note{background:var(--legit-bg); border:1px solid var(--legit-line)}
 .legit-note b{color:var(--legit)}
 .price-note{background:var(--accent-bg); border:1px solid var(--line)}
+.stratum{border-radius:9px;padding:10px 13px;margin-bottom:12px;font-size:.9rem}
+.stratum b{display:block;margin-bottom:3px}
+.stratum span{color:var(--muted);display:block;line-height:1.45}
+.s-flagged{background:var(--fraud-bg);border:1px solid var(--fraud-line)}
+.s-flagged b{color:var(--fraud)}
+.s-control{background:var(--accent-bg);border:1px solid var(--line)}
+.s-control b{color:var(--accent)}
 .done-note{background:var(--surface2); border:1px solid var(--line); margin:0 0 14px}
 
 /* ── Текст объявления: это читают внимательно, поэтому мера строки
@@ -599,12 +680,14 @@ body.hide-done .card[data-verdict], body.hide-done .card.done{display:none}
     <span class="count" id="restored"></span>
     <span class="mode __MODECLS__">__MODE__</span>
     <button class="tbtn" id="filter">скрыть размеченные</button>
+    <button class="tbtn" id="only-control">только контрольные</button>
     <button class="tbtn" id="theme">тема</button>
   </div>
 </div>
 
-<p class="lede">__N__ объявлений, из них __NDEAD__ с мёртвой страницей — фото у них
-всё равно видно. Уже размечено ранее: __NDONE__.</p>
+<p class="lede">__N__ объявлений. Уже есть вердикт: __NDONE__.
+__NDEAD__ с закрытой страницей на kolesa, __NOPHOTO__ без доступных фотографий —
+у них сервер, где лежали снимки, отключён.</p>
 
 <div class="safe"><b>Страница не обращается к kolesa.kz.</b> Фотографии грузятся
 с CDN (другой хост), текст и цифры взяты из локальной базы, поэтому разметка не
@@ -619,18 +702,14 @@ kolesa» в карточке.</div>
 </div>
 
 <details class="basket" open>
-  <summary>Собранные вердикты — <span id="cnt2">0</span></summary>
+  <summary>Отмечено в этой сессии — <span id="cnt2">0</span></summary>
   <div class="in">
-    <textarea id="out" readonly placeholder="Нажимай fraud / legit / unknown в карточках — строки соберутся здесь."></textarea>
+    <textarea id="out" readonly placeholder="Нажимай fraud / legit / unknown в карточках."></textarea>
     <div class="row">
       <button class="tbtn" id="copy">копировать всё</button>
-      <button class="tbtn" id="clear">очистить</button>
+      <button class="tbtn" id="clear">очистить черновик</button>
     </div>
-    <p class="hintline">Скопированные строки нужно <b>дописать в конец</b>
-      __LABELS__. Журнал только дополняется и никогда не перезаписывается:
-      прошлые вердикты остаются валидными, даже если объявление ушло из очереди.
-      После этого — <span class="mono">python clean.py</span> и
-      <span class="mono">python evaluate_detector.py</span>.</p>
+    <p class="hintline" id="baskethint"></p>
   </div>
 </details>
 
@@ -648,6 +727,9 @@ __CARDS__
 <script>
 const SERVER = __SERVER__;   /* true — запущено через --serve, можно писать в журнал */
 const cards = Array.from(document.querySelectorAll('.card'));
+/* Объявления, по которым вердикт уже лежит в журнале. */
+const ALREADY = new Set(cards.filter(c => c.querySelector('.done-note'))
+                             .map(c => c.dataset.id));
 const picks = new Map();
 let cur = 0;
 
@@ -657,9 +739,17 @@ function esc(s){ return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
 
 function render(){
   const lines = [];
-  for (const [id, v] of picks) lines.push(id + ',,,,,,,,' + v);
+  /* Схема журнала: ad_id, 7 описательных, verdict, comment, затем колонки
+     слоя. Число запятых должно совпадать с заголовком, иначе вставленная
+     строка сдвинет колонки. */
+  for (const [id, v] of picks) lines.push(id + ',,,,,,,,' + v + ',,');
   document.getElementById('out').value = lines.join('\n');
-  document.getElementById('cnt').textContent = picks.size;
+  /* Счётчик показывает ИТОГ: что уже в журнале плюс отмеченное сейчас.
+     Раньше он показывал только черновик, и при открытии на другом порту
+     (у localStorage своя память на каждый адрес) выглядело так, будто
+     разметка пропала. */
+  const fresh = [...picks.keys()].filter(id => !ALREADY.has(id)).length;
+  document.getElementById('cnt').textContent = ALREADY.size + fresh;
   document.getElementById('cnt2').textContent = picks.size;
   document.getElementById('bar').style.width =
     (cards.length ? picks.size / cards.length * 100 : 0) + '%';
@@ -816,6 +906,16 @@ document.getElementById('filter').onclick = e => {
   e.target.classList.toggle('on', on);
   e.target.textContent = on ? 'показать все' : 'скрыть размеченные';
 };
+document.getElementById('only-control').onclick = e => {
+  /* Контрольные — обычные объявления, которых детектор НЕ помечал. Только по
+     ним считается полнота: сколько обмана мы пропустили. Фильтр нужен, чтобы
+     не искать их глазами среди помеченных. */
+  document.body.classList.toggle('only-control');
+  const on = document.body.classList.contains('only-control');
+  e.target.classList.toggle('on', on);
+  e.target.textContent = on ? 'показать все' : 'только контрольные';
+  focusCard(0);
+};
 document.getElementById('theme').onclick = () => {
   const root = document.documentElement;
   const now = root.dataset.theme ||
@@ -846,6 +946,17 @@ document.getElementById('theme').onclick = () => {
     'восстановлено из браузера: ' + n;
 })();
 
+/* Подсказка зависит от режима: в серверном вердикты уже в журнале, и
+   советовать копипасту значит путать. */
+const _hint = document.getElementById('baskethint');
+if (_hint) _hint.innerHTML = SERVER
+  ? 'Вердикты уже записаны в <b>__LABELS__</b> — копировать ничего не нужно. '
+    + 'Этот список только показывает, что ты отметил в текущей сессии. '
+    + 'Дальше: <span class="mono">python -m kz.ops.run_all --ml</span>.'
+  : 'Страница открыта как файл, поэтому писать в журнал не может. '
+    + 'Скопируй строки и допиши в конец <b>__LABELS__</b>. '
+    + 'Надёжнее запускать через <span class="mono">python -m kz.web</span>.';
+
 focusCard(0);
 render();
 </script>
@@ -855,16 +966,29 @@ render();
 VERDICTS = ("fraud", "legit", "unknown")
 
 
+# Слой выборки обязан храниться В ЖУРНАЛЕ, а не только в очереди. Очередь —
+# список работы, она пересобирается и намеренно выкидывает уже размеченное.
+# Из-за этого метаданные терялись: после разметки контрольных выяснить, что
+# они были контрольными, стало невозможно, а без этого не оценить пропуски.
+STRATUM_COLS = ["sampling_stratum", "stratum_population"]
+
+BASE_HEADER = ["ad_id", "url", "title", "year", "price_tenge", "mileage_km",
+               "suspicion_reasons", "seller_comment", "verdict", "comment"]
+
+
 def journal_header() -> list[str]:
     """Порядок колонок журнала берём из самого файла, а не из константы:
-    файл ведётся руками, и его схема — источник истины."""
+    файл ведётся руками, и его схема — источник истины. Недостающие колонки
+    слоя добавляем в конец, чтобы старые журналы продолжали работать."""
+    head = None
     if Path(LABELS_CSV).exists():
         with open(LABELS_CSV, newline="", encoding="utf-8") as f:
             head = next(csv.reader(f), None)
-            if head:
-                return head
-    return ["ad_id", "url", "title", "year", "price_tenge", "mileage_km",
-            "suspicion_reasons", "seller_comment", "verdict", "comment"]
+    head = list(head) if head else list(BASE_HEADER)
+    for c in STRATUM_COLS:
+        if c not in head:
+            head.append(c)
+    return head
 
 
 def _cell(v) -> str:
@@ -995,6 +1119,7 @@ def serve(html: str, facts: dict, port: int = 8765) -> None:
     незачем. Пишем строго через append_verdict (валидация + append-only).
     """
     from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import unquote
 
     page = html.encode("utf-8")
 
@@ -1007,10 +1132,20 @@ def serve(html: str, facts: dict, port: int = 8765) -> None:
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path.split("?")[0] in ("/", "/index.html"):
-                self._send(200, page, "text/html; charset=utf-8")
-            else:
-                self._send(404, b"not found", "text/plain")
+            path = self.path.split("?")[0]
+            if path in ("/", "/index.html"):
+                return self._send(200, page, "text/html; charset=utf-8")
+            if path.startswith("/photos/"):
+                # Скачанные картинки. Путь нормализуем и проверяем, что он не
+                # вылезает за каталог фотографий: иначе через ../ можно было бы
+                # прочитать любой файл на диске.
+                from kz.collect.photo_fetch import PHOTO_DIR
+                rel = unquote(path[len("/photos/"):])
+                target = (PHOTO_DIR / rel).resolve()
+                if PHOTO_DIR.resolve() in target.parents and target.is_file():
+                    return self._send(200, target.read_bytes(), "image/jpeg")
+                return self._send(404, b"not found", "text/plain")
+            self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
             if self.path != "/verdict":
@@ -1052,6 +1187,7 @@ def journal_facts(rows: pd.DataFrame) -> dict:
     out = {}
     for _, r in rows.iterrows():
         out[str(r["ad_id"])] = {
+            "sampling_stratum": r.get("stratum") or "",
             "url": r.get("url") or f"https://kolesa.kz/a/show/{r['ad_id']}",
             "title": f"{r.get('brand') or ''} {r.get('model') or ''}".strip(),
             "year": r.get("year"),
