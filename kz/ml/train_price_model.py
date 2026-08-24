@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import GroupKFold, KFold
+from sklearn.model_selection import GroupKFold
 
 from kz.transform import data_quality
 from kz.transform.data_quality import iforest_anomaly, scrub_junk_mileage
@@ -183,27 +183,6 @@ def grouped_oof_predictions(
         model_oof[te] = model.predict(X.iloc[te])
         baseline_oof[te] = _baseline_predict(df.iloc[tr], y.iloc[tr], df.iloc[te])
     return model_oof, baseline_oof
-
-
-def cross_validate(X, y, n_splits=5, groups=None):
-    """Совместимый helper: массив [R²(log), MAE(₸), MAPE(%)] по фолдам.
-
-    Новый production-путь передаёт groups. Без groups оставлен обычный KFold
-    для обратной совместимости небольших исследовательских вызовов.
-    """
-    splitter = (
-        GroupKFold(n_splits=n_splits)
-        if groups is not None
-        else KFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_SEED)
-    )
-    out = []
-    split_args = (X, y, groups) if groups is not None else (X, y)
-    for tr, te in splitter.split(*split_args):
-        model = new_model()
-        model.fit(Pool(X.iloc[tr], y.iloc[tr], cat_features=CAT_FEATURES))
-        m = regression_metrics(y.iloc[te], model.predict(X.iloc[te]))
-        out.append([m["r2_log"], m["mae_tenge"], m["mape_pct"]])
-    return np.asarray(out)
 
 
 def temporal_holdout(df: pd.DataFrame, test_fraction: float = 0.2):
@@ -391,6 +370,19 @@ def main():
         "training_rows": int(len(clean)),
         "features": FEATURES,
         "categorical_features": CAT_FEATURES,
+        # Словарь категорий сохраняется не для модели (CatBoost справляется
+        # сам), а чтобы было с чем сверить формы интерфейса. Реальный случай:
+        # в форме оценки отсутствовал «кроссовер» — второй по частоте кузов,
+        # 1549 объявлений. Владелец кроссовера выбирал «внедорожник» и
+        # получал оценку по другому классу машин.
+        # "NA" сюда не попадает: это сентинел пропуска из coerce_features,
+        # а не значение, которое человек мог бы выбрать в форме.
+        "categorical_vocabulary": {
+            c: sorted(v for v in clean[c].astype(str).value_counts()
+                      .loc[lambda s: s >= max(3, len(clean) // 500)].index
+                      if v != "NA")
+            for c in CAT_FEATURES if c not in ("brand", "model")
+        },
         "target": "log(price_tenge)",
         "validation": {
             "grouped_cv": {"model": grouped_model, "baseline": grouped_base},

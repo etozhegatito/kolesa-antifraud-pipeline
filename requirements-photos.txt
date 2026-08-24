@@ -15,6 +15,6 @@
 #
 # Установка, когда понадобится:  pip install -r requirements-photos.txt
 
-torch>=2.2
-torchvision>=0.17
-open_clip_torch>=2.24
+torch==2.13.0
+torchvision==0.28.0
+open_clip_torch==3.3.0

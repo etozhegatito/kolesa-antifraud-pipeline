@@ -151,7 +151,7 @@ def kaplan_meier(d: pd.DataFrame, log=print):
         s = float(km.survival_function_at_times(t).iloc[0])
         log(f"  через {t:2d} дн. — {s*100:5.1f}%   (то есть ушло {100-s*100:.1f}%)")
     med = km.median_survival_time_
-    log(f"\nМедианный срок жизни: "
+    log("\nМедианный срок жизни: "
         + (f"{med:.0f} дн." if np.isfinite(med) else
            "не достигнут — за окно наблюдения ушла меньше половины объявлений"))
     return km
@@ -214,7 +214,7 @@ def plot(km, curves, path: Path = OUT_PNG) -> None:
     ax[0].set_title("Доля объявлений на рынке")
     ax[0].set_xlabel("дней с публикации"); ax[0].set_ylabel("ещё не ушли")
     ax[0].set_xlim(0, HORIZON); ax[0].grid(alpha=.3)
-    for label, c in curves.items():
+    for _label, c in curves.items():
         c.plot_survival_function(ax=ax[1])
     ax[1].set_title("По группам цены")
     ax[1].set_xlabel("дней с публикации"); ax[1].set_xlim(0, HORIZON)
@@ -225,14 +225,63 @@ def plot(km, curves, path: Path = OUT_PNG) -> None:
     print(f"\nГрафик → {path}")
 
 
+def verified_bracket(d: pd.DataFrame, log=print) -> None:
+    """Одно число здесь было бы обманом — печатаем вилку.
+
+    Оценка сильно зависит от того, кого считать живым, а у нас статус
+    проверялся лишь у части объявлений (остальным clean.py ставит active по
+    умолчанию, а не по проверке). Отсюда две границы, и обе смещены, но в
+    РАЗНЫЕ стороны:
+
+      по всем — вниз по доле ушедших: тысячи непроверенных записаны живыми,
+        хотя мы просто не смотрели;
+
+      только по проверенным — вверх: check_status в первую очередь идёт к
+        тем, кто пропал из листинга, то есть выборка обогащена ушедшими.
+
+    Правда между границами. Сузить вилку может только проверка статусов, а
+    не новый парсинг.
+    """
+    from lifelines import KaplanMeierFitter
+
+    from kz.core.db import get_engine
+
+    st = pd.read_sql("SELECT ad_id FROM ad_status", get_engine(),
+                     dtype={"ad_id": str})
+    checked = d[d["ad_id"].isin(set(st["ad_id"]))]
+    if len(checked) < 50 or len(checked) == len(d):
+        return
+
+    log("\nДоля ушедших к 14-му дню — вилка, а не число:")
+    for name, sub in [("по всем объявлениям", d),
+                      ("только по проверенным", checked)]:
+        km = KaplanMeierFitter().fit(sub["days"], sub["event"])
+        s14 = float(km.survival_function_at_times(14).iloc[0])
+        log(f"  {name:24} n={len(sub):5}  ушло {100-s14*100:5.1f}%")
+    log("  Первая граница занижена (непроверенные записаны живыми),")
+    log("  вторая завышена (проверяли в первую очередь пропавших).")
+
+
 def main():
+    from kz.core import freshness as fr
+
     d = load_survival()
-    print(f"Объявлений: {len(d)}   событий: {int(d.event.sum())}   "
+
+    # Свежесть печатается ПЕРЕД числами, а не после: этот метод опирается на
+    # статус объявления сильнее любого другого в проекте, и устаревшие
+    # статусы искажают его напрямую.
+    state = fr.measure()
+    fr.report(state)
+    for w in fr.stale_warnings(state):
+        print(f"  ⚠ {w}")
+
+    print(f"\nОбъявлений: {len(d)}   событий: {int(d.event.sum())}   "
           f"цензурировано: {int((1-d.event).sum())}")
     print(f"Доля событий {d.event.mean()*100:.1f}% — большинство ещё висит, "
           "и именно поэтому нужен анализ выживаемости, а не регрессия.")
 
     km = kaplan_meier(d)
+    verified_bracket(d)
     d = add_price_position(d)
     curves = by_price_group(d)
     try:

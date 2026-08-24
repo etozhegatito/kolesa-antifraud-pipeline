@@ -238,7 +238,7 @@ def main():
     append_manifest(rows)
     charge_budget("cdn", ok + fails)
     mb = sum(int(x["bytes"]) for x in rows if x.get("bytes")) / 1e6
-    log.info(f"Готово: скачано {ok}, ошибок {fails}. "
+    log.info(f"Готово: скачано {ok} ({mb:.1f} МБ), ошибок {fails}. "
              f"Всего на диске: {sum(1 for _ in PHOTO_DIR.rglob('*.jpg'))} файлов")
 
 

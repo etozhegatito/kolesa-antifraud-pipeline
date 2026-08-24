@@ -42,7 +42,11 @@ OUT_CSV      = "data/clean/clean_data.csv"  # держим и CSV: дёшево,
 
 # Лексикон «убитости» и поиск с учётом отрицаний — в damage.py
 # (единственный источник; раньше список дублировался здесь и в enrich.py).
-from kz.transform.damage import DAMAGE_PATTERNS, has_damage as _has_damage
+# noqa: F401 — DAMAGE_PATTERNS здесь не вызывается, но импортируется
+# НАМЕРЕННО: тест test_damage_patterns_in_sync сторожит, что clean.py и
+# enrich.py смотрят в один лексикон, а не завели по своей копии. Раньше
+# копий было две, и они разъезжались.
+from kz.transform.damage import DAMAGE_PATTERNS, has_damage as _has_damage  # noqa: F401
 
 CURRENT_YEAR = date.today().year
 

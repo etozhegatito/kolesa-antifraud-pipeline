@@ -160,7 +160,8 @@ def parse_budget(argv) -> int | None:
             try:
                 n = int(raw)
             except ValueError:
-                raise SystemExit(f"--budget: нужно целое число, получено {raw!r}")
+                raise SystemExit(
+                    f"--budget: нужно целое число, получено {raw!r}") from None
             if n < 1:
                 raise SystemExit("--budget: должно быть >= 1")
             return n
@@ -507,7 +508,7 @@ def run_gapped_jobs(until_done: bool = False, kolesa_jobs=None, do_cdn: bool = T
               "его добор это не затрагивает.)")
 
     # офлайн-пересборка ВСЕГДА (влить то, что успели добрать, во флаги)
-    for name, script in OFFLINE:
+    for _name, script in OFFLINE:
         run(script)
 
     print(f"\n✔ catch_up завершён за {(time.time()-t0)/60:.1f} мин")

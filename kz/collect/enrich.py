@@ -81,7 +81,11 @@ DT_MAP = {
 
 # Лексикон «убитости» и поиск с учётом отрицаний — в damage.py
 # (единственный источник; раньше список дублировался здесь и в clean.py).
-from kz.transform.damage import DAMAGE_PATTERNS, find_damage_keywords
+# DAMAGE_PATTERNS здесь не вызывается, но импортируется НАМЕРЕННО:
+# test_damage_patterns_in_sync сторожит, что enrich.py и clean.py смотрят
+# в один лексикон, а не завели по своей копии. Копий уже было две, и они
+# разъехались — поэтому noqa, а не удаление.
+from kz.transform.damage import DAMAGE_PATTERNS, find_damage_keywords  # noqa: F401
 
 FIELDS = ["ad_id", "fetched_at", "http_status", "is_archived",
           "customs_cleared", "drive", "steering", "color", "generation",

@@ -161,7 +161,7 @@ def test_damage_disclosed_rust_and_gearbox():
     225502216 Chevrolet Aveo): «рыжики» (сленг про ржавчину) и «не
     включается 5-я передача» (общий дефект, брат «не работает»). Обычные
     отрицания ПЕРЕД словом по-прежнему гасят хит (окно 2 токена)."""
-    from kz.transform.damage import find_damage_keywords, has_damage
+    from kz.transform.damage import has_damage
     assert has_damage("есть классические рыжики на порогах")
     assert has_damage("не включается 5-я передача")
     assert has_damage("не включается кондиционер")
@@ -580,12 +580,12 @@ def test_censored_ads_are_not_counted_as_sold():
     from kz.ml.survival import build_lifespans
     d = build_lifespans(*_survival_fixture())
 
-    ev = dict(zip(d.ad_id, d.event))
+    ev = dict(zip(d.ad_id, d.event, strict=True))
     assert ev["a"] == 1 and ev["b"] == 1      # archived и deleted — события
     assert ev["c"] == 0                       # active — цензурировано, не событие
     assert "d" not in ev                      # без цены в анализ не берём
 
-    days = dict(zip(d.ad_id, d.days))
+    days = dict(zip(d.ad_id, d.days, strict=True))
     assert days["a"] == 10                    # 1 → 11 июля, дата проверки
     assert days["c"] == 20                    # 1 → 21 июля, последняя встреча
 
@@ -599,7 +599,7 @@ def test_lifespan_end_comes_from_the_right_column():
     # у живого объявления checked_at заполнен И отличается от last_seen
     st.loc[st.ad_id == "c", "checked_at"] = "2026-07-05"
     d = build_lifespans(cd, st, sg)
-    assert dict(zip(d.ad_id, d.days))["c"] == 20   # взяли last_seen, не checked_at
+    assert dict(zip(d.ad_id, d.days, strict=True))["c"] == 20   # взяли last_seen, не checked_at
 
 
 def test_kaplan_meier_matches_plain_fraction_without_censoring():
@@ -973,7 +973,6 @@ def test_label_cards_help_covers_real_flags():
     """У каждого флага, который детектор реально ставит, должна быть
     подсказка «как решать» — иначе разметчик остаётся без критерия."""
     from kz.report import label_cards
-    from kz.transform import clean
     from pathlib import Path
     src = Path("kz/transform/clean.py").read_text(encoding="utf-8")
     # флаги подозрения, реально встречающиеся в коде детектора
@@ -1231,10 +1230,33 @@ def test_offline_dag_dependencies_respect_artifacts():
     assert "clean >> train >> dashboard" in src
     assert "train >> residual >> report" in src
     assert "clean >> explore >> cards" in src
-    # финальный таск логирует состояние и обязан ждать ВСЕ ветки
-    assert "monitor, survival] >> state" in src
-    # мониторинг сравнивает с выборкой текущей модели, значит ждёт обучение
+    # мониторинг сравнивает с выборкой РАБОТАЮЩЕЙ модели, значит идёт до неё
     assert "train >> monitor" in src
+
+    # Финальный таск логирует состояние и обязан ждать ВСЕ листья графа.
+    # Проверяем свойство, а не строку: раньше здесь стоял литерал
+    # "monitor, survival] >> state", и он ломался от каждой новой ветки —
+    # тест падал на добавлении шага, хотя граф был правильным.
+    import re as _re
+    tasks = set(_re.findall(r"^\s*(\w+)\s*=\s*job\(", src, _re.M))
+    edges = set()
+    for line in src.splitlines():
+        line = line.split("#")[0]
+        if ">>" not in line:
+            continue
+        parts = [p.strip(" []") for p in line.split(">>")]
+        # попарный обход: parts[1:] короче на элемент ПО ОПРЕДЕЛЕНИЮ,
+        # поэтому здесь усечение zip — то, что нужно, а не небрежность
+        for a, b in zip(parts, parts[1:]):
+            for x in (n.strip() for n in a.split(",")):
+                for y in (n.strip() for n in b.split(",")):
+                    if x in tasks and y in tasks:
+                        edges.add((x, y))
+    leaves = {t for t in tasks
+              if t != "state" and not any(a == t and b != "state" for a, b in edges)}
+    waited = {a for a, b in edges if b == "state"}
+    assert leaves <= waited, (
+        "финальный таск не ждёт ветки: " + ", ".join(sorted(leaves - waited)))
 
 
 def test_collect_dag_delegates_budget_to_catch_up():
@@ -1334,7 +1356,9 @@ def test_upsert_preserves_other_rows_and_backup(tmp_path, monkeypatch):
     before = list(csv.DictReader(dst.open(encoding="utf-8")))
     lc.upsert_verdict("111", "legit", "", {})
     after = list(csv.DictReader(dst.open(encoding="utf-8")))
-    for a, b in zip(before, after):                   # все прежние строки целы
+    # срез, а не усечение zip: upsert дописывает строку, если ad_id новый,
+    # поэтому after длиннее — а вот прежние строки обязаны быть нетронуты
+    for a, b in zip(before, after[:len(before)], strict=True):
         assert a == b
     assert prev.exists() and prev.read_text(encoding="utf-8") == before_text
 
@@ -1594,7 +1618,6 @@ def test_db_stats_tables_cover_pipeline_layers():
 def test_db_stats_snapshot_roundtrip(tmp_path, monkeypatch):
     """Снимок нужен потому, что каждый таск Airflow — отдельный процесс:
     передать счётчики следующему шагу можно только через файл."""
-    import json
     from kz.ops import db_stats
     f = tmp_path / "snap.json"
     monkeypatch.setattr(db_stats, "SNAPSHOT_FILE", str(f))
@@ -2319,3 +2342,188 @@ def test_enrichment_queue_puts_fresh_ads_ahead_of_stale_backlog(monkeypatch):
     ]
     # уже обогащённые в очередь не возвращаются
     assert "new_plain" not in enrich.pick_targets({"new_plain"})
+
+
+def test_drift_check_runs_before_retraining():
+    """Дрейф меряется ДО переобучения, иначе он не меряет ничего.
+
+    Вопрос мониторинга — «разъехались ли данные с теми, на которых училась
+    РАБОТАЮЩАЯ сейчас модель». После переобучения работающая модель обучена
+    ровно на текущих данных: снимок обучающей выборки совпадает с текущей
+    выборкой, и PSI выходит нулевым по построению.
+
+    Так и было. Все четыре записи в monitoring_history.csv показывали
+    training_rows == current_rows и PSI 0.000, а отчёт бодро сообщал
+    «данные стабильны». Ложное спокойствие хуже отсутствия проверки."""
+    from kz.ops.run_all import ML_CHAIN
+    order = [cmd[-1] for _, cmd in ML_CHAIN]
+    assert order.index("kz.ml.monitoring") < order.index("kz.ml.train_price_model")
+
+
+def test_drift_refuses_to_report_stability_it_did_not_measure():
+    """Когда сравнивать не с чем, мониторинг обязан сказать это прямо, а не
+    печатать «данные стабильны» и записывать нулевой замер в историю."""
+    import ast
+    import inspect
+    from kz.ml import monitoring
+
+    body = inspect.getsource(monitoring.main)
+    assert "if fresh_rows <= 0:" in body
+    # ранний выход обязан быть ДО записи истории, иначе нули копятся в CSV
+    assert body.index("if fresh_rows <= 0:") < body.index("append_history(")
+    # и это именно return, а не просто печать предупреждения
+    guard = next(n for n in ast.walk(ast.parse(body.lstrip()))
+                 if isinstance(n, ast.If) and "fresh_rows" in ast.dump(n.test))
+    assert any(isinstance(x, ast.Return) for x in guard.body)
+
+
+# ─── Свежесть данных: проект живёт на ноутбуке, который закрывают ────────────
+
+def _fresh(**kw):
+    from datetime import date, timedelta
+    from kz.core.freshness import Freshness
+    today = date.today()
+    base = dict(last_collect=today, collect_days=30, span_days=30,
+                last_status_check=today, ads_total=1000,
+                ads_status_checked=900, model_created=today)
+    base.update({k: (today - timedelta(days=v) if k.endswith("_ago") else v)
+                 for k, v in kw.items() if not k.endswith("_ago")})
+    for k, v in kw.items():
+        if k.endswith("_ago"):
+            base[k[:-4]] = today - timedelta(days=v)
+    return Freshness(**base)
+
+
+def test_stale_statuses_are_called_out_not_swallowed():
+    """Конвейер писался под ежедневный запуск, а живёт на ноутбуке, который
+    закрывают на две недели. Статус, проверенный две недели назад, сегодня
+    не факт: ушедшее объявление всё ещё числится активным, срок жизни
+    завышается, доля ушедших занижается. Отчёт обязан сказать это рядом с
+    числом, а не оставить читателя в уверенности."""
+    from kz.core.freshness import stale_warnings
+    assert stale_warnings(_fresh()) == []                 # всё свежее — молчим
+    warned = stale_warnings(_fresh(last_status_check_ago=15))
+    assert any("Статусы проверялись 15" in w for w in warned)
+
+
+def test_default_active_status_is_flagged_as_a_guess():
+    """clean.py ставит active всем, у кого статуса нет. Для листинга это
+    оправданно, но 78% объявлений не проверялись НИ РАЗУ, и записывать их
+    живыми по умолчанию — догадка, а не наблюдение."""
+    from kz.core.freshness import stale_warnings
+    warned = stale_warnings(_fresh(ads_status_checked=220, ads_total=1000))
+    assert any("22%" in w for w in warned)
+
+
+def test_collection_gaps_are_reported():
+    """Провалы в сборе означают, что события внутри них не датируются."""
+    from kz.core.freshness import stale_warnings
+    assert any("Сбор шёл" in w
+               for w in stale_warnings(_fresh(collect_days=8, span_days=39)))
+
+
+def test_estimate_form_covers_the_categories_in_the_data():
+    """Форма оценки обязана предлагать те значения, что есть в данных.
+
+    Реальный случай: в списке кузовов не было «кроссовера» — второго по
+    частоте типа, 1549 объявлений из 6789. Владелец кроссовера выбирал
+    «внедорожник», модель получала другой класс машин, и оценка уезжала.
+    Молча: ни ошибки, ни предупреждения, просто неверное число.
+
+    Словарь категорий пишется в метаданные при обучении. Без артефакта
+    (в CI его нет) проверять нечего, но локально — там, где кузов и
+    добавляют — тест сработает."""
+    import json
+    from pathlib import Path
+
+    meta_path = Path("data/models/price_model.metadata.json")
+    if not meta_path.exists():
+        return
+    vocab = json.loads(meta_path.read_text(encoding="utf-8")).get(
+        "categorical_vocabulary", {})
+    if not vocab:
+        return
+
+    from kz.web.pages import estimate_page
+    html = estimate_page()
+    missing = {f: [v for v in vals if f">{v}<" not in html]
+               for f, vals in vocab.items()}
+    missing = {f: v for f, v in missing.items() if v}
+    assert not missing, f"в форме нет значений из данных: {missing}"
+
+
+def test_conformal_offset_widens_until_coverage_is_reached():
+    """Смысл конформной поправки: не верить номинальному квантилю, а измерить,
+    насколько он врёт, и раздвинуть границы ровно на измеренное.
+
+    На проекте разрыв оказался большим: модели, обученные на 10-й и 90-й
+    процентили, накрыли лишь 67% машин вместо обещанных 80%."""
+    import numpy as np
+    from kz.ml.price_interval import conformal_offset, conformity
+
+    # факт ровно посередине интервала шириной 2 → невязки все −1
+    y = np.zeros(100)
+    lo, hi = np.full(100, -1.0), np.full(100, 1.0)
+    assert conformity(y, lo, hi).max() <= 0          # все внутри
+    assert conformal_offset(conformity(y, lo, hi), 0.8) < 0   # можно сузить
+
+    # половина наблюдений вылезает за верхнюю границу на 5
+    y2 = np.concatenate([np.zeros(50), np.full(50, 6.0)])
+    off = conformal_offset(conformity(y2, lo, hi), 0.8)
+    assert off > 0, "границы обязаны раздвинуться, когда факты вылезают"
+
+
+def test_interval_quantile_levels_are_symmetric():
+    """Целевое покрытие 80% — это 10-й и 90-й процентили: по десять
+    процентов остаётся с каждой стороны, а не двадцать с одной."""
+    from kz.ml.price_interval import quantile_levels
+    for target, want_lo, want_hi in [(0.80, 0.10, 0.90), (0.50, 0.25, 0.75)]:
+        lo, hi = quantile_levels(target)
+        assert abs(lo - want_lo) < 1e-9 and abs(hi - want_hi) < 1e-9
+        assert abs((hi - lo) - target) < 1e-9      # ширина = обещанное покрытие
+
+
+def test_coverage_is_reported_with_width():
+    """Покрытие без ширины — бессмысленное число: интервал «от нуля до
+    бесконечности» даёт 100% попаданий и ноль пользы."""
+    import inspect
+    from kz.ml import price_interval
+    src = inspect.getsource(price_interval.coverage_report)
+    assert "median_width_pct" in src and "coverage" in src
+
+
+def test_service_range_uses_measured_interval_not_a_fixed_corridor():
+    """Раньше сервис отдавал один коридор ±12/15% на все машины. Для свежей
+    Camry он честный, для тридцатилетней Delica — фикция: там модель не знает
+    цену ни с точностью 12%, ни с точностью 40%. Диапазон обязан приходить из
+    артефакта с измеренным покрытием, а жёсткие числа остаются только
+    резервом на случай отсутствия артефакта."""
+    import inspect
+    from kz.web import service
+    src = inspect.getsource(service.full_estimate)
+    assert "price_range(car, fair)" in src
+    assert "FALLBACK_LOW" not in src, "резерв не должен быть основным путём"
+    assert "conformal" in inspect.getsource(service.price_range)
+
+
+def test_interval_step_runs_after_training():
+    """Интервал калибруется квантильными моделями на том же наборе
+    признаков, что и основная модель, и стоит отдельным шагом от ценового
+    пола: пол — антифрод, интервал — продукт."""
+    from kz.ops.run_all import ML_CHAIN
+    order = [cmd[-1] for _, cmd in ML_CHAIN]
+    assert "kz.ml.price_interval" in order
+    assert order.index("kz.ml.train_price_model") < order.index("kz.ml.price_interval")
+    assert order.index("kz.ml.price_interval") < order.index("kz.report.ml_report")
+
+
+def test_survival_reports_a_bracket_not_a_single_number():
+    """Одно число про долю ушедших было бы обманом: по всем объявлениям она
+    занижена (непроверенные записаны живыми), по проверенным завышена
+    (check_status идёт в первую очередь к пропавшим из листинга). Печатаем
+    обе границы и говорим, в какую сторону смещена каждая."""
+    import inspect
+    from kz.ml import survival
+    src = inspect.getsource(survival.verified_bracket)
+    assert "занижена" in src and "завышена" in src
+    assert "verified_bracket(d)" in inspect.getsource(survival.main)

@@ -12,6 +12,7 @@ otherwise it would just be an expensive cron.
             └── train_price_model ──┬── ml_dashboard ─────────┤
                                     ├── data_drift ───────────┤
                                     ├── time_on_market ───────┤
+                                    ├── price_interval ───────┤
                                     └── residual_detector ── ml_report
                                                                  │
                                        report_state <────────────┘
@@ -28,6 +29,11 @@ Why the graph looks like this:
   time_on_market fits Kaplan-Meier and Cox on the clean layer but needs the
     price model to place each ad against its fair price, so it waits too —
     and then runs alongside the reports rather than behind them;
+  price_interval calibrates the quoted price range so that a measured share
+    of cars actually falls inside it. Separate from residual_detector even
+    though both fit quantile models: the floor is antifraud ('suspiciously
+    cheap for this car'), the interval is product ('8 of 10 land inside').
+    Different quantile levels, different calibration, different consumers;
   report_state runs last and logs coverage, backlogs and verdict counts, so a
     finished run says what the state is rather than just "success".
 
@@ -82,6 +88,7 @@ with DAG(
     report    = job("ml_report",         "kz.report.ml_report")
     monitor   = job("data_drift",        "kz.ml.monitoring")
     survival  = job("time_on_market",    "kz.ml.survival")
+    interval  = job("price_interval",    "kz.ml.price_interval")
     state     = job("report_state",      "kz.ops.pipeline_status")
 
     clean >> explore >> cards
@@ -93,4 +100,5 @@ with DAG(
     # model, so it runs alongside the reports.
     train >> monitor
     train >> survival
-    [cards, evaluate, dashboard, report, monitor, survival] >> state
+    train >> interval
+    [cards, evaluate, dashboard, report, monitor, survival, interval] >> state

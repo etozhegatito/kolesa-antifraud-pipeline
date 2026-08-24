@@ -1,28 +1,38 @@
-# Зафиксированы мажорные версии: достаточно для воспроизводимости,
-# но без излишней жёсткости (точные пины — когда проект стабилизируется)
-playwright>=1.50
-beautifulsoup4>=4.12
-pandas>=2.0
-numpy>=1.26
-matplotlib>=3.8
-requests>=2.31
-imagehash>=4.3
-Pillow>=10.0
-psycopg2-binary>=2.9
-SQLAlchemy>=2.0
-python-dotenv>=1.0
+# Версии зафиксированы ТОЧНО, и это не педантизм.
+#
+# Главный результат проекта — число: MAPE 22,7%. Если новый pandas или
+# catboost сдвинет его на полпроцента, отличить это от сдвига в данных
+# будет нечем, а метрики в README и MODEL_CARD станут неповторяемыми.
+# Ровно те версии, на которых метрики измерены, здесь и стоят.
+#
+# Обновлять осознанно: поднять версию, прогнать `run_all --ml`, сверить
+# MAPE с записанным в MODEL_CARD и только потом коммитить.
+#
+# Инструменты разработки (ruff, coverage) сюда НЕ входят — они ставятся
+# в CI отдельно и на результат модели не влияют.
+playwright==1.61.0
+beautifulsoup4==4.15.0
+pandas==2.3.3
+numpy==2.5.1
+matplotlib==3.11.1
+requests==2.34.2
+imagehash==4.3.2
+Pillow==12.3.0
+psycopg2-binary==2.9.12
+SQLAlchemy==2.0.51
+python-dotenv==1.2.2
 
 # модель оценки цены (train_price_model.py)
-catboost>=1.2
-scikit-learn>=1.3
+catboost==1.2.10
+scikit-learn==1.9.0
 
 # анализ выживаемости (kz/ml/survival.py) — входит в run_all --ml,
 # поэтому зависимость основная, а не опциональная
-lifelines>=0.28
+lifelines==0.30.3
 
 # для тестов (test_pipeline.py), не нужен для самого пайплайна
-pytest>=8.0
+pytest==9.1.1
 
 # веб-интерфейс (kz/web): оценка машины и разметка вердиктов
-fastapi>=0.110
-uvicorn[standard]>=0.29
+fastapi==0.141.1
+uvicorn[standard]==0.52.1

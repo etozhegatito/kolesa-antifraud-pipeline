@@ -22,10 +22,25 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Install dev tooling
+        run: pip install ruff==0.16.4 coverage==7.6.12
       - name: Compile production modules
         run: python -m compileall -q -x '^\./\.venv/' .
-      - name: Run offline regression suite
-        run: python -m pytest tests/ -q
+
+      # Ловит то, что иначе всплывает только при запуске: неопределённые
+      # имена, забытые импорты, изменяемый аргумент по умолчанию. За одну
+      # сессию мы трижды писали тест с неопределённым именем и узнавали об
+      # этом от pytest — линтер сообщает за секунду.
+      - name: Lint
+        run: ruff check kz/ tests/ airflow/
+      # Порог, а не цель. Смысл не в том, чтобы догнать до 90%, а в том,
+      # чтобы новый код приходил с тестами и покрытие не сползало вниз.
+      - name: Run offline regression suite with coverage
+        run: |
+          coverage run --source=kz -m pytest tests/ -q
+          coverage report --skip-covered --sort=cover
+          coverage report --fail-under=38
       # Тесты не должны зависеть от data/: каталог в .gitignore, в чистом
       # клоне его нет. Раньше один тест читал data/manual_labels.csv и падал
       # только в CI — проверяем это явно, а не надеемся, что не повторится.

@@ -37,7 +37,6 @@ stability index) сравнивает два распределения по к�
 from __future__ import annotations
 
 import csv
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -153,11 +152,24 @@ def main():
     _, meta = load_artifact()
     current = prepare_training_data(load())
     train = training_snapshot()
+    trained_on = int(meta.get("training_rows", 0))
+    fresh_rows = len(current) - trained_on
 
     print(f"Модель обучена {meta.get('created_at_utc','?')[:16]} "
-          f"на {meta.get('training_rows')} строках")
-    print(f"Сейчас в чистом слое: {len(current)} строк "
-          f"(+{len(current) - int(meta.get('training_rows', 0))})\n")
+          f"на {trained_on} строках")
+    print(f"Сейчас в чистом слое: {len(current)} строк (+{fresh_rows})\n")
+
+    # Вырожденный случай: модель обучена ровно на тех данных, что лежат
+    # сейчас. Сравнивать нечего — снимок обучающей выборки И ЕСТЬ текущая
+    # выборка, PSI выйдет нулевым по построению, а не потому что данные
+    # стабильны. Печатать в такой ситуации «данные стабильны» — значит
+    # успокаивать отчётом, который ничего не проверил.
+    if fresh_rows <= 0:
+        print("Сравнивать не с чем: модель обучена ровно на текущих данных.")
+        print("Дрейф измеряется между обучением и НОВЫМИ данными, поэтому")
+        print("проверку имеет смысл делать ДО переобучения, а не после.")
+        print("\nЗамер не записан в историю — нулю здесь верить нельзя.")
+        return
 
     table = compare(train, current)
     print("Сдвиг распределения признаков (PSI):")

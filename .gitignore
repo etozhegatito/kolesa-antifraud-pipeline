@@ -37,3 +37,4 @@ tmp/
 cache/
 browser_state.json
 data/photos/
+.coverage

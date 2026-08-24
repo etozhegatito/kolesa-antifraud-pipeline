@@ -7,8 +7,10 @@
 
 Что отдаётся по одной машине:
   estimate        точечная оценка справедливой цены;
-  range_low/high  диапазон, а не одно число: точность модели ±23%, и делать
-                  вид, что мы знаем цену до тенге, — обман;
+  range_low/high  диапазон с ИЗМЕРЕННЫМ покрытием: восемь машин из десяти
+                  попадают внутрь, и это проверено, а не обещано. Раньше
+                  здесь стоял один коридор ±12/15% на все машины — для
+                  свежей Camry честный, для Delica 1993 года фикция;
   drivers         разложение прогноза по вкладам признаков (SHAP), чтобы
                   человек видел, ПОЧЕМУ столько, а не верил чёрному ящику;
   position        позиция цены продавца среди похожих машин;
@@ -26,16 +28,19 @@ from kz.core.db import get_engine
 from kz.ml.predict_price import make_row
 from kz.ml.train_price_model import CAT_FEATURES, FEATURES, load_artifact
 
-# Диапазон вокруг точечной оценки. Берём из фактической ошибки модели на
-# кросс-валидации, а не из головы: половина машин предсказывается точнее
-# медианного APE, поэтому такой коридор честно отражает типичный промах.
-RANGE_LOW, RANGE_HIGH = 0.88, 1.15
+# Резервный коридор — только если артефакта интервала нет (например, его не
+# успели переобучить после смены схемы признаков). Это заведомо грубая
+# замена: один и тот же диапазон для всех машин. Настоящий интервал считает
+# kz/ml/price_interval.py, и его покрытие измерено, а не обещано.
+FALLBACK_LOW, FALLBACK_HIGH = 0.88, 1.15
 
 # Минимум похожих машин, чтобы говорить о позиции среди конкурентов.
 MIN_SIMILAR = 8
 
 _model = None
 _meta = None
+_interval = None
+_interval_missing = False
 _db_warned = False
 
 
@@ -69,6 +74,48 @@ def get_model():
     if _model is None:
         _model, _meta = load_artifact()
     return _model, _meta
+
+
+def get_interval_models():
+    """Артефакт интервала, если он есть. Отсутствие — не авария.
+
+    Оценка цены живёт в основной модели и без интервала работает; грубеет
+    только диапазон. Ронять запрос из-за украшения нельзя, поэтому промах
+    запоминается и в лог пишется один раз на процесс.
+    """
+    global _interval, _interval_missing
+    if _interval is None and not _interval_missing:
+        try:
+            from kz.ml.price_interval import load_artifact as load_interval
+            _interval = load_interval()
+        except Exception as e:              # noqa: BLE001 — артефакта может не быть
+            _interval_missing = True
+            print(f"[web] интервал недоступен ({type(e).__name__}), "
+                  f"диапазон считается грубым коридором")
+    return _interval
+
+
+def price_range(car: dict, fair: float) -> tuple[float, float, dict]:
+    """Границы диапазона и то, чем они получены.
+
+    Третьим элементом идёт описание метода. Человеку важно знать, что
+    означает диапазон: измеренное покрытие «8 из 10 машин попадают внутрь»
+    или прикидку по средней ошибке.
+    """
+    models = get_interval_models()
+    if models is None:
+        return (fair * FALLBACK_LOW, fair * FALLBACK_HIGH,
+                {"method": "fallback", "coverage": None})
+
+    from kz.ml.price_interval import predict_interval
+
+    low, high = predict_interval(make_row(**car), models=models)
+    meta = models[2]
+    return (float(low[0]), float(high[0]), {
+        "method": "conformal",
+        "coverage": meta.get("oof", {}).get("coverage"),
+        "target_coverage": meta.get("target_coverage"),
+    })
 
 
 def estimate_price(car: dict) -> float:
@@ -230,10 +277,12 @@ def full_estimate(car: dict, asking_price: float | None = None,
     fair = estimate_price(car)
     _, meta = get_model()
     val = meta.get("validation", {}).get("grouped_cv", {}).get("model", {})
+    low, high, how = price_range(car, fair)
     return jsonable({
         "fair_price": fair,
-        "range_low": fair * RANGE_LOW,
-        "range_high": fair * RANGE_HIGH,
+        "range_low": low,
+        "range_high": high,
+        "range_method": how,
         "model_mape_pct": val.get("mape_pct"),
         "trained_rows": meta.get("training_rows"),
         "drivers": price_drivers(car),

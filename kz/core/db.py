@@ -9,7 +9,7 @@ ON CONFLICT. Осознанно маленький файл — проект о�
 from functools import lru_cache
 
 import psycopg2.extras
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 
 from kz.core.config import DATABASE_URL
 
@@ -61,9 +61,3 @@ def upsert(table: str, rows: list[dict], conflict_cols: list[str],
         raw.commit()
     finally:
         raw.close()
-
-
-def run_sql(sql: str, params: dict | None = None):
-    """Разовый DDL/UPDATE без возврата строк (например TRUNCATE)."""
-    with get_engine().begin() as conn:
-        conn.execute(text(sql), params or {})

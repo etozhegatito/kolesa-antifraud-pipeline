@@ -107,14 +107,17 @@ def estimate_page() -> str:
     <div><label>Объём двигателя, л</label><input id="engine_volume" type="number" step="0.1" value="2.5"></div>
     <div><label>Топливо</label><select id="engine_type">
       <option>бензин</option><option>дизель</option><option>газ-бензин</option>
-      <option>гибрид</option><option>электро</option></select></div>
+      <option>газ</option><option>гибрид</option><option>электро</option>
+      </select></div>
     <div><label>Коробка</label><select id="transmission">
       <option>автомат</option><option>механика</option><option>вариатор</option>
-      <option>типтроник</option></select></div>
+      <option>робот</option><option>типтроник</option></select></div>
     <div><label>Кузов</label><select id="body_type">
-      <option>седан</option><option>внедорожник</option><option>хэтчбек</option>
-      <option>универсал</option><option>минивэн</option><option>купе</option>
-      <option>пикап</option></select></div>
+      <option>седан</option><option>кроссовер</option><option>внедорожник</option>
+      <option>минивэн</option><option>хэтчбек</option><option>универсал</option>
+      <option>фургон</option><option>пикап</option><option>лифтбек</option>
+      <option>купе</option><option>микроавтобус</option><option>кабриолет</option>
+      <option>родстер</option></select></div>
     <div><label>Состояние</label><select id="condition">
       <option>б/у</option><option>новый</option></select></div>
     <div><label>Сколько фотографий</label><input id="photos_count" type="number" value="8"></div>

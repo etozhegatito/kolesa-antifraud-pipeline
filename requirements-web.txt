@@ -9,17 +9,17 @@
 # должны совпадать, иначе артефакт, обученный локально, может не загрузиться
 # в контейнере.
 
-fastapi>=0.110
-uvicorn[standard]>=0.29
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
 
 # модель и препроцессинг
-catboost>=1.2
-pandas>=2.0
-numpy>=1.26
-scikit-learn>=1.3
+catboost==1.2.10
+pandas==2.3.3
+numpy==2.5.1
+scikit-learn==1.9.0
 
 # база нужна только для «похожих машин»; без неё сервис работает,
 # см. kz/web/service.py:query
-SQLAlchemy>=2.0
-psycopg2-binary>=2.9
-python-dotenv>=1.0
+SQLAlchemy==2.0.51
+psycopg2-binary==2.9.12
+python-dotenv==1.2.2

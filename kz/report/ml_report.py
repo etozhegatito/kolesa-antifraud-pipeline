@@ -133,7 +133,7 @@ def main():
     df["log_price"] = np.log(df["price_tenge"])
     df, _ = scrub_junk_mileage(df)
     clean = df[df["is_suspicious"] == 0]
-    X, y = clean[FEATURES], clean["log_price"]
+    X = clean[FEATURES]
 
     model, metadata = load_artifact()
     grouped = metadata["validation"]["grouped_cv"]["model"]

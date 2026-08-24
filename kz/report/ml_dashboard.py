@@ -18,7 +18,6 @@ import matplotlib
 matplotlib.use("Agg")                       # рендер в файл без окна
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 
 from kz.transform.data_quality import scrub_junk_mileage

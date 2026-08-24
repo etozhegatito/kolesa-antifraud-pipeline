@@ -71,6 +71,15 @@ def bar(done: int, total: int, width: int = 24) -> str:
 
 
 def main():
+    # Свежесть — первое, что нужно увидеть, вернувшись к проекту через две
+    # недели: остальные числа читаются по-разному в зависимости от того,
+    # когда данные собирали последний раз.
+    from kz.core import freshness as fr
+    _state = fr.measure()
+    fr.report(_state)
+    for _w in fr.stale_warnings(_state):
+        print(f"  \u26a0 {_w}")
+    print()
     engine = get_engine()
 
     with engine.begin() as conn:
