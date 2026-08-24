@@ -80,11 +80,24 @@ from kz.ml.train_price_model import (
 TARGET_COVERAGE = 0.80        # обещаем «8 из 10 машин попадают в интервал»
 N_SPLITS = 5
 
+# Границы групп для калибровки, в тенге ПРЕДСКАЗАННОЙ цены.
+#
+# Почему предсказанной, а не фактической: фактическая — это то, что мы
+# предсказываем. Условиться на ней при обучении можно, а при выдаче прогноза
+# новой машине уже нет: цены ещё нет. Калибровка, которую нельзя применить,
+# бесполезна, поэтому группа определяется по собственному прогнозу модели.
+GROUP_EDGES = [0, 5e6, 10e6, 20e6, float("inf")]
+GROUP_NAMES = ["<5M", "5-10M", "10-20M", "20M+"]
+
+# Ниже этого числа наблюдений группа калибруется общей поправкой. Своя
+# поправка на полусотне строк — это шум, выданный за настройку.
+MIN_GROUP = 200
+
 MODEL_DIR = Path("data/models")
 LOWER_PATH = MODEL_DIR / "price_interval_lower.cbm"
 UPPER_PATH = MODEL_DIR / "price_interval_upper.cbm"
 META_PATH = MODEL_DIR / "price_interval.metadata.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def quantile_levels(target: float = TARGET_COVERAGE) -> tuple[float, float]:
@@ -122,6 +135,91 @@ def conformal_offset(scores: np.ndarray, target: float = TARGET_COVERAGE) -> flo
         return 0.0
     level = min(1.0, target * (n + 1) / n)
     return float(np.quantile(scores, level, method="higher"))
+
+
+def tail_offsets(y_log, lo_log, hi_log,
+                 target: float = TARGET_COVERAGE) -> tuple[float, float]:
+    """Поправки к нижней и верхней границе ПО ОТДЕЛЬНОСТИ.
+
+    Обычный CQR берёт один максимум на две стороны и раздвигает границы
+    одинаково. Это гарантирует общее покрытие, но ничего не говорит о том,
+    как промахи распределены по хвостам, — а у нас они распределены криво:
+    у дешёвых машин 15,2% вываливались ВНИЗ против 5,9% вверх, у дорогих
+    зеркально. То есть интервал систематически стоял высоко на дешёвых и
+    низко на дорогих, при формально верных 80%.
+
+    Здесь каждый хвост калибруется своим квантилем: столько же процентов
+    слева, сколько справа. Симметричность покрытия — не косметика: продавцу
+    дешёвой машины важно, что верхняя граница не завышена, а не то, что
+    интервал в среднем правильной ширины.
+    """
+    y = np.asarray(y_log, dtype=float)
+    tail = (1.0 - target) / 2.0            # по 10% на сторону при target=0.8
+
+    def edge(scores: np.ndarray) -> float:
+        scores = scores[np.isfinite(scores)]
+        n = len(scores)
+        if n == 0:
+            return 0.0
+        level = min(1.0, (1.0 - tail) * (n + 1) / n)
+        return float(np.quantile(scores, level, method="higher"))
+
+    return edge(np.asarray(lo_log, dtype=float) - y), edge(y - np.asarray(hi_log, dtype=float))
+
+
+def group_of(price: np.ndarray) -> np.ndarray:
+    """Индекс группы по цене (предсказанной при выдаче, любой при замере)."""
+    return np.clip(np.searchsorted(GROUP_EDGES, np.asarray(price, dtype=float),
+                                   side="right") - 1,
+                   0, len(GROUP_NAMES) - 1)
+
+
+def group_offsets(y_log, lo_log, hi_log, pred_price,
+                  target: float = TARGET_COVERAGE) -> dict:
+    """Свои поправки для каждой ценовой группы, с общими как запасными.
+
+    Приём называется мондриановской конформной калибровкой: выборка режется
+    на заранее объявленные группы, и гарантия покрытия выполняется ВНУТРИ
+    каждой, а не только в среднем по всем.
+
+    Цена этого — меньше данных на каждую оценку. Поэтому группа меньше
+    MIN_GROUP считается по общей поправке: лучше честное среднее, чем
+    подгонка под полсотни строк.
+    """
+    g = group_of(pred_price)
+    fallback = tail_offsets(y_log, lo_log, hi_log, target)
+    out = {"global": list(fallback), "groups": {}}
+    y = np.asarray(y_log, dtype=float)
+    for i, name in enumerate(GROUP_NAMES):
+        m = g == i
+        if m.sum() < MIN_GROUP:
+            out["groups"][name] = {"offsets": list(fallback), "n": int(m.sum()),
+                                   "source": "общая (группа мала)"}
+            continue
+        out["groups"][name] = {
+            "offsets": list(tail_offsets(y[m], np.asarray(lo_log)[m],
+                                         np.asarray(hi_log)[m], target)),
+            "n": int(m.sum()), "source": "своя"}
+    return out
+
+
+def apply_offsets(lo_log, hi_log, offsets: dict):
+    """Раздвинуть границы поправками той группы, в которую попал прогноз.
+
+    Группа берётся по СЫРОЙ середине интервала — она известна до применения
+    поправок, поэтому не возникает замкнутого круга «поправка зависит от
+    группы, а группа от поправки».
+    """
+    lo_log = np.asarray(lo_log, dtype=float)
+    hi_log = np.asarray(hi_log, dtype=float)
+    g = group_of(np.exp((lo_log + hi_log) / 2))
+    d_lo = np.empty(len(lo_log))
+    d_hi = np.empty(len(hi_log))
+    for i, name in enumerate(GROUP_NAMES):
+        pair = offsets["groups"].get(name, {}).get("offsets", offsets["global"])
+        m = g == i
+        d_lo[m], d_hi[m] = pair[0], pair[1]
+    return lo_log - d_lo, hi_log + d_hi
 
 
 def oof_bounds(clean: pd.DataFrame, target: float = TARGET_COVERAGE):
@@ -167,20 +265,33 @@ def coverage_report(y_log, lo_log, hi_log, price) -> dict:
 
 
 def fit(clean: pd.DataFrame, target: float = TARGET_COVERAGE, log=print):
-    """Финальные границы + поправка, измеренная на out-of-fold данных."""
+    """Финальные границы + поправки по группам, измеренные out-of-fold."""
     lo_oof, hi_oof = oof_bounds(clean, target)
-    raw = coverage_report(clean["log_price"], lo_oof, hi_oof, clean["price_tenge"])
-    log(f"До калибровки:  покрытие {raw['coverage']*100:.1f}% "
-        f"(цель {target*100:.0f}%), медианная ширина {raw['median_width_pct']:.0f}%")
+    y, price = clean["log_price"], clean["price_tenge"]
 
-    offset = conformal_offset(
-        conformity(clean["log_price"], lo_oof, hi_oof), target)
-    fixed = coverage_report(clean["log_price"], lo_oof - offset,
-                            hi_oof + offset, clean["price_tenge"])
-    log(f"После:          покрытие {fixed['coverage']*100:.1f}%, "
-        f"медианная ширина {fixed['median_width_pct']:.0f}%")
-    log(f"Поправка к границам: ±{offset:.4f} в логарифме "
-        f"(множитель ×{np.exp(offset):.3f})")
+    raw = coverage_report(y, lo_oof, hi_oof, price)
+    log(f"Без калибровки:      покрытие {raw['coverage']*100:.1f}% "
+        f"(цель {target*100:.0f}%), ширина {raw['median_width_pct']:.0f}%")
+
+    # Общая симметричная поправка — то, с чего начинали. Оставлена как база
+    # сравнения: без неё непонятно, что дало разделение по группам.
+    sym = conformal_offset(conformity(y, lo_oof, hi_oof), target)
+    sym_rep = coverage_report(y, lo_oof - sym, hi_oof + sym, price)
+    log(f"Общая поправка:      покрытие {sym_rep['coverage']*100:.1f}%, "
+        f"ширина {sym_rep['median_width_pct']:.0f}%")
+
+    mid_price = np.exp((lo_oof + hi_oof) / 2)
+    offsets = group_offsets(y, lo_oof, hi_oof, mid_price, target)
+    lo_cal, hi_cal = apply_offsets(lo_oof, hi_oof, offsets)
+    fixed = coverage_report(y, lo_cal, hi_cal, price)
+    log(f"По группам:          покрытие {fixed['coverage']*100:.1f}%, "
+        f"ширина {fixed['median_width_pct']:.0f}%\n")
+
+    log("Поправки по группам (в логарифме, вниз / вверх):")
+    for name, info in offsets["groups"].items():
+        d_lo, d_hi = info["offsets"]
+        log(f"  {name:<7} n={info['n']:<5} вниз {d_lo:+.3f}  вверх {d_hi:+.3f}"
+            f"   {info['source']}")
 
     lo_a, hi_a = quantile_levels(target)
     pool = Pool(clean[FEATURES], clean["log_price"], cat_features=CAT_FEATURES)
@@ -188,7 +299,7 @@ def fit(clean: pd.DataFrame, target: float = TARGET_COVERAGE, log=print):
     final_lo.fit(pool)
     final_hi = new_model(loss_function=f"Quantile:alpha={hi_a}")
     final_hi.fit(pool)
-    return final_lo, final_hi, offset, (lo_oof - offset, hi_oof + offset), fixed
+    return final_lo, final_hi, offsets, (lo_cal, hi_cal), fixed, sym_rep
 
 
 def _save_model(model: CatBoostRegressor, path: Path) -> None:
@@ -245,35 +356,58 @@ def predict_interval(X: pd.DataFrame, models=None) -> tuple[np.ndarray, np.ndarr
     """
     lo, hi, meta = models or load_artifact()
     prepared = coerce_features(X)[FEATURES]
-    off = float(meta["conformal_offset_log"])
-    low = np.exp(lo.predict(prepared) - off)
-    high = np.exp(hi.predict(prepared) + off)
+    lo_log, hi_log = apply_offsets(lo.predict(prepared), hi.predict(prepared),
+                                   meta["offsets"])
+    low, high = np.exp(lo_log), np.exp(hi_log)
     return np.minimum(low, high), np.maximum(low, high)
 
 
 def by_segment(clean: pd.DataFrame, lo_log, hi_log, log=print) -> dict:
-    """Покрытие по ценовым сегментам.
+    """Покрытие по сегментам — в ДВУХ разрезах, и разница между ними важна.
 
-    Среднее покрытие может держаться за счёт того, что интервал слишком
-    широк на дорогих машинах и слишком узок на дешёвых. Именно дешёвый
-    сегмент даёт основную ошибку модели, поэтому смотреть надо раздельно.
+    По ПРЕДСКАЗАННОЙ цене — то, на чём калибровка обусловлена, и то, что
+    единственно доступно при выдаче прогноза новой машине. Здесь покрытие и
+    хвосты обязаны быть ровными: если нет, калибровка сломана.
+
+    По ФАКТИЧЕСКОЙ цене — разрез, в котором остаётся перекос: у дешёвых
+    машин факт чаще вываливается ВНИЗ, у дорогих ВВЕРХ. Долго принимал это
+    за дефект калибровки. Это не дефект и устранить его нельзя.
+
+    Причина в том, что группировка по факту — это обусловливание на том, что
+    мы предсказываем. Машины, чья настоящая цена низка, — по построению те,
+    которые модель переоценила (прогноз тянется к среднему). Никакая
+    калибровка по признакам этого не снимет: в момент прогноза неизвестно, с
+    какой стороны от своей ошибки окажется машина.
+
+    Показываем оба разреза именно поэтому. Первый доказывает, что калибровка
+    работает. Второй честно сообщает продавцу дешёвой машины: если она
+    действительно дёшева, наш интервал скорее стоит выше неё.
     """
     price = clean["price_tenge"].to_numpy(dtype=float)
-    buckets = pd.cut(price, [0, 5e6, 10e6, 20e6, np.inf],
-                     labels=["<5M", "5-10M", "10-20M", "20M+"])
+    y = clean["log_price"].to_numpy()
+    predicted = np.exp((np.asarray(lo_log) + np.asarray(hi_log)) / 2)
+
     out = {}
-    log("\nПокрытие по сегментам (цель "
-        f"{TARGET_COVERAGE*100:.0f}%, ширина — медианная):")
-    for name in buckets.categories:
-        m = np.asarray(buckets == name)
-        if m.sum() < 20:
-            continue
-        r = coverage_report(clean["log_price"].to_numpy()[m], lo_log[m],
-                            hi_log[m], price[m])
-        out[str(name)] = {"n": int(m.sum()), **r}
-        log(f"  {name:<7} n={m.sum():<5} покрытие {r['coverage']*100:5.1f}%   "
-            f"ширина {r['median_width_pct']:5.0f}%   "
-            f"ниже {r['below']*100:4.1f}%  выше {r['above']*100:4.1f}%")
+    for label, key, tag in [("по предсказанной цене", predicted, "predicted"),
+                            ("по фактической цене", price, "actual")]:
+        log(f"\nПокрытие {label} (цель {TARGET_COVERAGE*100:.0f}%):")
+        g = group_of(key)
+        out[tag] = {}
+        for i, name in enumerate(GROUP_NAMES):
+            m = g == i
+            if m.sum() < 20:
+                continue
+            r = coverage_report(y[m], np.asarray(lo_log)[m],
+                                np.asarray(hi_log)[m], price[m])
+            out[tag][name] = {"n": int(m.sum()), **r}
+            skew = (r["below"] - r["above"]) * 100
+            log(f"  {name:<7} n={m.sum():<5} покрытие {r['coverage']*100:5.1f}%   "
+                f"ширина {r['median_width_pct']:5.0f}%   "
+                f"ниже {r['below']*100:4.1f}%  выше {r['above']*100:4.1f}%"
+                f"   перекос {skew:+5.1f}")
+    log("\n  Ровные хвосты в первом разрезе — признак рабочей калибровки.")
+    log("  Перекос во втором неустраним: группировка по факту обусловливает")
+    log("  на том, что мы предсказываем (см. докстринг by_segment).")
     return out
 
 
@@ -282,7 +416,7 @@ def main():
     print(f"Строк для калибровки: {len(clean)}   "
           f"цель покрытия: {TARGET_COVERAGE*100:.0f}%\n")
 
-    lower, upper, offset, (lo_cal, hi_cal), overall = fit(clean)
+    lower, upper, offsets, (lo_cal, hi_cal), overall, sym = fit(clean)
     segments = by_segment(clean, lo_cal, hi_cal)
 
     # Пересечение квантилей — редкость, но молчать о нём нельзя: если доля
@@ -299,11 +433,14 @@ def main():
         "features": FEATURES,
         "target_coverage": TARGET_COVERAGE,
         "quantile_levels": list(quantile_levels()),
-        "calibration": "conformalized_quantile_regression_grouped_oof",
+        "calibration": "mondrian_cqr_asymmetric_tails_grouped_oof",
         "calibration_rows": int(len(clean)),
-        "conformal_offset_log": offset,
+        "group_edges": GROUP_EDGES[1:-1],
+        "min_group": MIN_GROUP,
+        "offsets": offsets,
         "crossed_bounds": crossed,
         "oof": overall,
+        "oof_symmetric_global": sym,   # база сравнения: что было до групп
         "segments": segments,
     }
     save_artifact(lower, upper, metadata)

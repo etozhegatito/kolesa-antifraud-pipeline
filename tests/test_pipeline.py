@@ -2706,6 +2706,78 @@ def test_interval_quantile_levels_are_symmetric():
         assert abs((hi - lo) - target) < 1e-9      # ширина = обещанное покрытие
 
 
+def test_tails_are_calibrated_separately():
+    """Один максимум на две стороны раздвигает границы одинаково и ничего не
+    говорит о том, как промахи распределены по хвостам. У нас они были
+    распределены криво, поэтому каждый хвост калибруется своим квантилем."""
+    import numpy as np
+    from kz.ml.price_interval import tail_offsets
+
+    n = 1000
+    rng = np.random.default_rng(0)
+    y = rng.normal(0, 1, n)
+    # верхняя граница занижена на 2 — сверху вылезает много, снизу ничего
+    lo = np.full(n, -10.0)
+    hi = np.full(n, -2.0)
+    d_lo, d_hi = tail_offsets(y, lo, hi, 0.80)
+    assert d_hi > 1.0, "верхнюю границу обязаны заметно поднять"
+    assert d_lo < d_hi, "нижнюю трогать почти не надо — снизу никто не вылез"
+
+
+def test_groups_are_keyed_on_prediction_not_on_truth():
+    """Группа обязана определяться по ПРЕДСКАЗАННОЙ цене.
+
+    Фактическая — это то, что мы предсказываем: при выдаче прогноза новой
+    машине её ещё нет. Калибровка, обусловленная на факте, была бы
+    неприменима ровно там, где нужна."""
+    import inspect
+    import numpy as np
+    from kz.ml.price_interval import apply_offsets, group_of
+
+    assert list(group_of(np.array([1e6, 7e6, 15e6, 50e6]))) == [0, 1, 2, 3]
+
+    src = inspect.getsource(apply_offsets)
+    assert "lo_log + hi_log" in src, "группа берётся из сырых границ прогноза"
+    assert "price_tenge" not in src, "фактическая цена в выдаче недоступна"
+
+
+def test_group_offsets_fall_back_when_a_group_is_too_small():
+    """Своя поправка на полусотне строк — это шум, выданный за настройку.
+    Маленькая группа обязана считаться общей поправкой, и это должно быть
+    видно в метаданных, а не подразумеваться."""
+    import numpy as np
+    from kz.ml.price_interval import MIN_GROUP, group_offsets
+
+    n = 400
+    rng = np.random.default_rng(1)
+    y = rng.normal(0, 0.3, n)
+    lo, hi = y - 0.5, y + 0.5
+    # все прогнозы в одной группе: остальные останутся пустыми
+    pred = np.full(n, 1e6)
+    off = group_offsets(y, lo, hi, pred)
+    assert off["groups"]["<5M"]["source"] == "своя"
+    assert off["groups"]["<5M"]["n"] >= MIN_GROUP
+    for empty in ("5-10M", "10-20M", "20M+"):
+        assert off["groups"][empty]["source"].startswith("общая")
+        assert off["groups"][empty]["offsets"] == off["global"]
+
+
+def test_coverage_is_reported_in_both_cuts():
+    """Отчёт обязан показывать оба разреза и объяснять разницу.
+
+    По предсказанной цене хвосты ровные — это доказывает, что калибровка
+    работает. По фактической остаётся перекос, и он НЕустраним: группировка
+    по факту обусловливает на том, что мы предсказываем, а машины с низкой
+    настоящей ценой — по построению те, которые модель переоценила. Долго
+    считал это дефектом; принять артефакт измерения за баг и «чинить» его
+    было бы хуже, чем оставить как есть."""
+    import inspect
+    from kz.ml import price_interval
+    src = inspect.getsource(price_interval.by_segment)
+    assert "по предсказанной цене" in src and "по фактической цене" in src
+    assert "неустраним" in src or "устранить его нельзя" in src
+
+
 def test_coverage_is_reported_with_width():
     """Покрытие без ширины — бессмысленное число: интервал «от нуля до
     бесконечности» даёт 100% попаданий и ноль пользы."""
