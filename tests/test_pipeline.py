@@ -2286,3 +2286,36 @@ def test_dag_docstring_lists_every_task_it_defines():
             if task_id not in doc:
                 bad.append(f"{dag.name}: задача {task_id} не описана в докстринге")
     assert not bad, "\n".join(bad)
+
+
+def test_enrichment_queue_puts_fresh_ads_ahead_of_stale_backlog(monkeypatch):
+    """Страницы объявлений смертны, и очередь обязана это учитывать.
+
+    Раньше сортировка была только по is_suspicious, а порядок внутри
+    остальных определялся тем, как база вернула строки. Новое объявление
+    вставало в хвост очереди из тысяч старых — а приток новых при ежедневном
+    сборе больше суточного бюджета обогащения, то есть хвост рос быстрее,
+    чем разбирался. Шестнадцать объявлений дождались своей очереди мёртвыми:
+    страница отдала 404, комментарий продавца и бейдж состояния потеряны.
+
+    Подозрительные всё равно идут первыми — их единицы, стоят они копейки,
+    и обогащение снимает с них ложные подозрения."""
+    from kz.collect import enrich
+
+    rows = pd.DataFrame([
+        {"ad_id": "old_plain",  "is_suspicious": 0, "scraped_at": "2026-07-17"},
+        {"ad_id": "new_plain",  "is_suspicious": 0, "scraped_at": "2026-08-10"},
+        {"ad_id": "old_susp",   "is_suspicious": 1, "scraped_at": "2026-07-17"},
+        {"ad_id": "mid_plain",  "is_suspicious": 0, "scraped_at": "2026-08-01"},
+    ])
+    monkeypatch.setattr(enrich.pd, "read_sql", lambda *a, **k: rows.copy())
+    monkeypatch.setattr(enrich, "get_engine", lambda: None)
+
+    assert enrich.pick_targets(set()) == [
+        "old_susp",    # подозрительное вперёд, несмотря на возраст
+        "new_plain",   # дальше — новейшие, их страницы ещё живы
+        "mid_plain",
+        "old_plain",
+    ]
+    # уже обогащённые в очередь не возвращаются
+    assert "new_plain" not in enrich.pick_targets({"new_plain"})
