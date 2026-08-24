@@ -2465,12 +2465,16 @@ def test_estimate_form_covers_the_categories_in_the_data():
     (в CI его нет) проверять нечего, но локально — там, где кузов и
     добавляют — тест сработает."""
     import json
-    from pathlib import Path
 
-    meta_path = Path("data/models/price_model.metadata.json")
-    if not meta_path.exists():
+    # Путь берём из кода, а не литералом: во-первых, он уже объявлен там
+    # константой и дублировать его незачем; во-вторых, CI отдельным шагом
+    # запрещает тестам обращаться к data/ строкой — каталог в .gitignore, в
+    # чистом клоне его нет, и такой тест падал бы только в CI.
+    from kz.ml.train_price_model import METADATA_PATH
+
+    if not METADATA_PATH.exists():
         return
-    vocab = json.loads(meta_path.read_text(encoding="utf-8")).get(
+    vocab = json.loads(METADATA_PATH.read_text(encoding="utf-8")).get(
         "categorical_vocabulary", {})
     if not vocab:
         return
