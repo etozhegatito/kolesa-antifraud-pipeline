@@ -5,7 +5,9 @@ on:
   pull_request:
 
 jobs:
-  offline-tests:
+  # Раньше назывался offline-tests и это было правдой: база не поднималась,
+  # и весь SQL проекта в CI не исполнялся ни разу.
+  tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -14,6 +16,28 @@ jobs:
       POSTGRES_DB: test
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
+
+    # Настоящий Postgres, потому что без него ни один запрос проекта не
+    # исполнялся в CI ни разу: сломанный JOIN или разъехавшаяся с кодом схема
+    # обнаруживались только на машине разработчика. Имя базы «test» — не
+    # косметика: тесты отказываются работать с базой, в имени которой этого
+    # слова нет, чтобы прогон не затёр собранные данные (см.
+    # tests/test_integration_db.py).
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,11 +65,26 @@ jobs:
         run: ruff check kz/ tests/ airflow/
       # Порог, а не цель. Смысл не в том, чтобы догнать до 90%, а в том,
       # чтобы новый код приходил с тестами и покрытие не сползало вниз.
-      - name: Run offline regression suite with coverage
+      - name: Run regression suite with coverage
         run: |
           coverage run --source=kz -m pytest tests/ -q
           coverage report --skip-covered --sort=cover
-          coverage report --fail-under=38
+          coverage report --fail-under=39
+
+      # Интеграционные тесты умеют пропускаться, когда базы нет — это нужно
+      # локально. Здесь база есть, и пропуск означал бы, что мы подняли
+      # сервис Postgres и ничего им не проверили. Сами тесты падают при
+      # CI=true, но эта переменная задаётся окружением, а не нами, поэтому
+      # проверяем результат ещё и снаружи.
+      - name: Database tests must run, not skip
+        run: |
+          out=$(python -m pytest tests/test_integration_db.py -q 2>&1 | tail -1)
+          echo "$out"
+          case "$out" in
+            *skipped*|*"no tests ran"*)
+              echo "Тесты с базой не выполнились — Postgres не подхватился"
+              exit 1 ;;
+          esac
       # Тесты не должны зависеть от data/: каталог в .gitignore, в чистом
       # клоне его нет. Раньше один тест читал data/manual_labels.csv и падал
       # только в CI — проверяем это явно, а не надеемся, что не повторится.
