@@ -658,6 +658,194 @@ def test_price_model_features_no_leakage():
     assert not leak, f"утечка цели в фичах модели: {leak}"
 
 
+# ─── catch_up: учёт суточного бюджета запросов ──────────────────────────────
+# Самая дорогая логика в проекте: ошибка здесь стоит бана IP, и один раз уже
+# стоила. Тесты подменяют файл бюджета на временный — трогать настоящий
+# нельзя, в нём живёт реальный расход за сегодня.
+
+def _budget_file(tmp_path, monkeypatch):
+    from kz.ops import catch_up
+    f = tmp_path / "budget.json"
+    monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
+    return catch_up, f
+
+
+def test_budget_accumulates_within_one_day(tmp_path, monkeypatch):
+    """Списания складываются, а не перезаписываются: три порции по двадцать
+    запросов — это шестьдесят потраченных, а не двадцать."""
+    cu, _ = _budget_file(tmp_path, monkeypatch)
+    for _ in range(3):
+        used = cu.charge_budget("kolesa", 20)
+    assert used["kolesa"] == 60
+    assert used["cdn"] == 0
+    assert cu.load_budget_used()["kolesa"] == 60
+
+
+def test_budget_resets_on_a_new_calendar_day(tmp_path, monkeypatch):
+    """Квота суточная, значит вчерашний расход сегодня не считается.
+
+    Раньше файл хранил одну цифру без даты, и прогон, пересёкший полночь,
+    приписывал вчерашние запросы сегодняшнему дню — квота оказывалась
+    съеденной ещё до старта."""
+    import json
+    from datetime import date, timedelta
+    cu, f = _budget_file(tmp_path, monkeypatch)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    f.write_text(json.dumps({"days": {yesterday: {"kolesa": 200, "cdn": 900}}}),
+                 encoding="utf-8")
+    assert cu.load_budget_used() == {"kolesa": 0, "cdn": 0}
+    # и вчерашняя запись при этом не затирается
+    assert cu.charge_budget("kolesa", 5)["kolesa"] == 5
+    assert json.loads(f.read_text(encoding="utf-8"))["days"][yesterday]["kolesa"] == 200
+
+
+def test_budget_survives_a_missing_or_corrupt_file(tmp_path, monkeypatch):
+    """Битый файл бюджета не должен ронять сбор — но и не должен молча
+    выдавать неограниченную квоту. Правильный ответ на мусор — нули, то есть
+    самая консервативная позиция."""
+    cu, f = _budget_file(tmp_path, monkeypatch)
+    assert cu.load_budget_used() == {"kolesa": 0, "cdn": 0}      # файла нет
+    f.write_text("{не json", encoding="utf-8")
+    assert cu.load_budget_used() == {"kolesa": 0, "cdn": 0}
+
+
+def test_budget_reads_the_old_single_day_format(tmp_path, monkeypatch):
+    """Формат до 2026-07-30 хранил одну дату на верхнем уровне. Читать его
+    надо, иначе переход на новый формат обнулил бы расход и разрешил
+    двойную квоту в день обновления."""
+    import json
+    from datetime import date
+    cu, f = _budget_file(tmp_path, monkeypatch)
+    f.write_text(json.dumps({"date": date.today().isoformat(),
+                             "kolesa": 150, "cdn": 40}), encoding="utf-8")
+    assert cu.load_budget_used() == {"kolesa": 150, "cdn": 40}
+
+
+def test_budget_history_does_not_grow_forever(tmp_path, monkeypatch):
+    """Файл бюджета append-only по смыслу, но не по размеру: старые дни
+    подрезаются, иначе он растёт вечно."""
+    import json
+    from datetime import date, timedelta
+    cu, f = _budget_file(tmp_path, monkeypatch)
+    days = {(date.today() - timedelta(days=i)).isoformat():
+            {"kolesa": i, "cdn": 0} for i in range(1, 40)}
+    cu._write_days(days)
+    kept = json.loads(f.read_text(encoding="utf-8"))["days"]
+    assert len(kept) == cu.BUDGET_KEEP_DAYS
+
+
+def test_run_cap_blocks_a_burst_across_midnight(tmp_path, monkeypatch):
+    """Второй потолок — на запуск, и он существует именно из-за полуночи.
+
+    Суточный расход честно обнуляется в 00:00. Без потолка на запуск прогон,
+    начатый в 23:50 и работающий до утра, получил бы двойную квоту всплеском
+    за считанные минуты — а банят именно за всплеск объёма, а не за сутки."""
+    cu, _ = _budget_file(tmp_path, monkeypatch)
+    full = cu.DAILY_BUDGET["kolesa"]
+    fresh_day = {"kolesa": 0, "cdn": 0}          # наступил новый день
+    spent_this_run = {"kolesa": full, "cdn": 0}  # но прогон уже выбрал квоту
+    assert not cu.budget_allows("kolesa", "enrich", 1000, fresh_day,
+                                spent_this_run)
+    # без учёта запуска старая логика разрешила бы продолжать
+    assert cu.budget_allows("kolesa", "enrich", 1000, fresh_day, None)
+
+
+def test_nearly_finished_job_is_not_starved_at_the_quota_edge(tmp_path, monkeypatch):
+    """Стоимость порции = min(размер порции, остаток пробела).
+
+    Иначе джоб, которому осталось три запроса, оценивался бы в полные
+    двадцать и не пролезал бы в остаток квоты — вечно откладываясь, хотя
+    закрылся бы сразу."""
+    cu, _ = _budget_file(tmp_path, monkeypatch)
+    near_limit = {"kolesa": cu.DAILY_BUDGET["kolesa"] - 5, "cdn": 0}
+    assert cu.budget_allows("kolesa", "enrich", 3, near_limit)      # осталось 3
+    assert not cu.budget_allows("kolesa", "enrich", 500, near_limit)
+
+
+def test_429_detector_ignores_the_number_appearing_as_data():
+    """«429» встречается в ad_id, ценах и счётчиках. Считать это
+    rate-limit-событием — значит останавливать сбор на ровном месте;
+    пропустить настоящее — значит долбить сайт, который просит перестать."""
+    from kz.ops.catch_up import is_429_line
+    for benign in ["наблюдений: 429", "ad_id=224297431", "цена 4290000",
+                   "2026-08-24 12:34:29 INFO готово", "скачано 429 фото"]:
+        assert not is_429_line(benign), benign
+    for real in ["429: пауза 120с", "HTTP 429, пауза", "429 три подряд — стоп"]:
+        assert is_429_line(real), real
+
+
+def test_next_action_puts_rate_limiting_ahead_of_everything():
+    """Порядок проверок — это приоритет анти-бана.
+
+    Новый 429 обязан прерывать цепочку раньше, чем сработает разбор
+    остальных исходов: сайт прямым текстом просит остановиться, и продолжать
+    «потому что прогресс есть» нельзя."""
+    from kz.ops.catch_up import next_action
+    assert next_action(100, 0, 0, False) == "done"          # пробел закрыт
+    assert next_action(100, 0, 1, True) == "done"           # даже с 429
+    assert next_action(100, 50, 1, True) == "rate_limited"  # раньше breaker
+    assert next_action(100, 50, 1, False) == "breaker"
+    assert next_action(100, 100, 0, False) == "stuck"       # прогресса нет
+    assert next_action(100, 101, 0, False) == "stuck"       # пробел вырос
+    assert next_action(100, 50, 0, False) == "continue"
+
+
+def test_risk_zones_are_anchored_to_the_ban_that_actually_happened():
+    """Зоны риска — не из статей, а из единственного жёсткого факта: домашний
+    IP лёг на ~270 запросах за сутки. Дефолтный бюджет обязан оставаться в
+    зоне, на которой банов не наблюдали."""
+    from kz.ops.catch_up import DAILY_BUDGET, risk_zone
+    assert risk_zone(50)[0] == "спокойно"
+    assert risk_zone(200)[0] == "безопасно"
+    assert risk_zone(260)[0] == "риск"
+    assert risk_zone(400)[0] == "высокий риск"
+    assert risk_zone(DAILY_BUDGET["kolesa"])[0] in ("спокойно", "безопасно")
+
+
+def test_eta_accounts_for_pauses_not_just_requests():
+    """«Сколько это займёт» обязано учитывать вежливый ритм. Наивная оценка
+    по одному запросу обещала бы минуты вместо часов, и человек запускал бы
+    сбор, не понимая, на что подписывается."""
+    from kz.core.pacing import mean_pause
+    from kz.ops.catch_up import eta_minutes
+    naive = 200 * 3.0 / 60
+    assert eta_minutes(200) > naive * 2
+    assert eta_minutes(200) > 200 * mean_pause(4.0, 8.0) / 60
+
+
+def test_budget_is_configurable_without_touching_code():
+    """Потолок задаётся переменной окружения: понижать его при подозрении на
+    блокировку нужно быстро, а не через правку исходника и коммит."""
+    import importlib
+    import os
+    from kz.ops import catch_up
+    saved = os.environ.get("KOLESA_BUDGET")
+    os.environ["KOLESA_BUDGET"] = "37"
+    try:
+        assert importlib.reload(catch_up).DAILY_BUDGET["kolesa"] == 37
+    finally:
+        if saved is None:
+            os.environ.pop("KOLESA_BUDGET", None)
+        else:
+            os.environ["KOLESA_BUDGET"] = saved
+        importlib.reload(catch_up)
+
+
+def test_budget_flag_rejects_nonsense():
+    """--budget принимает только положительное целое: пустая или мусорная
+    квота молча превратилась бы в «сколько угодно»."""
+    from kz.ops.catch_up import parse_budget
+    assert parse_budget([]) is None
+    assert parse_budget(["--budget", "300"]) == 300
+    assert parse_budget(["--budget=300"]) == 300
+    for bad in (["--budget", "0"], ["--budget", "-5"], ["--budget", "много"]):
+        try:
+            parse_budget(bad)
+        except SystemExit:
+            continue
+        raise AssertionError(f"принял мусор: {bad}")
+
+
 # ─── catch_up --values: приоритет ценных-для-оправдания джобов ──────────────
 def test_catch_up_value_jobs_are_exculpation_fillers():
     """--values гоняет ТОЛЬКО enrich+backfill (заполняют avgPrice/бейдж/цвет/
