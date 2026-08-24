@@ -2242,6 +2242,37 @@ def test_polite_sleep_prefers_the_break_over_the_short_pause():
         pacing.time.sleep = real_sleep
 
 
+def test_pinned_versions_match_the_python_ci_actually_runs():
+    """Точный пин версий привязан к версии Python, и это не формальность.
+
+    Реальный случай: версии сняты с локального Python 3.13, а CI поднимал
+    3.11. Часть колёс для 3.11 просто не существует — numpy 2.5 требует
+    минимум 3.12 — и установка падала на первом же шаге. Пин без
+    зафиксированной версии интерпретатора не воспроизводим.
+
+    Сверяем три места: workflow, настройки линтера и работающий сейчас
+    интерпретатор."""
+    import re as _re
+    import sys
+    from pathlib import Path
+
+    ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    m = _re.search(r'python-version:\s*"(\d+)\.(\d+)"', ci)
+    assert m, "в workflow не найдена версия Python"
+    ci_ver = (int(m.group(1)), int(m.group(2)))
+
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    t = _re.search(r'target-version\s*=\s*"py(\d)(\d+)"', pyproject)
+    assert t, "в pyproject не найдена target-version"
+    lint_ver = (int(t.group(1)), int(t.group(2)))
+
+    assert ci_ver == lint_ver, (
+        f"CI гоняет {ci_ver}, линтер целится в {lint_ver}")
+    assert ci_ver == sys.version_info[:2], (
+        f"CI гоняет {ci_ver}, а версии в requirements сняты с "
+        f"{sys.version_info[:2]} — пины будут неустановимы")
+
+
 def test_every_import_is_declared_in_some_requirements_file():
     """Пакет, который код импортирует, обязан быть где-то объявлен.
 
