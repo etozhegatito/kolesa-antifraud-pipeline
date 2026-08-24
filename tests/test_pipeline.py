@@ -1147,12 +1147,23 @@ def test_catch_up_eta_grows_with_volume():
 
 
 # ─── label_cards.py: офлайн-разметка (мёртвые страницы + не жжёт лимит) ──────
+def _label_cards_source() -> str:
+    """Весь код карточек разметки одной строкой.
+
+    Раньше это был один файл, теперь пакет из пяти. Тесты проверяют СВОЙСТВА
+    кода («ни одного запроса к kolesa», «есть горячие клавиши»), а не место,
+    где строка лежит, — поэтому читаем каталог целиком и не переписываем
+    тесты при каждом переносе функции между модулями."""
+    from pathlib import Path
+    return "\n".join(f.read_text(encoding="utf-8")
+                      for f in sorted(Path("kz/report/label_cards").glob("*.py")))
+
+
 
 def test_label_cards_never_requests_kolesa():
     """Карточки — офлайн-инструмент: генератор не делает HTTP-запросов
     вообще (фото подставляются как URL и грузятся браузером с CDN)."""
-    from pathlib import Path
-    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    src = _label_cards_source()
     for bad in ("requests.get", "requests.head", "urlopen", "httpx"):
         assert bad not in src, bad
 
@@ -1237,8 +1248,7 @@ def test_label_cards_price_bands_are_monotonic():
 def test_label_cards_gallery_and_keyboard_present():
     """Ключевая эргономика: крупное фото + миниатюры + лайтбокс + шорткаты.
     Раньше были только 190px-миниатюры, по которым состояние не оценить."""
-    from pathlib import Path
-    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    src = _label_cards_source()
     for token in ['class="hero"', 'class="thumb', 'id="box"', "openBox",
                   "setVerdict", "focusCard"]:
         assert token in src, token
@@ -1490,9 +1500,12 @@ def _tmp_journal(tmp_path, monkeypatch):
         w = csv.writer(f)
         w.writerow(header)
         w.writerows(rows)
-    monkeypatch.setattr(lc, "LABELS_CSV", str(dst))
-    monkeypatch.setattr(lc, "LABELS_PREV", str(tmp_path / "prev.csv"))
-    monkeypatch.setattr(lc, "_snapshot_done", False)
+    # Патчим ПОДМОДУЛЬ, а не пакет: upsert_verdict читает эти имена из
+    # своего модуля, и подмена в __init__ на него бы не повлияла.
+    from kz.report.label_cards import journal as lc_journal
+    monkeypatch.setattr(lc_journal, "LABELS_CSV", str(dst))
+    monkeypatch.setattr(lc_journal, "LABELS_PREV", str(tmp_path / "prev.csv"))
+    monkeypatch.setattr(lc_journal, "_snapshot_done", False)
     return lc, dst
 
 
@@ -1538,8 +1551,9 @@ def test_upsert_preserves_other_rows_and_backup(tmp_path, monkeypatch):
     import csv
     lc, dst = _tmp_journal(tmp_path, monkeypatch)
     prev = tmp_path / "manual_labels.prev.csv"
-    monkeypatch.setattr(lc, "LABELS_PREV", str(prev))
-    monkeypatch.setattr(lc, "_snapshot_done", False)
+    from kz.report.label_cards import journal as lc_journal
+    monkeypatch.setattr(lc_journal, "LABELS_PREV", str(prev))
+    monkeypatch.setattr(lc_journal, "_snapshot_done", False)
     before_text = dst.read_text(encoding="utf-8")
     before = list(csv.DictReader(dst.open(encoding="utf-8")))
     lc.upsert_verdict("111", "legit", "", {})
@@ -1586,8 +1600,6 @@ def test_dedupe_journal_collapses_and_keeps_last_verdict(tmp_path, monkeypatch):
     пустая строка-заглушка из очереди его не затирает."""
     import csv
     lc, dst = _tmp_journal(tmp_path, monkeypatch)
-    monkeypatch.setattr(lc, "LABELS_PREV", str(tmp_path / "prev.csv"))
-    monkeypatch.setattr(lc, "_snapshot_done", False)
     header, rows = lc.read_journal()
     base = dict(rows[0])
     aid = base["ad_id"]
@@ -2078,8 +2090,7 @@ def test_label_cards_show_which_stratum_each_ad_is_from():
     вопрос «флаг верен?», у контрольного — «не пропустили ли обман?». Это
     разные задачи, и без пометки слоя контрольные выглядели бы как ошибочно
     попавшие в очередь."""
-    from pathlib import Path
-    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    src = _label_cards_source()
     assert "random_control" in src and "rule_positive" in src
     assert "residual_candidate" in src
     # у контрольных подсказка обязана говорить, что legit — ожидаемый ответ
@@ -2116,8 +2127,7 @@ def test_label_cards_can_filter_control_group():
     """Контрольные лежат вперемешку с помеченными, а размечать их надо
     отдельно: только по ним считается полнота. Без фильтра их пришлось бы
     выискивать глазами среди сотни карточек."""
-    from pathlib import Path
-    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    src = _label_cards_source()
     assert 'data-stratum="{st}"' in src
     assert "only-control" in src
     assert 'not([data-stratum="random_control"])' in src
@@ -2140,17 +2150,17 @@ def test_photo_route_blocks_directory_traversal():
     что путь не вылезает за каталог фотографий: иначе через ../ читался бы
     любой файл, включая .env."""
     from pathlib import Path
-    for f in ("kz/web/app.py", "kz/report/label_cards.py"):
-        src = Path(f).read_text(encoding="utf-8")
-        assert ".resolve()" in src and "parents" in src, f
+    sources = {"kz/web/app.py": Path("kz/web/app.py").read_text(encoding="utf-8"),
+               "kz/report/label_cards/": _label_cards_source()}
+    for where, src in sources.items():
+        assert ".resolve()" in src and "parents" in src, where
 
 
 def test_basket_hint_matches_the_mode():
     """В серверном режиме вердикты уже в журнале, и советовать копипасту
     значит путать: пользователь решит, что разметка не сохранилась. Текст
     подсказки обязан зависеть от режима."""
-    from pathlib import Path
-    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    src = _label_cards_source()
     assert "baskethint" in src
     assert "SERVER\n  ?" in src or "SERVER ?" in src
 
@@ -2160,8 +2170,7 @@ def test_counter_reflects_journal_not_just_draft():
     своя память на каждый адрес, поэтому при открытии на другом порту
     черновик пуст — и счётчик, считавший только его, выглядел так, будто
     разметка пропала."""
-    from pathlib import Path
-    src = Path("kz/report/label_cards.py").read_text(encoding="utf-8")
+    src = _label_cards_source()
     assert "ALREADY" in src
     assert "ALREADY.size" in src
 
@@ -2822,3 +2831,30 @@ def test_survival_reports_a_bracket_not_a_single_number():
     src = inspect.getsource(survival.verified_bracket)
     assert "занижена" in src and "завышена" in src
     assert "verified_bracket(d)" in inspect.getsource(survival.main)
+
+
+def test_label_cards_package_keeps_its_public_names():
+    """Файл на 1239 строк разнесён по ответственностям, но точка входа
+    остаться должна прежней: `from kz.report import label_cards` работает у
+    оркестратора, у веб-приложения и в тестах. Переезд не должен требовать
+    правок у всех, кто им пользуется."""
+    from kz.report import label_cards as lc
+    for name in ("build", "load_rows", "serve", "upsert_verdict",
+                 "journal_facts", "dedupe_journal", "read_journal",
+                 "LABELS_CSV", "BASE_HEADER", "STRATUM_COLS", "FLAG_HELP"):
+        assert hasattr(lc, name), name
+
+
+def test_label_cards_modules_stay_in_their_lanes():
+    """Смысл разделения — в том, что каждый файл делает одно.
+
+    render не ходит в базу: карточку можно собрать и проверить без Postgres.
+    queue не пишет на диск: выборка ничего не меняет. Если эти границы
+    размоются, разделение станет косметикой."""
+    from pathlib import Path
+    render = Path("kz/report/label_cards/render.py").read_text(encoding="utf-8")
+    queue = Path("kz/report/label_cards/queue.py").read_text(encoding="utf-8")
+    assert "get_engine" not in render, "render не должен ходить в базу"
+    assert "read_sql" not in render
+    assert "write_text" not in queue and "upsert_verdict" not in queue, \
+        "queue только читает"
