@@ -92,8 +92,20 @@ def _text_vectors(model, tokenizer, device, prompts: list[str]):
         return v / v.norm()
 
 
-def score_photos(paths: list[str], log=print) -> pd.DataFrame:
-    """Для каждой картинки — оценка по каждой паре описаний."""
+def score_photos(paths: list[str], log=print,
+                 keep_embeddings: bool = False):
+    """Оценки по парам описаний и, по запросу, сами векторы CLIP.
+
+    Векторы нужны для дообучения на СВОИХ метках. Zero-shot упёрся ровно
+    там, где интереснее всего: `clip_damaged` неотличим от монетки, потому
+    что описания «битая машина» слишком общие для наших снимков. Логистическая
+    регрессия поверх этих же векторов, обученная на паре сотен размеченных
+    вручную кадров, — способ обойти это, не дообучая сеть целиком.
+
+    Раньше векторы выбрасывались: задача была «проверить гипотезу», и
+    хранить 512 чисел на кадр казалось лишним. Оказалось, что именно они и
+    нужны, а пересчёт стоит десять минут.
+    """
     import torch
     from PIL import Image
 
@@ -105,6 +117,7 @@ def score_photos(paths: list[str], log=print) -> pd.DataFrame:
             for name, (pos, neg) in PROMPT_PAIRS.items()}
 
     rows = []
+    embeddings = [] if keep_embeddings else None
     with torch.no_grad():
         for i in range(0, len(paths), BATCH):
             chunk = paths[i:i + BATCH]
@@ -117,11 +130,16 @@ def score_photos(paths: list[str], log=print) -> pd.DataFrame:
                 # Разница косинусных близостей: >0 — ближе к «положительному»
                 # описанию пары, <0 — к противоположному.
                 out[name] = (feats @ pos - feats @ neg).cpu().numpy()
+            if keep_embeddings:
+                embeddings.append(feats.cpu().numpy().astype(np.float32))
             for j in range(len(chunk)):
                 rows.append({name: float(out[name][j]) for name in axes})
             if (i // BATCH) % 10 == 0:
                 log(f"  {min(i + BATCH, len(paths))}/{len(paths)}")
-    return pd.DataFrame(rows)
+    scores = pd.DataFrame(rows)
+    if keep_embeddings:
+        return scores, np.vstack(embeddings)
+    return scores
 
 
 def build(log=print, all_positions: bool = True) -> pd.DataFrame:
@@ -132,7 +150,8 @@ def build(log=print, all_positions: bool = True) -> pd.DataFrame:
         raise SystemExit("Нет фотографий: python -m kz.collect.photo_fetch")
     pos = idx["position"].to_numpy() if all_positions else np.ones(len(idx), int)
     log(f"Фотографий: {len(idx)} у {idx['ad_id'].nunique()} объявлений")
-    scores = score_photos(idx["path"].tolist(), log=log)
+    scores, emb = score_photos(idx["path"].tolist(), log=log,
+                               keep_embeddings=True)
     scores.insert(0, "position", pos)
     scores.insert(0, "ad_id", idx["ad_id"].to_numpy())
     CLIP_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -142,9 +161,32 @@ def build(log=print, all_positions: bool = True) -> pd.DataFrame:
         ad_id=scores["ad_id"].to_numpy().astype("U32"),
         position=scores["position"].to_numpy().astype(np.int16),
         scores=scores[value_cols].to_numpy().astype(np.float32),
-        cols=np.array(value_cols, dtype="U32"))
-    log(f"Сохранено → {CLIP_PATH}")
+        cols=np.array(value_cols, dtype="U32"),
+        # Пути нужны, чтобы связать вектор с файлом на диске: без них
+        # разметка по кадрам не сошлась бы с эмбеддингами.
+        path=idx["path"].to_numpy().astype("U160"),
+        emb=emb)
+    log(f"Сохранено → {CLIP_PATH}  "
+        f"(оценки {scores[value_cols].shape}, векторы {emb.shape})")
     return scores
+
+
+def load_embeddings() -> tuple[pd.DataFrame, np.ndarray]:
+    """Векторы CLIP плюс их привязка к кадру: ad_id, позиция, путь к файлу.
+
+    Отдельно от load(), потому что весят они на два порядка больше оценок, а
+    нужны только для обучения на своих метках.
+    """
+    if not CLIP_PATH.exists():
+        raise FileNotFoundError("Сначала: python -m kz.ml.photo_clip")
+    z = np.load(CLIP_PATH, allow_pickle=False)
+    if "emb" not in z.files:
+        raise KeyError("В артефакте нет векторов — пересчитайте "
+                       "python -m kz.ml.photo_clip")
+    idx = pd.DataFrame({"ad_id": [str(a) for a in z["ad_id"]],
+                        "position": z["position"],
+                        "path": [str(p) for p in z["path"]]})
+    return idx, z["emb"]
 
 
 def load() -> pd.DataFrame:
