@@ -1419,6 +1419,22 @@ def test_offline_dag_covers_whole_ml_chain():
         assert cmd[-1] in src, f"{cmd[-1]} есть в run_all, но нет в офлайн-DAG"
 
 
+def test_collect_dag_covers_the_collect_chain():
+    """Сетевую цепочку сторожили только с одной стороны.
+
+    Для ML и офлайна тест требовал, чтобы каждый шаг run_all был в DAG'е, а
+    для сбора такого не было: `photo_fetch` добавили в COLLECT_CHAIN, в DAG
+    он попал вручную, и ничто не помешало бы забыть. Airflow-прогон тогда
+    молча собирал бы не всё, а расхождение обнаружилось бы по недостающим
+    данным через неделю."""
+    from pathlib import Path
+    from kz.ops.run_all import COLLECT_CHAIN
+    src = Path("airflow/dags/kolesa_pipeline_dag.py").read_text(encoding="utf-8")
+    for _, cmd in COLLECT_CHAIN:
+        mod = cmd[cmd.index("-m") + 1]
+        assert mod in src, f"{mod} есть в COLLECT_CHAIN, но нет в сетевом DAG"
+
+
 def test_offline_dag_dependencies_respect_artifacts():
     """Граф DAG'а обязан уважать зависимости по артефактам: графики читают
     модель цены, отчёт — модель И ценовой пол. Иначе таск упадёт в проде на
