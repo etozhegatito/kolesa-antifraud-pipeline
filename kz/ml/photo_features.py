@@ -192,6 +192,18 @@ def load() -> tuple[pd.DataFrame, np.ndarray]:
     return q, z["emb"]
 
 
+def load_quality() -> pd.DataFrame:
+    """Только метрики качества, свёрнутые до объявления.
+
+    Отдельно от load(), потому что потребителю советов по фотографиям
+    эмбеддинги не нужны, а весят они несколько мегабайт. Свёртка средним:
+    речь о впечатлении от объявления целиком, а не об одном кадре.
+    """
+    q, _ = load()
+    cols = [c for c in q.columns if c != "ad_id"]
+    return q.groupby("ad_id", as_index=False)[cols].mean()
+
+
 def reduce_embeddings(emb: np.ndarray, n_components: int = N_COMPONENTS,
                       seed: int = 42) -> np.ndarray:
     """Сжать эмбеддинг до n_components главных компонент.

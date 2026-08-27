@@ -2858,3 +2858,56 @@ def test_label_cards_modules_stay_in_their_lanes():
     assert "read_sql" not in render
     assert "write_text" not in queue and "upsert_verdict" not in queue, \
         "queue только читает"
+
+
+# ─── Советы по фотографиям ──────────────────────────────────────────────────
+
+def test_photo_advice_says_nothing_about_dents():
+    """Ржавчина и грязь распознаются надёжно (AUC 0,935 и 0,948 против
+    бейджа «Аварийная»), а повреждения — нет: доверительный интервал
+    [0,480; 0,731] накрывает монетку. Советовать по признаку, неотличимому
+    от случайности, значит выдавать шум за наблюдение."""
+    import inspect
+    from kz.ml import photo_advice
+    src = inspect.getsource(photo_advice.advise)
+    assert "clip_rusty" in src and "clip_dirty" in src
+    assert "clip_damaged" not in src, "про повреждения советовать нечем"
+
+
+def test_photo_advice_thresholds_come_from_the_corpus():
+    """«Тёмная фотография» — понятие относительное: абсолютная яркость
+    зависит от того, как снимают машины вообще. Порог обязан быть
+    процентилем по своим данным, а не числом из головы, иначе совет нельзя
+    ни проверить, ни опровергнуть."""
+    import numpy as np
+    import pandas as pd
+    from kz.ml.photo_advice import thresholds
+
+    df = pd.DataFrame({"img_brightness": np.linspace(0, 100, 200),
+                       "clip_dirty": np.linspace(-1, 1, 200)})
+    cuts = thresholds(df, ["img_brightness", "clip_dirty"], worse_than=0.20)
+    # яркость: плохо быть НИЗКО → нижний процентиль
+    assert 15 < cuts["img_brightness"] < 25
+    # грязь: плохо быть ВЫСОКО → верхний
+    assert 0.5 < cuts["clip_dirty"] < 0.7
+
+
+def test_photo_advice_does_not_promise_more_views():
+    """Проверка на просмотрах не удалась: объявления с «плохими» фото
+    собирают их БОЛЬШЕ, и объяснение не найдено. Значит совет вправе
+    сообщать факт («темнее, чем у 80%») и не вправе обещать следствие
+    («переснимите — будут смотреть чаще»). Обещание требует эксперимента,
+    а не наблюдения."""
+    import inspect
+    from kz.ml import photo_advice
+
+    # Запрет касается ТЕКСТА ДЛЯ ЧЕЛОВЕКА. В validate() те же слова законны:
+    # там они описывают наблюдение («собирают БОЛЬШЕ просмотров»), а не
+    # обещают следствие.
+    shown = inspect.getsource(photo_advice.advise)
+    for promise in ("чаще смотреть", "больше просмотров", "быстрее продад",
+                    "продадите"):
+        assert promise not in shown, promise
+
+    # А неудача проверки обязана быть записана, а не забыта
+    assert "НЕ УДАЛАСЬ" in inspect.getsource(photo_advice.validate)
