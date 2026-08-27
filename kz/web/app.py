@@ -154,6 +154,72 @@ def photo(path: str):
     return FileResponse(target, media_type="image/jpeg")
 
 
+_damage_queue: list | None = None
+
+
+def _damage_rows():
+    """Очередь разметки повреждений, собирается один раз на процесс.
+
+    Тяжёлый шаг — чтение векторов CLIP и запрос к базе; список меняется
+    только после новой разметки, а её мы и так дописываем в журнал.
+    """
+    global _damage_queue
+    if _damage_queue is None:
+        from kz.report.photo_labels import queue
+        q = queue()
+        _damage_queue = [
+            {"ad_id": str(r.ad_id), "position": int(r.position),
+             "path": str(r.path), "suspect": bool(r.suspect),
+             "price": (f"{r.price_tenge/1e6:.1f} млн"
+                       if pd_notna(r.price_tenge) else "")}
+            for r in q.itertuples()
+        ]
+    return _damage_queue
+
+
+def pd_notna(v) -> bool:
+    import pandas as pd
+    return bool(pd.notna(v))
+
+
+@app.get("/damage", response_class=HTMLResponse)
+def damage_page():
+    """Разметка повреждений рамками — тот же запрет, что и на /label.
+
+    Пишет в data/photo_labels.csv, то есть в ручной труд, который не
+    восстановить пересчётом. Наружу такое не открывается.
+    """
+    if PUBLIC_DEMO:
+        return HTMLResponse("Разметка доступна только в локальном режиме.",
+                            status_code=404)
+    from kz.report.photo_labels import stats
+    from kz.web.damage_page import page
+
+    return page(_damage_rows(), stats())
+
+
+@app.post("/damage/label")
+async def damage_label(request: Request):
+    """Сохранить метку кадра. Валидация на сервере, а не в браузере:
+    страница может прислать что угодно, а журнал портить нельзя."""
+    if PUBLIC_DEMO:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    from kz.report.photo_labels import save_label, stats
+
+    data = await request.json()
+    known = {(r["ad_id"], r["position"]) for r in _damage_rows()}
+    try:
+        key = (str(data.get("ad_id")), int(data.get("position", -1)))
+        if key not in known:
+            raise ValueError(f"кадр не из очереди: {key}")
+        save_label(str(data["ad_id"]), int(data["position"]),
+                   str(data["path"]), str(data.get("label", "")),
+                   box=data.get("box"), comment=str(data.get("comment") or ""))
+    except Exception as e:                      # noqa: BLE001 — ответ клиенту
+        return JSONResponse({"error": _html.escape(str(e))}, status_code=400)
+    return JSONResponse({"ok": True, "stats": stats()})
+
+
 @app.get("/label", response_class=HTMLResponse)
 def label_page():
     if PUBLIC_DEMO:

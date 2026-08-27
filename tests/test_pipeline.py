@@ -2927,3 +2927,104 @@ def test_photo_advice_does_not_promise_more_views():
 
     # А неудача проверки обязана быть записана, а не забыта
     assert "НЕ УДАЛАСЬ" in inspect.getsource(photo_advice.validate)
+
+
+# ─── Разметка повреждений по фотографиям ────────────────────────────────────
+
+def test_damage_box_is_stored_relative_not_in_pixels():
+    """Координаты рамки — доли от размера картинки, а не пиксели.
+
+    Изображение в браузере масштабируется под окно: на ноутбуке одна ширина,
+    на внешнем мониторе другая. Абсолютные координаты, снятые на одном
+    экране, указывали бы не туда на другом, и обучение получило бы рамки
+    мимо повреждений."""
+    import inspect
+    from kz.report import photo_labels
+    src = inspect.getsource(photo_labels.save_label)
+    assert "0 <= x1 < x2 <= 1" in src, "рамка обязана быть в долях 0..1"
+
+
+def test_damage_label_rejects_what_would_poison_training(tmp_path, monkeypatch):
+    """Валидация на сервере, а не в браузере: страница может прислать что
+    угодно, а журнал разметки восстановить пересчётом нельзя."""
+    from kz.report import photo_labels as pl
+    monkeypatch.setattr(pl, "LABELS_CSV", str(tmp_path / "l.csv"))
+    monkeypatch.setattr(pl, "LABELS_PREV", str(tmp_path / "p.csv"))
+    monkeypatch.setattr(pl, "_snapshot_done", False)
+
+    bad = [
+        (dict(label="damaged", box=None), "метка о повреждении без рамки"),
+        (dict(label="damaged", box=(0.9, 0.1, 0.2, 0.5)), "вывернутая рамка"),
+        (dict(label="damaged", box=(0.1, 0.1, 1.4, 0.5)), "рамка вне картинки"),
+        (dict(label="сломана", box=None), "метка не из словаря"),
+    ]
+    for kw, why in bad:
+        try:
+            pl.save_label("1", 1, "p.jpg", **kw)
+        except ValueError:
+            continue
+        raise AssertionError(f"принял: {why}")
+
+    pl.save_label("1", 1, "p.jpg", "damaged", box=(0.2, 0.3, 0.5, 0.6))
+    assert pl.stats()["damaged"] == 1
+
+
+def test_damage_relabel_updates_the_row(tmp_path, monkeypatch):
+    """Передумал — строка ОБНОВЛЯЕТСЯ, а не дублируется. То же правило, что
+    в журнале вердиктов: один объект — одна строка."""
+    from kz.report import photo_labels as pl
+    monkeypatch.setattr(pl, "LABELS_CSV", str(tmp_path / "l.csv"))
+    monkeypatch.setattr(pl, "LABELS_PREV", str(tmp_path / "p.csv"))
+    monkeypatch.setattr(pl, "_snapshot_done", False)
+
+    pl.save_label("1", 1, "p.jpg", "damaged", box=(0.2, 0.2, 0.4, 0.4))
+    pl.save_label("1", 1, "p.jpg", "damaged", box=(0.1, 0.1, 0.9, 0.9))
+    _, rows = pl.read_journal()
+    assert len(rows) == 1
+    assert rows[0]["x2"] == "0.9000"
+
+
+def test_damage_queue_is_stratified_not_random():
+    """При доле повреждённых около процента случайная выборка дала бы
+    две-три положительные метки на три сотни — учиться было бы не на чем.
+    Помеченные объявления идут вперёд, контроль подмешивается."""
+    import inspect
+    from kz.report import photo_labels
+    src = inspect.getsource(photo_labels.queue)
+    assert "suspect" in src and "CONTROL_PER_POSITIVE" in src
+    # и перемешивание, иначе разметчик первые сто кадров видит только битые
+    assert "sample(frac=1.0" in src
+
+
+def test_damage_routes_are_closed_in_public_mode():
+    """Разметка пишет в data/photo_labels.csv — ручной труд, который не
+    восстановить. Наружу такое не открывается, как и /label."""
+    from pathlib import Path
+    src = Path("kz/web/app.py").read_text(encoding="utf-8")
+    damage = src[src.index("def damage_page"):src.index("def label_page")]
+    assert damage.count("if PUBLIC_DEMO:") >= 2, "закрыты обе точки: показ и запись"
+
+
+def test_damage_labelling_never_touches_kolesa():
+    """Фотографии отдаются с диска. Ручной браузинг по сайту однажды уже
+    помог положить IP — разметка обязана быть офлайновой."""
+    import ast
+    from pathlib import Path
+
+    def code_only(path: str) -> str:
+        """Исходник без комментариев и докстрингов.
+
+        Прямой поиск по тексту здесь врёт: в докстринге как раз объясняется,
+        что к kolesa мы НЕ ходим, и проверка спотыкалась об это объяснение.
+        ast.unparse отбрасывает комментарии сам, докстринги убираем руками."""
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)) \
+                    and ast.get_docstring(node):
+                node.body = node.body[1:] or [ast.Pass()]
+        return ast.unparse(tree)
+
+    for f in ("kz/web/damage_page.py", "kz/report/photo_labels.py"):
+        src = code_only(f)
+        for bad in ("kolesa.kz", "requests.get", "urlopen", "httpx"):
+            assert bad not in src, f"{f}: {bad}"
