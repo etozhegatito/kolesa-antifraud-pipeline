@@ -296,7 +296,18 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
 </article>"""
 
 
-def build(rows: pd.DataFrame, serve_mode: bool = False) -> str:
+def build(rows: pd.DataFrame, serve_mode: bool = False,
+          journal_total: int | None = None) -> str:
+    if journal_total is None:
+        # Считаем сами, а не полагаемся на вызывающего: без этого числа
+        # счётчик показывал только размеченное СРЕДИ ПОКАЗАННЫХ, а очередь
+        # намеренно состоит из неразмеченного — выходило «20 из 308» при
+        # 85 вердиктах в журнале, и читалось как «работа пропала».
+        from kz.report.label_cards.journal import read_journal
+        _, jrows = read_journal()
+        journal_total = sum(1 for r in jrows
+                            if r.get("verdict") in ("fraud", "legit", "unknown"))
+
     cards = "".join(card_html(r, i, serve_mode)
                     for i, (_, r) in enumerate(rows.iterrows()))
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
@@ -314,6 +325,7 @@ def build(rows: pd.DataFrame, serve_mode: bool = False) -> str:
             .replace("__NOPHOTO__", str(n_nophoto))
             .replace("__NDONE__", str(n_done))
             .replace("__SERVER__", "true" if serve_mode else "false")
+            .replace("__JOURNAL__", str(journal_total))
             .replace("__MODECLS__", "live" if serve_mode else "draft")
             .replace("__MODE__", mode)
             .replace("__LABELS__", html.escape(LABELS_CSV)))
@@ -574,7 +586,8 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
   <div class="progress"><i id="bar"></i></div>
   <div class="topin">
     <h1>Разметка антифрода</h1>
-    <span class="count"><b id="cnt">0</b> из __N__ размечено</span>
+    <span class="count"><b id="cnt">0</b> из __N__ в этой очереди</span>
+    <span class="count total-note">всего в журнале: <b>__JOURNAL__</b></span>
     <span class="count" id="restored"></span>
     <span class="mode __MODECLS__">__MODE__</span>
     <button class="tbtn" id="filter">скрыть размеченные</button>

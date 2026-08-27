@@ -3028,3 +3028,56 @@ def test_damage_labelling_never_touches_kolesa():
         src = code_only(f)
         for bad in ("kolesa.kz", "requests.get", "urlopen", "httpx"):
             assert bad not in src, f"{f}: {bad}"
+
+
+def test_labels_path_can_be_redirected_away_from_the_real_journal():
+    """Проверять живой сервер, который пишет в НАСТОЯЩИЙ журнал разметки, —
+    прямой путь к её потере. Один раз так и вышло: тестовые записи легли
+    рядом с работой пользователя, и уборка унесла обе.
+
+    Переменная окружения уводит журнал в сторону, чтобы ручная проверка
+    интерфейса физически не могла коснуться ручного труда."""
+    import importlib
+    import os
+    from kz.report import photo_labels as pl
+
+    saved = os.environ.get("KZ_LABELS_DIR")
+    os.environ["KZ_LABELS_DIR"] = "/tmp/kz_scratch"
+    try:
+        m = importlib.reload(pl)
+        assert m.LABELS_CSV.startswith("/tmp/kz_scratch")
+        assert m.LABELS_PREV.startswith("/tmp/kz_scratch")
+    finally:
+        if saved is None:
+            os.environ.pop("KZ_LABELS_DIR", None)
+        else:
+            os.environ["KZ_LABELS_DIR"] = saved
+        importlib.reload(pl)
+
+
+def test_damage_flow_asks_before_it_records():
+    """Рамка НЕ ставит метку сама.
+
+    Первая версия сохраняла «повреждение», как только отпущена мышь. Обвести
+    область можно, чтобы разглядеть её поближе или поправить границы, — и
+    каждое такое движение становилось записью в журнал, который нельзя
+    восстановить пересчётом. Теперь: обвёл → окно с выбором → подтвердил."""
+    from pathlib import Path
+    src = Path("kz/web/damage_page.py").read_text(encoding="utf-8")
+    # после отпускания мыши открывается диалог, а не идёт сохранение
+    assert "openAsk('damaged')" in src
+    mouseup = src[src.index("addEventListener('mouseup'"):
+                  src.index("async function commit")]
+    assert "commit(" not in mouseup, "сохранение не должно идти по отпусканию мыши"
+    assert "a-save" in src and "a-cancel" in src
+
+
+def test_verdict_counter_shows_the_journal_not_just_the_queue():
+    """Очередь намеренно состоит из НЕразмеченного, поэтому «размечено среди
+    показанных» всегда около нуля. Выходило «20 из 308» при 85 вердиктах в
+    журнале, и читалось как «работа пропала»."""
+    import inspect
+    from kz.report.label_cards import render
+    src = inspect.getsource(render.build)
+    assert "journal_total" in src
+    assert "read_journal" in src, "число берётся из журнала, а не из карточек"

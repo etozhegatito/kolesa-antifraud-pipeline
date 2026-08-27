@@ -48,8 +48,18 @@ from pathlib import Path
 
 import pandas as pd
 
-LABELS_CSV = "data/photo_labels.csv"
-LABELS_PREV = "data/photo_labels.prev.csv"
+# Путь журнала переопределяется переменной окружения. Нужно не для гибкости,
+# а ради безопасности: проверять живой сервер curl-ом, когда он пишет в
+# НАСТОЯЩИЙ журнал, — прямой путь к потере разметки. Один раз так и вышло:
+# тестовые записи легли рядом с работой пользователя, а уборка `rm` унесла
+# и то и другое.
+#
+#     KZ_LABELS_DIR=/tmp/scratch python -m kz.web
+#
+# Проверять руками — только так.
+_DIR = os.environ.get("KZ_LABELS_DIR", "data")
+LABELS_CSV = str(Path(_DIR) / "photo_labels.csv")
+LABELS_PREV = str(Path(_DIR) / "photo_labels.prev.csv")
 
 HEADER = ["ad_id", "position", "path", "label", "x1", "y1", "x2", "y2",
           "comment", "labeled_at"]
