@@ -3081,3 +3081,39 @@ def test_verdict_counter_shows_the_journal_not_just_the_queue():
     src = inspect.getsource(render.build)
     assert "journal_total" in src
     assert "read_journal" in src, "число берётся из журнала, а не из карточек"
+
+
+def test_disassembled_car_is_its_own_class_not_damage():
+    """Двигатель на брусчатке — не вмятина и не целая машина.
+
+    Реальный кадр из очереди: Hyundai Sonata 2015 за 4,2 млн, комментарий
+    «Запчасқа болады», бейдж «Аварийная/Не на ходу», двигатель снят и лежит
+    рядом. Свалить это в «повреждение» значит сделать положительный класс
+    разнородным: помятое крыло и снятый агрегат выглядят совершенно
+    по-разному, и на двух сотнях меток сеть не выучит ни того, ни другого.
+
+    Объединить метки потом можно бесплатно, разделить — невозможно."""
+    from kz.report.photo_labels import LABELS
+    assert "parts" in LABELS and "damaged" in LABELS
+    assert LABELS["parts"] != LABELS["damaged"]
+
+
+def test_box_belongs_only_to_body_damage(tmp_path, monkeypatch):
+    """Рамка отмечает УЧАСТОК. У разобранной машины свидетельство — весь
+    кадр, поэтому рамка там бессмысленна и принимать её нельзя: иначе в
+    обучение попадут вырезы, не значащие ничего."""
+    from kz.report import photo_labels as pl
+    monkeypatch.setattr(pl, "LABELS_CSV", str(tmp_path / "l.csv"))
+    monkeypatch.setattr(pl, "LABELS_PREV", str(tmp_path / "p.csv"))
+    monkeypatch.setattr(pl, "_snapshot_done", False)
+
+    for label in ("parts", "intact", "unclear"):
+        try:
+            pl.save_label("1", 1, "p.jpg", label, box=(0.1, 0.1, 0.5, 0.5))
+        except ValueError:
+            continue
+        raise AssertionError(f"принял рамку для «{label}»")
+
+    pl.save_label("1", 1, "p.jpg", "parts")
+    pl.save_label("2", 1, "p.jpg", "damaged", box=(0.1, 0.1, 0.5, 0.5))
+    assert pl.stats()["parts"] == 1 and pl.stats()["damaged"] == 1

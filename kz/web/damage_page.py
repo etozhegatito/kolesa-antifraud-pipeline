@@ -19,7 +19,8 @@
 удобным и неудобным интерфейсом решает, будет разметка сделана или нет:
 
   без рамки    «целая» и «не понять» ставятся одной клавишей, рисовать не надо
-  клавиши      D — повреждение, I — целая, U — не понять, Enter — подтвердить
+  клавиши      D — повреждение кузова, P — разобрана, I — целая,
+               U — не понять, Enter — подтвердить
   Esc          отменить рамку и начать заново
   стрелки      назад и вперёд, метку можно поправить
   автопереход  после сохранения сразу следующий кадр
@@ -117,6 +118,7 @@ TEMPLATE = """<!doctype html>
   <span class="spacer"></span>
   <span class="pill">кадр <b id="pos">—</b></span>
   <span class="pill">повреждений <b id="c-damaged">0</b></span>
+  <span class="pill">разобрано <b id="c-parts">0</b></span>
   <span class="pill">целых <b id="c-intact">0</b></span>
   <span class="pill">неясных <b id="c-unclear">0</b></span>
 </header>
@@ -133,15 +135,19 @@ TEMPLATE = """<!doctype html>
 
   <div class="row" id="quick">
     <button id="b-intact">целая<kbd>I</kbd></button>
+    <button id="b-parts">разобрана<kbd>P</kbd></button>
     <button id="b-unclear">не понять<kbd>U</kbd></button>
-    <span class="sub">или обведите повреждение мышью</span>
+    <span class="sub">или обведите повреждение кузова мышью</span>
   </div>
 
   <div id="ask">
     <h3>Что на выделенной области?</h3>
-    <p>Рамку можно перерисовать — запись произойдёт только по кнопке.</p>
+    <p>Рамку можно перерисовать — запись произойдёт только по кнопке.
+       «Разобрана» — если снят двигатель или коробка: там свидетельство весь
+       кадр, а не участок.</p>
     <div class="row">
-      <button id="a-damaged" class="sel">повреждение<kbd>D</kbd></button>
+      <button id="a-damaged" class="sel">повреждение кузова<kbd>D</kbd></button>
+      <button id="a-parts">разобрана / снят агрегат<kbd>P</kbd></button>
       <button id="a-unclear">не понять<kbd>U</kbd></button>
       <button id="a-intact">целая, рамка не нужна<kbd>I</kbd></button>
     </div>
@@ -216,7 +222,7 @@ function openAsk(pick) {
 function closeAsk() { ask.classList.remove('on'); }
 
 function paintChoice() {
-  for (const k of ['damaged', 'intact', 'unclear'])
+  for (const k of ['damaged', 'parts', 'intact', 'unclear'])
     document.getElementById('a-' + k).classList.toggle('sel', choice === k);
 }
 
@@ -252,7 +258,7 @@ async function commit(label, useBox) {
   }
   it.label = label; it.comment = body.comment;
   if (useBox && box) { it.x1 = box[0]; it.y1 = box[1]; it.x2 = box[2]; it.y2 = box[3]; }
-  for (const k of ['damaged', 'intact', 'unclear'])
+  for (const k of ['damaged', 'parts', 'intact', 'unclear'])
     document.getElementById('c-' + k).textContent = j.stats[k];
   hint.innerHTML = '<span class="ok">сохранено</span>';
   closeAsk();
@@ -265,11 +271,13 @@ document.getElementById('a-cancel').onclick = () => {
   box = null; boxEl.style.display = 'none'; closeAsk(); hint.textContent = '';
 };
 document.getElementById('a-damaged').onclick = () => { choice = 'damaged'; paintChoice(); };
+document.getElementById('a-parts').onclick = () => { choice = 'parts'; paintChoice(); };
 document.getElementById('a-intact').onclick = () => { choice = 'intact'; paintChoice(); };
 document.getElementById('a-unclear').onclick = () => { choice = 'unclear'; paintChoice(); };
 
 /* Без рамки — одной кнопкой: рисовать, чтобы сказать «целая», незачем. */
 document.getElementById('b-intact').onclick = () => commit('intact', false);
+document.getElementById('b-parts').onclick = () => commit('parts', false);
 document.getElementById('b-unclear').onclick = () => commit('unclear', false);
 document.getElementById('b-prev').onclick = () => { i = Math.max(0, i - 1); show(); };
 document.getElementById('b-next').onclick = () => {
@@ -288,6 +296,8 @@ window.addEventListener('keydown', e => {
     if (open) { choice = 'damaged'; paintChoice(); }
     else hint.innerHTML = '<span class="warn">Сначала обведите повреждение мышью.</span>';
   }
+  else if (k === 'p' || k === 'з') { open ? (choice = 'parts', paintChoice())
+                                          : commit('parts', false); }
   else if (k === 'i' || k === 'ш') { open ? (choice = 'intact', paintChoice())
                                           : commit('intact', false); }
   else if (k === 'u' || k === 'г') { open ? (choice = 'unclear', paintChoice())
