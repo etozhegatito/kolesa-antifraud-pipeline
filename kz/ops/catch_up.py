@@ -81,8 +81,12 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import date
+
+import fcntl
 
 import pandas as pd
 
@@ -95,9 +99,9 @@ LINE = "─" * 64
 # ОБЩИЙ для всех kolesa-джобов (один IP!); у CDN — свой.
 # 2026-07-23: домашний IP словил ВРЕМЕННЫЙ бан kolesa (~270 запросов за день с
 # одного IP: catch_up + run_all + ручной браузинг). Снизили kolesa 400→200 с
-# запасом. ВАЖНО: бюджет видит только catch_up — run_all/parser и твой браузинг
-# kolesa НЕ учитывает, а они бьют по тому же IP. В дни добора: run_all --light
-# и не стакать всё разом. При budget 200 обычный --run делает ~одну порцию
+# запасом. Parser с 2026-08-29 списывает top-level переходы в тот же файл.
+# Ручной браузинг счётчик по-прежнему не видит, поэтому его нельзя складывать
+# с полным сетевым прогоном. При budget 200 обычный --run делает ~одну порцию
 # (по 20 на джоб); точечный добор avgPrice/бейджа — --backfill (порции по 20).
 # Дефолт kolesa=200 — БЕЗОПАСНЫЙ потолок для домашнего IP (его и банили).
 # Бюджет НАСТРАИВАЕМЫЙ, приоритет: --budget N  >  env KOLESA_BUDGET  >  200.
@@ -180,8 +184,8 @@ def print_risk_help(current: int):
     print(f"\nСейчас потолок: {current} ({label}); "
           f"на весь объём ≈{eta_minutes(current):.0f} мин.")
     print("Задать: python -m kz.ops.catch_up --run --backfill --budget 300")
-    print("Помни: бюджет видит только catch_up — run_all/parser и твой ручной "
-          "браузинг kolesa бьют по тому же IP, но здесь не считаются.")
+    print("Parser делит этот счётчик с catch_up. Ручной браузинг kolesa "
+          "по-прежнему не считается и не должен идти рядом с полным сбором.")
 
 # Верхняя оценка запросов за ОДНУ порцию джоба (= его MAX_PER_RUN). Держим
 # копией здесь, чтобы не импортировать джобы (у них при импорте открываются
@@ -221,8 +225,35 @@ def _read_days() -> dict:
 def _write_days(days: dict):
     for old in sorted(days)[:-BUDGET_KEEP_DAYS]:
         days.pop(old)
-    _p.Path(BUDGET_FILE).write_text(
-        json.dumps({"days": days}, sort_keys=True), encoding="utf-8")
+    target = _p.Path(BUDGET_FILE)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump({"days": days}, out, sort_keys=True)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp_name, target)
+    finally:
+        _p.Path(tmp_name).unlink(missing_ok=True)
+
+
+@contextmanager
+def _budget_lock():
+    """Межпроцессная блокировка общего счётчика parser/catch_up.
+
+    Последовательность «прочитать → проверить → записать» должна быть одной
+    операцией. Иначе два случайно параллельных запуска оба видят свободное
+    место и вместе пробивают антибан-потолок.
+    """
+    lock_path = _p.Path(str(BUDGET_FILE) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def load_budget_used() -> dict:
@@ -235,10 +266,11 @@ def load_budget_used() -> dict:
 
 def save_budget_used(used: dict):
     """Записать расход как сегодняшний (перезапись, не прибавление)."""
-    days = _read_days()
-    days[date.today().isoformat()] = {"kolesa": int(used["kolesa"]),
-                                      "cdn": int(used["cdn"])}
-    _write_days(days)
+    with _budget_lock():
+        days = _read_days()
+        days[date.today().isoformat()] = {"kolesa": int(used["kolesa"]),
+                                          "cdn": int(used["cdn"])}
+        _write_days(days)
 
 
 def charge_budget(host: str, cost: int) -> dict:
@@ -249,12 +281,33 @@ def charge_budget(host: str, cost: int) -> dict:
     иначе долгий --until-done, начавшийся вечером, приписывал бы всё
     сегодняшнему числу и после полуночи блокировал новый день.
     """
-    days = _read_days()
-    key = date.today().isoformat()
-    cur = days.setdefault(key, {"kolesa": 0, "cdn": 0})
-    cur[host] = int(cur.get(host, 0)) + int(cost)
-    _write_days(days)
-    return {"kolesa": int(cur.get("kolesa", 0)), "cdn": int(cur.get("cdn", 0))}
+    with _budget_lock():
+        days = _read_days()
+        key = date.today().isoformat()
+        cur = days.setdefault(key, {"kolesa": 0, "cdn": 0})
+        cur[host] = int(cur.get(host, 0)) + int(cost)
+        _write_days(days)
+        return {"kolesa": int(cur.get("kolesa", 0)),
+                "cdn": int(cur.get("cdn", 0))}
+
+
+def reserve_budget(host: str, cost: int, limit: int) -> dict | None:
+    """Атомарно проверить потолок и заранее зарезервировать запросы.
+
+    `None` означает, что порция уже не помещается. Резерв консервативный:
+    таймаут, 429 или авария после старта не возвращают квоту, потому что запрос
+    уже мог дойти до сайта.
+    """
+    with _budget_lock():
+        days = _read_days()
+        key = date.today().isoformat()
+        cur = days.setdefault(key, {"kolesa": 0, "cdn": 0})
+        if int(cur.get(host, 0)) + int(cost) > int(limit):
+            return None
+        cur[host] = int(cur.get(host, 0)) + int(cost)
+        _write_days(days)
+        return {"kolesa": int(cur.get("kolesa", 0)),
+                "cdn": int(cur.get("cdn", 0))}
 
 
 def compute_gaps() -> dict:
@@ -409,23 +462,27 @@ def run_one_chunk(name: str, script: str, key: str, host: str, used: dict,
     gap_before = compute_gaps()[key]
     if gap_before == 0:
         return "done"
+    # Локальный `used` мог относиться ко вчерашнему дню, если процесс пережил
+    # полночь между двумя порциями. Файл хранит дни отдельно — перечитываем
+    # его перед решением, а run_spent всё равно не даст ночному запуску
+    # получить вторую полную квоту.
+    used.update(load_budget_used())
     if not budget_allows(host, key, gap_before, used, run_spent):
         return "budget"
 
     cost = min(CHUNK_MAX[key], gap_before)   # верхняя оценка запросов порции
+    reserved = reserve_budget(host, cost, DAILY_BUDGET[host])
+    if reserved is None:
+        # Другой процесс мог занять остаток между первым чтением и этим местом.
+        used.update(load_budget_used())
+        return "budget"
+    used.update(reserved)
+    if run_spent is not None:
+        run_spent[host] += cost
     before_429 = count_429()
     print(f"\n  {name}: осталось {gap_before}; бюджет {host} "
           f"{used[host]}/{DAILY_BUDGET[host]}; гоню порцию (≈{cost} запросов)…")
     rc = run(script)
-    # Списываем сразу после запуска (консервативно: даже если внутри был
-    # 429/сбой и реальных запросов меньше — бюджет только НЕ пробьём).
-    # Списание идёт на текущие сутки, поэтому used переписывается ответом
-    # charge_budget, а не увеличивается вслепую: после полуночи это уже
-    # расход НОВОГО дня.
-    used.update(charge_budget(host, cost))
-    if run_spent is not None:
-        run_spent[host] += cost
-
     saw_429 = count_429() > before_429
     gap_after = compute_gaps()[key]
     action = next_action(gap_before, gap_after, rc, saw_429)

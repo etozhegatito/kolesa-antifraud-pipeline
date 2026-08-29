@@ -136,7 +136,8 @@ def price_drivers(car: dict, top: int = 6) -> list[dict]:
 
     model, _ = get_model()
     row = make_row(**car)
-    shap = model.get_feature_importance(
+    active = model.model_for(row) if hasattr(model, "model_for") else model
+    shap = active.get_feature_importance(
         Pool(row, cat_features=CAT_FEATURES), type="ShapValues")[0]
     contribs = shap[:-1]                    # последний элемент — базовое значение
     order = np.argsort(-np.abs(contribs))[:top]

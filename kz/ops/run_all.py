@@ -47,8 +47,8 @@ photo_dedup — на CDN картинок (kcdn.kz), это разные хос�
       kolesa мимо суточного лимита, то есть двойной нагрузкой на один IP.
 
   python -m kz.ops.run_all
-      Полный цикл, per-ad сеть НАПРЯМУЮ, без сверки с суточным лимитом.
-      Оставлен для полноты; в обычной работе нужен --collect.
+      Безопасный полный сбор: тот же COLLECT_CHAIN, что и --collect. Parser и
+      per-ad добор делят общий суточный бюджет; фото-CDN имеет отдельный.
 
 Точечный добор только обогащения, когда нужен именно он:
   python -m kz.ops.catch_up --run --values
@@ -186,20 +186,16 @@ def main():
     fast  = "--fast" in sys.argv or ml
     light = "--light" in sys.argv       # только новый листинг, без per-ad сети
 
-    if collect:
+    # Default больше не имеет скрытого небезопасного пути. Раньше он запускал
+    # status/enrich напрямую вне catch_up и мог пробить суточный потолок,
+    # несмотря на новый общий счётчик parser. Теперь обычный запуск — алиас
+    # безопасного --collect; --light по-прежнему означает только листинг.
+    if collect or (not fast and not light):
         for s in COLLECT_CHAIN:                    # листинг + пробелы по бюджету
             run_step(s)
     else:
         if not fast:
             run_step(STEP_PARSER)                  # свежий листинг (новьё)
-        if not fast and not light:
-            # Полный режим: per-ad сеть напрямую, БЕЗ сверки с суточным
-            # лимитом. Оставлен для полноты, но безопасный путь — --collect.
-            print("\n⚠ Полный режим не сверяется с суточным лимитом запросов.\n"
-                  "  Безопаснее: python -m kz.ops.run_all --collect")
-            run_step(STEP_STATUS)
-            run_step(STEP_CLEAN)                   # пасс 1: очередь для enrich
-            run_parallel(STEP_ENRICH, STEP_PHOTOS) # kolesa.kz ∥ kcdn.kz
 
     for s in OFFLINE_CHAIN:                        # чистка → отчёт → карточки
         run_step(s)

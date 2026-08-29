@@ -49,9 +49,18 @@ FEATURES = NUM_FEATURES + CAT_FEATURES
 
 MODEL_DIR = Path("data/models")
 MODEL_PATH = MODEL_DIR / "price_model.cbm"
+SPECIALIST_MODEL_PATH = MODEL_DIR / "price_cheap_specialist.cbm"
 METADATA_PATH = MODEL_DIR / "price_model.metadata.json"
 ARTIFACT_SCHEMA_VERSION = 1
 RANDOM_SEED = 42
+
+# Специалист отвечает только там, где ОСНОВНАЯ модель предсказала <5 млн,
+# но учится на более широкой полосе фактических цен <8 млн. Если учить его
+# строго на <5 млн, пограничные машины, ошибочно направленные маршрутизатором,
+# оказываются вне train-распределения и портят дорогой сегмент. Честный OOF
+# замер: общий MAPE 21.41% → 21.16%, 95% ДИ разницы [-0.42; -0.10].
+CHEAP_ROUTE_MAX = 5_000_000
+CHEAP_TRAIN_MAX = 8_000_000
 
 
 def new_model(loss_function: str = "RMSE") -> CatBoostRegressor:
@@ -77,6 +86,47 @@ def new_model(loss_function: str = "RMSE") -> CatBoostRegressor:
         random_seed=RANDOM_SEED,
         verbose=False,
     )
+
+
+class RoutedPriceModel:
+    """Основная модель плюс специалист дешёвого сегмента.
+
+    Маршрут выбирается только по предсказанию основной модели — фактической
+    цены новой машины в бою нет. Обёртка сохраняет привычный `.predict()`,
+    поэтому отчёты, survival и веб используют одну и ту же логику.
+    """
+
+    def __init__(self, main, specialist=None,
+                 route_max: float = CHEAP_ROUTE_MAX):
+        self.main = main
+        self.specialist = specialist
+        self.route_max = float(route_max)
+
+    def route_mask(self, X) -> np.ndarray:
+        base_log = np.asarray(self.main.predict(X), dtype=float)
+        return np.exp(base_log) < self.route_max
+
+    def predict(self, X) -> np.ndarray:
+        base = np.asarray(self.main.predict(X), dtype=float)
+        if self.specialist is None or len(base) == 0:
+            return base
+        mask = np.exp(base) < self.route_max
+        if mask.any():
+            rows = X.loc[mask] if isinstance(X, pd.DataFrame) else X[mask]
+            base[mask] = self.specialist.predict(rows)
+        return base
+
+    def model_for(self, X):
+        """Модель, реально отвечающая за одну строку (нужно для SHAP)."""
+        if self.specialist is None:
+            return self.main
+        mask = self.route_mask(X)
+        return self.specialist if len(mask) == 1 and bool(mask[0]) else self.main
+
+    def get_feature_importance(self, *args, **kwargs):
+        # Без конкретной строки показываем глобальную важность основной модели.
+        # Для локального SHAP веб вызывает model_for(row).
+        return self.main.get_feature_importance(*args, **kwargs)
 
 
 def coerce_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -135,10 +185,12 @@ def regression_metrics(y_log, pred_log) -> dict[str, float]:
     """Метрики в log-пространстве и в исходных тенге."""
     actual = np.exp(np.asarray(y_log, dtype=float))
     pred = np.exp(np.asarray(pred_log, dtype=float))
+    ape = np.abs(pred - actual) / actual
     return {
         "r2_log": float(r2_score(y_log, pred_log)),
         "mae_tenge": float(mean_absolute_error(actual, pred)),
-        "mape_pct": float(np.mean(np.abs(pred - actual) / actual) * 100),
+        "mape_pct": float(np.mean(ape) * 100),
+        "median_ape_pct": float(np.median(ape) * 100),
     }
 
 
@@ -167,22 +219,35 @@ def _baseline_predict(
 
 def grouped_oof_predictions(
     df: pd.DataFrame, n_splits: int = 5
-) -> tuple[np.ndarray, np.ndarray]:
-    """OOF-предикты CatBoost и baseline без разделения дублей между фолдами."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """OOF routed-модель, baseline и основная модель на одних фолдах."""
     groups = duplicate_groups(df)
     n = min(n_splits, groups.nunique())
     if n < 2:
         raise ValueError("Для grouped CV нужно минимум две независимые группы")
     splitter = GroupKFold(n_splits=n)
-    model_oof = np.full(len(df), np.nan)
+    base_oof = np.full(len(df), np.nan)
+    routed_oof = np.full(len(df), np.nan)
     baseline_oof = np.full(len(df), np.nan)
     X, y = df[FEATURES], df["log_price"]
     for tr, te in splitter.split(X, y, groups):
         model = new_model()
         model.fit(Pool(X.iloc[tr], y.iloc[tr], cat_features=CAT_FEATURES))
-        model_oof[te] = model.predict(X.iloc[te])
+        base_pred = np.asarray(model.predict(X.iloc[te]), dtype=float)
+        base_oof[te] = base_pred
+
+        train_rows = df.iloc[tr]
+        cheap = train_rows["price_tenge"].to_numpy(dtype=float) < CHEAP_TRAIN_MAX
+        specialist = new_model()
+        specialist.fit(Pool(X.iloc[tr][cheap], y.iloc[tr][cheap],
+                            cat_features=CAT_FEATURES))
+        routed = base_pred.copy()
+        route = np.exp(base_pred) < CHEAP_ROUTE_MAX
+        if route.any():
+            routed[route] = specialist.predict(X.iloc[te][route])
+        routed_oof[te] = routed
         baseline_oof[te] = _baseline_predict(df.iloc[tr], y.iloc[tr], df.iloc[te])
-    return model_oof, baseline_oof
+    return routed_oof, baseline_oof, base_oof
 
 
 def temporal_holdout(df: pd.DataFrame, test_fraction: float = 0.2):
@@ -212,18 +277,29 @@ def evaluate_temporal(df: pd.DataFrame) -> dict | None:
     model = new_model()
     model.fit(Pool(df.loc[tr, FEATURES], df.loc[tr, "log_price"],
                    cat_features=CAT_FEATURES))
-    model_m = regression_metrics(
-        df.loc[te, "log_price"], model.predict(df.loc[te, FEATURES])
-    )
+    base_pred = np.asarray(model.predict(df.loc[te, FEATURES]), dtype=float)
+    cheap = df.loc[tr, "price_tenge"].to_numpy(dtype=float) < CHEAP_TRAIN_MAX
+    specialist = new_model()
+    specialist.fit(Pool(df.loc[tr, FEATURES].iloc[cheap],
+                        df.loc[tr, "log_price"].iloc[cheap],
+                        cat_features=CAT_FEATURES))
+    routed_pred = base_pred.copy()
+    route = np.exp(base_pred) < CHEAP_ROUTE_MAX
+    if route.any():
+        routed_pred[route] = specialist.predict(df.loc[te, FEATURES].iloc[route])
+    model_m = regression_metrics(df.loc[te, "log_price"], routed_pred)
+    base_model_m = regression_metrics(df.loc[te, "log_price"], base_pred)
     baseline = _baseline_predict(df.loc[tr], df.loc[tr, "log_price"], df.loc[te])
-    base_m = regression_metrics(df.loc[te, "log_price"], baseline)
+    baseline_m = regression_metrics(df.loc[te, "log_price"], baseline)
     return {
         "train_rows": int(len(tr)),
         "test_rows": int(len(te)),
         "train_until": str(pd.to_datetime(df.loc[tr, "scraped_at"]).max()),
         "test_from": str(pd.to_datetime(df.loc[te, "scraped_at"]).min()),
         "model": model_m,
-        "baseline": base_m,
+        "base_model": base_model_m,
+        "route_fraction": float(route.mean()),
+        "baseline": baseline_m,
     }
 
 
@@ -282,17 +358,23 @@ def code_fingerprint(*paths: str) -> str:
     return digest.hexdigest()
 
 
-def save_artifact(model: CatBoostRegressor, metadata: dict) -> None:
-    """Атомарно публикует модель и метаданные: потребитель не увидит полфайла."""
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix="price_model.", suffix=".cbm", dir=MODEL_DIR)
+def _save_model_atomic(model: CatBoostRegressor, path: Path, prefix: str) -> None:
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".cbm", dir=MODEL_DIR)
     os.close(fd)
     tmp_model = Path(tmp_name)
     try:
         model.save_model(str(tmp_model))
-        os.replace(tmp_model, MODEL_PATH)
+        os.replace(tmp_model, path)
     finally:
         tmp_model.unlink(missing_ok=True)
+
+
+def save_artifact(model: CatBoostRegressor, specialist: CatBoostRegressor,
+                  metadata: dict) -> None:
+    """Атомарно публикует модель и метаданные: потребитель не увидит полфайла."""
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    _save_model_atomic(model, MODEL_PATH, "price_model.")
+    _save_model_atomic(specialist, SPECIALIST_MODEL_PATH, "price_cheap.")
 
     tmp_meta = METADATA_PATH.with_suffix(".json.tmp")
     tmp_meta.write_text(
@@ -302,7 +384,7 @@ def save_artifact(model: CatBoostRegressor, metadata: dict) -> None:
     os.replace(tmp_meta, METADATA_PATH)
 
 
-def load_artifact() -> tuple[CatBoostRegressor, dict]:
+def load_artifact() -> tuple[RoutedPriceModel, dict]:
     if not MODEL_PATH.exists() or not METADATA_PATH.exists():
         raise FileNotFoundError(
             f"Нет обученного артефакта {MODEL_PATH}. Сначала: python -m kz.ml.train_price_model"
@@ -314,7 +396,20 @@ def load_artifact() -> tuple[CatBoostRegressor, dict]:
         raise ValueError("Схема признаков артефакта не совпадает с текущим кодом")
     model = CatBoostRegressor()
     model.load_model(str(MODEL_PATH))
-    return model, metadata
+    specialist = None
+    routing = metadata.get("routing")
+    if routing:
+        if not SPECIALIST_MODEL_PATH.exists():
+            raise FileNotFoundError(
+                f"Метаданные требуют специалиста, но нет {SPECIALIST_MODEL_PATH}"
+            )
+        specialist = CatBoostRegressor()
+        specialist.load_model(str(SPECIALIST_MODEL_PATH))
+    return RoutedPriceModel(
+        model,
+        specialist,
+        route_max=(routing or {}).get("route_below_tenge", CHEAP_ROUTE_MAX),
+    ), metadata
 
 
 def main():
@@ -328,15 +423,19 @@ def main():
     print(f"Data-quality: iForest пометил {int(dq.sum())} строк для ручного ревью")
 
     clean = valid[valid["is_suspicious"] == 0].copy()
-    model_oof, baseline_oof = grouped_oof_predictions(clean)
+    model_oof, baseline_oof, base_oof = grouped_oof_predictions(clean)
     grouped_model = regression_metrics(clean["log_price"], model_oof)
+    grouped_base_model = regression_metrics(clean["log_price"], base_oof)
     grouped_base = regression_metrics(clean["log_price"], baseline_oof)
     lift = grouped_base["mape_pct"] - grouped_model["mape_pct"]
 
     print(f"\nGrouped 5-fold CV без leakage дублей ({len(clean)} машин):")
-    print(f"  CatBoost: R²(log)={grouped_model['r2_log']:.3f}  "
+    print(f"  Основная: R²(log)={grouped_base_model['r2_log']:.3f}  "
+          f"MAE={grouped_base_model['mae_tenge']/1e6:.2f}М ₸  "
+          f"MAPE={grouped_base_model['mape_pct']:.2f}%")
+    print(f"  + специалист <5M: R²(log)={grouped_model['r2_log']:.3f}  "
           f"MAE={grouped_model['mae_tenge']/1e6:.2f}М ₸  "
-          f"MAPE={grouped_model['mape_pct']:.1f}%")
+          f"MAPE={grouped_model['mape_pct']:.2f}%")
     print(f"  Baseline: R²(log)={grouped_base['r2_log']:.3f}  "
           f"MAE={grouped_base['mae_tenge']/1e6:.2f}М ₸  "
           f"MAPE={grouped_base['mape_pct']:.1f}%")
@@ -344,9 +443,13 @@ def main():
 
     temporal = evaluate_temporal(clean)
     if temporal:
-        tm, tb = temporal["model"], temporal["baseline"]
+        tm, tm_base, tb = (temporal["model"], temporal["base_model"],
+                           temporal["baseline"])
         print(f"\nOut-of-time: train={temporal['train_rows']}, test={temporal['test_rows']}")
-        print(f"  CatBoost MAPE={tm['mape_pct']:.1f}%  R²(log)={tm['r2_log']:.3f}")
+        print(f"  Основная MAPE={tm_base['mape_pct']:.1f}%  "
+              f"R²(log)={tm_base['r2_log']:.3f}")
+        print(f"  + специалист MAPE={tm['mape_pct']:.1f}%  "
+              f"R²(log)={tm['r2_log']:.3f}")
         print(f"  Baseline MAPE={tb['mape_pct']:.1f}%  R²(log)={tb['r2_log']:.3f}")
     else:
         print("\nOut-of-time: пока недостаточно временного диапазона")
@@ -358,6 +461,10 @@ def main():
 
     final = new_model()
     final.fit(Pool(clean[FEATURES], clean["log_price"], cat_features=CAT_FEATURES))
+    cheap = clean["price_tenge"].to_numpy(dtype=float) < CHEAP_TRAIN_MAX
+    specialist = new_model()
+    specialist.fit(Pool(clean.loc[cheap, FEATURES], clean.loc[cheap, "log_price"],
+                        cat_features=CAT_FEATURES))
     metadata = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -368,6 +475,12 @@ def main():
         ),
         "data_fingerprint_sha256": _data_fingerprint(clean),
         "training_rows": int(len(clean)),
+        "routing": {
+            "route_below_tenge": CHEAP_ROUTE_MAX,
+            "specialist_train_below_tenge": CHEAP_TRAIN_MAX,
+            "specialist_training_rows": int(cheap.sum()),
+            "artifact": str(SPECIALIST_MODEL_PATH),
+        },
         "features": FEATURES,
         "categorical_features": CAT_FEATURES,
         # Словарь категорий сохраняется не для модели (CatBoost справляется
@@ -385,13 +498,16 @@ def main():
         },
         "target": "log(price_tenge)",
         "validation": {
-            "grouped_cv": {"model": grouped_model, "baseline": grouped_base},
+            "grouped_cv": {"model": grouped_model,
+                           "base_model": grouped_base_model,
+                           "baseline": grouped_base},
             "temporal_holdout": temporal,
             "segments": segments,
         },
     }
-    save_artifact(final, metadata)
+    save_artifact(final, specialist, metadata)
     print(f"\nАртефакт модели → {MODEL_PATH}")
+    print(f"Специалист       → {SPECIALIST_MODEL_PATH}")
     print(f"Метаданные       → {METADATA_PATH}")
 
 

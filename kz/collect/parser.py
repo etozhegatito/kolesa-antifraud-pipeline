@@ -41,6 +41,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 from kz.core.db import upsert
+from kz.ops import catch_up as request_budget
 
 # ─── Настройки ────────────────────────────────────────────────────────────────
 OUTPUT_CSV    = "data/raw/raw_data.csv"    # «паспорт» объявления: первая встреча
@@ -77,8 +78,8 @@ MAX_PAGES_PER_CATEGORY = int(os.getenv("KOLESA_MAX_PAGES", "10"))
 # С какой страницы начинать (включительно). Нужно, чтобы углублять сбор, не
 # переснимая уже собранное: страницы 1-25 сняты вчера, интерес представляют
 # 26-50, а это ровно вдвое меньше запросов, чем «поставить глубину 50».
-# Запросы парсера в суточный бюджет catch_up НЕ попадают, поэтому экономия
-# здесь — единственная защита от того, чтобы углубление не стоило бана.
+# Top-level переходы парсера списываются в общий бюджет catch_up. Сдвиг
+# страницы всё равно экономит квоту и время: уже снятые страницы не просим.
 #
 # Оговорка: сортировка листинга плывёт между запросами, так что «страница 26»
 # сегодня — не тот же набор, что вчера. Для добора глубины это нормально
@@ -91,6 +92,42 @@ COFFEE_BREAK_RANGE     = (20, 45)    # длительность длинной �
 MAX_CONSECUTIVE_FAILS  = 3           # предохранитель: 3 сбоя подряд → стоп
 HEADLESS = True
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+class DailyBudgetExhausted(RuntimeError):
+    """Общий суточный потолок kolesa исчерпан: сетевой шаг надо остановить."""
+
+
+_run_kolesa_requests = 0
+
+
+def reserve_kolesa_request() -> dict:
+    """Зарезервировать один top-level запрос браузера в ОБЩЕМ бюджете.
+
+    Раньше parser жил вне счётчика catch_up: 100 страниц листинга плюс 180
+    запросов обогащения выглядели для каждого процесса допустимо, но вместе
+    подходили к объёму, на котором IP уже блокировали. Списываем ДО page.goto:
+    таймаут или 429 тоже являются нагрузкой и не должны возвращать квоту.
+
+    Второй предел — запросы текущего запуска. Он не даёт прогону, начатому до
+    полуночи, получить ещё целую квоту после календарного сброса.
+    """
+    global _run_kolesa_requests
+    limit = request_budget.DAILY_BUDGET["kolesa"]
+    if _run_kolesa_requests + 1 > limit:
+        raise DailyBudgetExhausted(
+            f"лимит текущего запуска kolesa исчерпан: {limit}/{limit}; "
+            "листинг продолжится в следующий запуск"
+        )
+    current = request_budget.reserve_budget("kolesa", 1, limit)
+    if current is None:
+        used = request_budget.load_budget_used()
+        raise DailyBudgetExhausted(
+            f"суточный бюджет kolesa исчерпан: {used['kolesa']}/{limit}; "
+            "листинг продолжится в следующий запуск"
+        )
+    _run_kolesa_requests += 1
+    return current
 
 logging.basicConfig(
     level=logging.INFO,
@@ -538,9 +575,12 @@ async def human_pause(page):
 async def get_html(page, url: str, retries: int = 3) -> str | None:
     for attempt in range(1, retries + 1):
         try:
+            reserve_kolesa_request()
             await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             await human_pause(page)
             return await page.content()
+        except DailyBudgetExhausted:
+            raise
         except PWTimeout:
             log.warning(f"Таймаут [{attempt}/{retries}]: {url}")
         except Exception as e:
@@ -610,8 +650,13 @@ async def run():
         # Прогрев: заходим на главную, как обычный человек
         log.info("Прогрев сессии...")
         try:
+            reserve_kolesa_request()
             await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30_000)
             await human_pause(page)
+        except DailyBudgetExhausted as e:
+            log.warning(f"Стоп до сети: {e}")
+            await browser.close()
+            return
         except Exception as e:
             log.warning(f"Прогрев не удался: {e}")
 
@@ -629,7 +674,17 @@ async def run():
                     url = f"{BASE_URL}{cat_path}{sep}page={page_num}"
                 log.info(f"[{cat_name}] стр. {page_num}: {url}")
 
-                html = await get_html(page, url)
+                try:
+                    html = await get_html(page, url)
+                except DailyBudgetExhausted as e:
+                    log.warning(f"Стоп по общему бюджету: {e}")
+                    if total_upgraded:
+                        rewrite_passports(OUTPUT_CSV, passports)
+                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings,
+                                   pg_upgraded)
+                    await context.storage_state(path=STATE_FILE)
+                    await browser.close()
+                    return
 
                 if html is None or looks_blocked(html or ""):
                     consecutive_fails += 1

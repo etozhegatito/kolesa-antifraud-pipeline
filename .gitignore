@@ -16,6 +16,7 @@ data/**/*.bak
 logs/*.log
 # runtime-состояние (напр. .catch_up_budget.json — суточный счётчик бюджета)
 logs/*.json
+logs/*.lock
 
 # debug-дампы страниц kolesa — не код, раздувают репо и языковую
 # статистику GitHub (532КБ HTML). Регенерируются debug/debug_selectors.py.

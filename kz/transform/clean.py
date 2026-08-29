@@ -318,7 +318,7 @@ def add_duplicate_flags(df: pd.DataFrame) -> pd.DataFrame:
                                  "possible_repost", "")
     weak = dup & ~dealer_like & ~strong
     df.loc[weak, "info_flags"] = (
-        df.loc[weak, "info_flags"].replace("", np.nan).fillna("")
+        df.loc[weak, "info_flags"].fillna("")
         .apply(lambda s: (s + "|" if s else "") + "repost_unconfirmed"))
     return df
 
@@ -385,7 +385,7 @@ def exculpate(df: pd.DataFrame) -> pd.DataFrame:
     mask = (df["stat_reasons"] == "price_anomaly_low") & explained
     df.loc[mask, "stat_reasons"] = ""
     df.loc[mask, "info_flags"] = (
-        df.loc[mask, "info_flags"].replace("", np.nan).fillna("")
+        df.loc[mask, "info_flags"].fillna("")
         .apply(lambda s: (s + "|" if s else "") + "low_price_explained")
     )
 
@@ -409,7 +409,7 @@ def exculpate(df: pd.DataFrame) -> pd.DataFrame:
         # уже поставить low_price_explained — не задваиваем)
         need = ycc & ~df["info_flags"].fillna("").str.contains("low_price_explained")
         df.loc[need, "info_flags"] = (
-            df.loc[need, "info_flags"].replace("", np.nan).fillna("")
+            df.loc[need, "info_flags"].fillna("")
             .apply(lambda s: (s + "|" if s else "") + "low_price_explained")
         )
 
@@ -431,7 +431,7 @@ def exculpate(df: pd.DataFrame) -> pd.DataFrame:
     mask = (df["stat_reasons"] == "price_anomaly_low") & dealer_fin
     df.loc[mask, "stat_reasons"] = ""
     df.loc[mask, "info_flags"] = (
-        df.loc[mask, "info_flags"].replace("", np.nan).fillna("")
+        df.loc[mask, "info_flags"].fillna("")
         .apply(lambda s: (s + "|" if s else "") + "dealer_financing_price")
     )
 
@@ -452,7 +452,7 @@ def exculpate(df: pd.DataFrame) -> pd.DataFrame:
         mask = (df["stat_reasons"] == "price_anomaly_low") & near_market.fillna(False)
         df.loc[mask, "stat_reasons"] = ""
         df.loc[mask, "info_flags"] = (
-            df.loc[mask, "info_flags"].replace("", np.nan).fillna("")
+            df.loc[mask, "info_flags"].fillna("")
             .apply(lambda s: (s + "|" if s else "") + "kolesa_price_ok")
         )
 

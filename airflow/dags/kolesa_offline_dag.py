@@ -9,8 +9,7 @@ otherwise it would just be an expensive cron.
 
     clean ──┬── explore ── label_cards ───────────────────────┐
             ├── evaluate_detector ────────────────────────────┤
-            └── train_price_model ──┬── ml_dashboard ─────────┤
-                                    ├── data_drift ───────────┤
+            └── data_drift ── train_price_model ──┬── ml_dashboard ──┤
                                     ├── time_on_market ───────┤
                                     ├── price_interval ───────┤
                                     └── residual_detector ── ml_report
@@ -25,7 +24,9 @@ Why the graph looks like this:
   ml_dashboard reads the price model, while ml_report needs both the price
     model and the calibrated price floor — hence the different branch depths;
   data_drift compares today's feature distributions against the sample the
-    deployed model was trained on, so it has to wait for training;
+    currently deployed model was trained on, so it must finish BEFORE training
+    replaces that model. Running it after training makes PSI compare the current
+    data with itself and produces a meaningless zero;
   time_on_market fits Kaplan-Meier and Cox on the clean layer but needs the
     price model to place each ad against its fair price, so it waits too —
     and then runs alongside the reports rather than behind them;
@@ -93,12 +94,10 @@ with DAG(
 
     clean >> explore >> cards
     clean >> evaluate
-    clean >> train >> dashboard
+    clean >> monitor >> train >> dashboard
     train >> residual >> report
-    # Drift comparison needs the model that is currently deployed, so it waits
-    # for training. Time-on-market only needs the clean layer and the price
-    # model, so it runs alongside the reports.
-    train >> monitor
+    # Monitoring must read the PREVIOUSLY deployed model before `train`
+    # overwrites it. This is a dependency, not just a preferred ordering.
     train >> survival
     train >> interval
     [cards, evaluate, dashboard, report, monitor, survival, interval] >> state

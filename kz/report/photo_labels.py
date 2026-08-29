@@ -367,13 +367,23 @@ def labelled_frames() -> list[dict]:
 
 
 def stats() -> dict:
-    """Сколько чего размечено — для счётчика и для решения «хватит ли»."""
+    """Сколько кадров И независимых объявлений размечено.
+
+    Для интерфейса полезны кадры, для grouped CV — объявления: пять снимков
+    одной машины не превращаются в пять независимых наблюдений.
+    """
     _, rows = read_journal()
     out = dict.fromkeys(LABELS, 0)
+    ads = {label: set() for label in LABELS}
     for r in rows:
         if r.get("label") in out:
             out[r["label"]] += 1
+            ads[r["label"]].add(str(r.get("ad_id", "")))
     out["total"] = len(rows)
+    out["ads_total"] = len(set().union(*ads.values()))
+    for label in LABELS:
+        out[f"{label}_ads"] = len(ads[label])
+    out["positive_ads"] = len(ads["damaged"] | ads["wreck"])
     return out
 
 
@@ -382,10 +392,12 @@ def main():
         s = stats()
         print(f"Размечено кадров: {s['total']}")
         for k, desc in LABELS.items():
-            print(f"  {k:9} {s[k]:4}   {desc}")
-        need = 200 - s["damaged"]
-        print(f"\nДо обучения нужно ~200 с повреждением кузова: "
-              f"{'хватает' if need <= 0 else f'ещё {need}'}")
+            print(f"  {k:9} {s[k]:4} кадров, {s[f'{k}_ads']:3} объявлений   {desc}")
+        need = 200 - s["positive_ads"]
+        print(f"\nНезависимых объявлений damaged/wreck: {s['positive_ads']}. "
+              "Это главный размер выборки для grouped CV.")
+        print("Ориентир для устойчивого локального замера — около 200: "
+              f"{'хватает' if need <= 0 else f'ещё {need} объявлений'}")
         for k in ("parts", "wreck"):
             if s[k]:
                 print(f"{k}: {s[k]} — отдельный класс, "

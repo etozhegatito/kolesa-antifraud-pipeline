@@ -140,6 +140,10 @@ def estimate_page() -> str:
 
 <script>
 function money(v){ return (v/1e6).toFixed(2).replace('.', ',') + ' млн ₸'; }
+function esc(v){
+  return String(v ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 async function run(){
   const ids = ['brand','model','year','mileage_km','engine_volume','engine_type',
@@ -152,7 +156,7 @@ async function run(){
   const r = await fetch('/api/estimate', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify(car)});
   const d = await r.json();
-  if (d.error){ out.innerHTML = '<div class="card note warn">Ошибка: '+d.error+'</div>'; return; }
+  if (d.error){ out.innerHTML = '<div class="card note warn">Ошибка: '+esc(d.error)+'</div>'; return; }
 
   let h = '<div class="card"><div class="muted">Справедливая цена</div>'
         + '<div class="big">' + money(d.fair_price) + '</div>'
@@ -166,7 +170,7 @@ async function run(){
   if (d.position){
     const p = d.position;
     h += '<div class="card"><h2 style="margin-top:0">Ваша цена среди похожих</h2>'
-      + '<div>' + p.label + ' — дешевле ' + p.percentile.toFixed(0)
+      + '<div>' + esc(p.label) + ' — дешевле ' + p.percentile.toFixed(0)
       + '% из ' + p.n_similar + ' машин</div>'
       + '<div class="muted" style="margin-top:6px">Половина похожих стоит от '
       + money(p.p25) + ' до ' + money(p.p75) + '.</div>'
@@ -179,8 +183,8 @@ async function run(){
   d.drivers.forEach(x => {
     const up = x.effect_pct >= 0;
     const w = Math.min(100, Math.abs(x.effect_pct));
-    h += '<div class="row"><span>' + x.feature + ' <span class="muted">'
-       + x.value + '</span></span><b>' + (up?'+':'') + x.effect_pct.toFixed(0)
+    h += '<div class="row"><span>' + esc(x.feature) + ' <span class="muted">'
+       + esc(x.value) + '</span></span><b>' + (up?'+':'') + x.effect_pct.toFixed(0)
        + '%</b></div><div class="bar"><i class="' + (up?'up':'down')
        + '" style="width:' + w + '%"></i></div>';
   });
@@ -189,7 +193,7 @@ async function run(){
 
   if (d.warnings.length){
     h += '<div class="card"><h2 style="margin-top:0">Что улучшить в объявлении</h2>';
-    d.warnings.forEach(w => h += '<div class="note warn">' + w + '</div>');
+    d.warnings.forEach(w => h += '<div class="note warn">' + esc(w) + '</div>');
     h += '</div>';
   }
 
@@ -197,7 +201,7 @@ async function run(){
     h += '<div class="card"><h2 style="margin-top:0">Похожие объявления</h2>'
        + '<table><tr><th>Машина</th><th>Год</th><th>Пробег</th><th>Цена</th></tr>';
     d.similar.forEach(s => {
-      h += '<tr><td>' + s.brand + ' ' + s.model + '</td><td>' + s.year
+      h += '<tr><td>' + esc(s.brand) + ' ' + esc(s.model) + '</td><td>' + esc(s.year)
          + '</td><td>' + (s.mileage_km ? Math.round(s.mileage_km).toLocaleString('ru') : '—')
          + '</td><td>' + money(s.price_tenge) + '</td></tr>';
     });

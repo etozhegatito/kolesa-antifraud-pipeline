@@ -46,7 +46,7 @@ def main():
 
     # Grouped OOF: точку не видит модель, и её точный перезалив также
     # не может оказаться в train-фолде.
-    oof, baseline_oof = grouped_oof_predictions(clean)
+    oof, baseline_oof, _base_oof = grouped_oof_predictions(clean)
     clean["oof_log"] = oof
     clean["ape"] = np.abs(np.exp(oof) - np.exp(y)) / np.exp(y) * 100
 

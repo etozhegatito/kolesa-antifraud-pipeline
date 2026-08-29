@@ -681,6 +681,59 @@ def test_budget_accumulates_within_one_day(tmp_path, monkeypatch):
     assert cu.load_budget_used()["kolesa"] == 60
 
 
+def test_parser_and_catch_up_share_one_daily_budget(tmp_path, monkeypatch):
+    """Листинг больше не живёт вне антибан-счётчика.
+
+    Реальный риск: parser тратил 100 запросов, catch_up видел в файле ноль и
+    разрешал ещё 200. Сумма приближалась к ~270, на которых IP уже банили.
+    """
+    import pytest
+    from kz.collect import parser
+    from kz.ops import catch_up
+
+    monkeypatch.setattr(catch_up, "BUDGET_FILE", str(tmp_path / "budget.json"))
+    monkeypatch.setitem(catch_up.DAILY_BUDGET, "kolesa", 2)
+    monkeypatch.setattr(parser, "_run_kolesa_requests", 0)
+
+    parser.reserve_kolesa_request()
+    parser.reserve_kolesa_request()
+    assert catch_up.load_budget_used()["kolesa"] == 2
+    with pytest.raises(parser.DailyBudgetExhausted):
+        parser.reserve_kolesa_request()
+
+
+def test_budget_reservation_does_not_overshoot(tmp_path, monkeypatch):
+    """Проверка и списание — одна операция, а не два гоняющихся чтения."""
+    from kz.ops import catch_up
+
+    monkeypatch.setattr(catch_up, "BUDGET_FILE", str(tmp_path / "budget.json"))
+    assert catch_up.reserve_budget("kolesa", 2, 3)["kolesa"] == 2
+    assert catch_up.reserve_budget("kolesa", 2, 3) is None
+    assert catch_up.load_budget_used()["kolesa"] == 2
+
+
+def test_chunk_refreshes_budget_after_calendar_rollover(tmp_path, monkeypatch):
+    """В памяти мог остаться вчерашний полный расход, а файл уже показывает 0."""
+    from kz.ops import catch_up
+
+    monkeypatch.setattr(catch_up, "BUDGET_FILE", str(tmp_path / "budget.json"))
+    monkeypatch.setitem(catch_up.DAILY_BUDGET, "kolesa", 2)
+    gaps = iter([1, 0])
+    monkeypatch.setattr(catch_up, "compute_gaps",
+                        lambda: {"backfill": next(gaps)})
+    monkeypatch.setattr(catch_up, "run", lambda _script: 0)
+    monkeypatch.setattr(catch_up, "count_429", lambda: 0)
+
+    used = {"kolesa": 2, "cdn": 0}  # вчерашняя копия в долгом процессе
+    result = catch_up.run_one_chunk(
+        "backfill", "unused", "backfill", "kolesa", used,
+        run_spent={"kolesa": 0, "cdn": 0},
+    )
+    assert result == "done"
+    assert used["kolesa"] == 1
+    assert catch_up.load_budget_used()["kolesa"] == 1
+
+
 def test_budget_resets_on_a_new_calendar_day(tmp_path, monkeypatch):
     """Квота суточная, значит вчерашний расход сегодня не считается.
 
@@ -1003,7 +1056,7 @@ def test_temporal_holdout_is_future_and_removes_group_overlap():
     for i in range(120):
         rows.append({
             "ad_id": str(i), "scraped_at": pd.Timestamp("2026-01-01")
-            + pd.Timedelta(days=i), "brand": "B", "model": f"M{i}",
+            + pd.Timedelta(i, unit="D"), "brand": "B", "model": f"M{i}",
             "year": 2020, "mileage_km": i + 1000, "engine_volume": 2.0,
             "body_type": "седан", "text_full": f"уникальное описание машины номер {i}",
         })
@@ -1441,11 +1494,13 @@ def test_offline_dag_dependencies_respect_artifacts():
     отсутствующем файле, хотя в UI выглядел независимым."""
     from pathlib import Path
     src = Path("airflow/dags/kolesa_offline_dag.py").read_text(encoding="utf-8")
-    assert "clean >> train >> dashboard" in src
+    assert "clean >> monitor >> train >> dashboard" in src
     assert "train >> residual >> report" in src
     assert "clean >> explore >> cards" in src
-    # мониторинг сравнивает с выборкой РАБОТАЮЩЕЙ модели, значит идёт до неё
-    assert "train >> monitor" in src
+    # Мониторинг сравнивает с выборкой РАБОТАЮЩЕЙ модели, значит обязан
+    # закончиться ДО того, как train перезапишет её текущими данными.
+    assert "monitor >> train" in src
+    assert "train >> monitor" not in src
 
     # Финальный таск логирует состояние и обязан ждать ВСЕ листья графа.
     # Проверяем свойство, а не строку: раньше здесь стоял литерал
@@ -1820,6 +1875,17 @@ def test_ml_flag_implies_offline_rebuild():
     assert 'fast  = "--fast" in sys.argv or ml' in src
 
 
+def test_default_run_uses_budgeted_collect_chain():
+    """Без флагов нельзя оставлять скрытый status/enrich вне антибан-бюджета."""
+    import inspect
+    from kz.ops import run_all
+
+    src = inspect.getsource(run_all.main)
+    assert "if collect or (not fast and not light):" in src
+    assert "for s in COLLECT_CHAIN" in src
+    assert "run_parallel(STEP_ENRICH, STEP_PHOTOS)" not in src
+
+
 # ─── db_stats: логирование дельт для DAG'ов ──────────────────────────────────
 
 def test_db_stats_tables_cover_pipeline_layers():
@@ -1920,6 +1986,35 @@ def test_web_app_routes_exist():
     for p in ("/", "/estimate", "/api/estimate", "/label", "/verdict",
               "/api/health"):
         assert p in paths, p
+
+
+def test_estimate_page_escapes_values_before_inner_html():
+    """Марка/модель и ошибки возвращаются в innerHTML — без escape это XSS."""
+    from kz.web.pages import estimate_page
+
+    html = estimate_page()
+    assert "function esc(" in html
+    for value in ("d.error", "x.value", "s.brand", "s.model"):
+        assert f"esc({value})" in html
+
+
+def test_routed_price_model_uses_specialist_only_below_threshold():
+    """Маршрут строится по предикту основной модели, не по неизвестному target."""
+    import numpy as np
+    import pandas as pd
+    from kz.ml.train_price_model import RoutedPriceModel
+
+    class Fake:
+        def __init__(self, column):
+            self.column = column
+
+        def predict(self, rows):
+            return np.log(rows[self.column].to_numpy(dtype=float))
+
+    rows = pd.DataFrame({"base": [4_000_000, 6_000_000],
+                         "special": [3_500_000, 1_000_000]})
+    routed = np.exp(RoutedPriceModel(Fake("base"), Fake("special")).predict(rows))
+    assert np.allclose(routed, [3_500_000, 6_000_000])
 
 
 def test_web_binds_localhost_only():
@@ -2967,6 +3062,65 @@ def test_photo_advice_does_not_promise_more_views():
 
     # А неудача проверки обязана быть записана, а не забыта
     assert "НЕ УДАЛАСЬ" in inspect.getsource(photo_advice.validate)
+
+
+def test_photo_redundancy_check_is_out_of_fold():
+    """Нельзя обучить логрегрессию на семи бейджах и оценить её там же."""
+    import inspect
+    from kz.ml import photo_clip
+
+    src = inspect.getsource(photo_clip._oof_logistic_auc)
+    assert "cross_val_predict" in src
+    assert "StratifiedKFold" in src
+
+
+def test_photo_stats_count_independent_ads(tmp_path, monkeypatch):
+    """Три кадра одной битой машины — одна независимая точка для CV."""
+    from kz.report import photo_labels
+
+    monkeypatch.setattr(photo_labels, "LABELS_CSV", str(tmp_path / "labels.csv"))
+    photo_labels.write_journal(photo_labels.HEADER, [
+        {"ad_id": "a", "position": "1", "label": "damaged"},
+        {"ad_id": "a", "position": "2", "label": "damaged"},
+        {"ad_id": "b", "position": "1", "label": "wreck"},
+        {"ad_id": "c", "position": "1", "label": "intact"},
+    ])
+    s = photo_labels.stats()
+    assert s["damaged"] == 2
+    assert s["damaged_ads"] == 1
+    assert s["positive_ads"] == 2
+    assert s["ads_total"] == 3
+
+
+def test_photo_damage_metric_aggregates_frames_to_ads():
+    """Два кадра одной машины не должны удваивать её вес в финальной AUC."""
+    import pandas as pd
+    from kz.ml.photo_damage import per_ad
+
+    frames = pd.DataFrame({
+        "ad_id": ["a", "a", "b"],
+        "target": [0, 1, 0],
+        "table": [0.1, 0.2, 0.3],
+        "photo": [0.4, 0.8, 0.2],
+        "combined": [0.2, 0.7, 0.1],
+    })
+    ads = per_ad(frames).set_index("ad_id")
+    assert len(ads) == 2
+    assert ads.loc["a", "target"] == 1
+    assert ads.loc["a", "photo"] == 0.8
+
+
+def test_photo_damage_reports_paired_auc_difference():
+    """Продуктовый gate требует интервал разницы, не два отдельных CI."""
+    import numpy as np
+    from kz.ml.photo_damage import auc_delta_ci
+
+    y = np.array([0, 0, 0, 1, 1, 1])
+    good = np.array([0.1, 0.2, 0.3, 0.7, 0.8, 0.9])
+    bad = good[::-1]
+    delta, lo, hi = auc_delta_ci(y, good, bad, n_boot=200)
+    assert delta == 1.0
+    assert lo > 0 and hi > 0
 
 
 # ─── Разметка повреждений по фотографиям ────────────────────────────────────

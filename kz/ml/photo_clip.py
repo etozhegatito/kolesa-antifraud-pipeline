@@ -303,6 +303,28 @@ def validate(log=print) -> None:
     _redundancy_check(d, log=log)
 
 
+def _oof_logistic_auc(X, y) -> float:
+    """OOF AUC простой логрегрессии; строка не оценивается своей моделью."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=int)
+    n = min(5, int(y.sum()), int((1 - y).sum()))
+    if n < 2:
+        raise ValueError("Для OOF AUC нужно хотя бы по два примера каждого класса")
+    cv = StratifiedKFold(n_splits=n, shuffle=True, random_state=42)
+    model = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(max_iter=1000, class_weight="balanced"),
+    )
+    pred = cross_val_predict(model, X, y, cv=cv, method="predict_proba")[:, 1]
+    return float(roc_auc_score(y, pred))
+
+
 def _redundancy_check(d: pd.DataFrame, log=print) -> None:
     """Не переоткрывает ли CLIP возраст и цену.
 
@@ -314,11 +336,6 @@ def _redundancy_check(d: pd.DataFrame, log=print) -> None:
     Поэтому сравниваем две логистические регрессии: на одних возрасте с
     ценой и на них же плюс оценка CLIP. Прирост AUC и есть вся польза.
     """
-    import numpy as np
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score
-    from sklearn.preprocessing import StandardScaler
-
     d = d.copy()
     d["log_price"] = np.log(pd.to_numeric(d["price_tenge"], errors="coerce"))
     d["age"] = pd.to_numeric(d["age"], errors="coerce")
@@ -333,15 +350,15 @@ def _redundancy_check(d: pd.DataFrame, log=print) -> None:
         if y.sum() < 5:
             log(f"  {name}: {int(y.sum())} примеров — слишком мало")
             continue
-        base = StandardScaler().fit_transform(work[["age", "log_price"]])
-        auc0 = roc_auc_score(y, LogisticRegression(max_iter=1000)
-                             .fit(base, y).predict_proba(base)[:, 1])
+        # Одна строка здесь уже равна одному объявлению после aggregate(),
+        # поэтому дополнительная group-разбивка не нужна. Но OOF обязателен:
+        # прежняя версия обучалась и оценивалась на одних строках, особенно
+        # оптимистично при семи положительных бейджах.
+        auc0 = _oof_logistic_auc(work[["age", "log_price"]], y)
         log(f"  {name} ({int(y.sum())} положительных): "
-            f"возраст+цена дают AUC {auc0:.3f}")
+            f"возраст+цена дают OOF AUC {auc0:.3f}")
         for c in probes:
-            X = StandardScaler().fit_transform(work[["age", "log_price", c]])
-            auc = roc_auc_score(y, LogisticRegression(max_iter=1000)
-                                .fit(X, y).predict_proba(X)[:, 1])
+            auc = _oof_logistic_auc(work[["age", "log_price", c]], y)
             log(f"     + {c:20} {auc:.3f}  ({auc - auc0:+.3f})")
 
 
