@@ -58,9 +58,10 @@ RANDOM_SEED = 42
 # но учится на более широкой полосе фактических цен <8 млн. Если учить его
 # строго на <5 млн, пограничные машины, ошибочно направленные маршрутизатором,
 # оказываются вне train-распределения и портят дорогой сегмент. Честный OOF
-# замер: общий MAPE 21.41% → 21.16%, 95% ДИ разницы [-0.42; -0.10].
+# замер каждого среза сохраняется в metadata вместе с bootstrap-интервалом.
 CHEAP_ROUTE_MAX = 5_000_000
 CHEAP_TRAIN_MAX = 8_000_000
+BOOTSTRAP_REPEATS = 1000
 
 
 def new_model(loss_function: str = "RMSE") -> CatBoostRegressor:
@@ -194,6 +195,43 @@ def regression_metrics(y_log, pred_log) -> dict[str, float]:
     }
 
 
+def grouped_bootstrap_mape_delta(
+    df: pd.DataFrame,
+    candidate_log: np.ndarray,
+    base_log: np.ndarray,
+    n_boot: int = BOOTSTRAP_REPEATS,
+) -> dict[str, float | int | list[float]]:
+    """Парный bootstrap ΔMAPE кандидата против base по группам дублей.
+
+    Точечные −0.1 п.п. могут быть шумом. Ресэмплируем целые группы, чтобы
+    перезаливы одной машины не получили независимых лотерейных билетов, и на
+    каждом повторе сравниваем обе модели на одних и тех же строках.
+    Отрицательная разница означает, что routed-модель лучше.
+    """
+    actual = df["price_tenge"].to_numpy(dtype=float)
+    cand_ape = np.abs(np.exp(candidate_log) - actual) / actual * 100
+    base_ape = np.abs(np.exp(base_log) - actual) / actual * 100
+    group_codes, _ = pd.factorize(duplicate_groups(df), sort=False)
+    n_groups = int(group_codes.max()) + 1
+    sizes = np.bincount(group_codes, minlength=n_groups).astype(float)
+    delta_sums = np.bincount(
+        group_codes, weights=cand_ape - base_ape, minlength=n_groups
+    )
+    rng = np.random.default_rng(RANDOM_SEED)
+    values = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        sampled = rng.integers(0, n_groups, n_groups)
+        values[i] = delta_sums[sampled].sum() / sizes[sampled].sum()
+    lo, hi = np.percentile(values, [2.5, 97.5])
+    return {
+        "mape_delta_pct_points": float((cand_ape - base_ape).mean()),
+        "bootstrap_95_ci": [float(lo), float(hi)],
+        "bootstrap_probability_better": float((values < 0).mean()),
+        "bootstrap_repeats": int(n_boot),
+        "independent_groups": n_groups,
+    }
+
+
 def _baseline_predict(
     train: pd.DataFrame, y_train: pd.Series, test: pd.DataFrame
 ) -> np.ndarray:
@@ -289,6 +327,9 @@ def evaluate_temporal(df: pd.DataFrame) -> dict | None:
         routed_pred[route] = specialist.predict(df.loc[te, FEATURES].iloc[route])
     model_m = regression_metrics(df.loc[te, "log_price"], routed_pred)
     base_model_m = regression_metrics(df.loc[te, "log_price"], base_pred)
+    comparison = grouped_bootstrap_mape_delta(
+        df.loc[te], routed_pred, base_pred
+    )
     baseline = _baseline_predict(df.loc[tr], df.loc[tr, "log_price"], df.loc[te])
     baseline_m = regression_metrics(df.loc[te, "log_price"], baseline)
     return {
@@ -298,6 +339,7 @@ def evaluate_temporal(df: pd.DataFrame) -> dict | None:
         "test_from": str(pd.to_datetime(df.loc[te, "scraped_at"]).min()),
         "model": model_m,
         "base_model": base_model_m,
+        "routed_vs_base": comparison,
         "route_fraction": float(route.mean()),
         "baseline": baseline_m,
     }
@@ -427,6 +469,7 @@ def main():
     grouped_model = regression_metrics(clean["log_price"], model_oof)
     grouped_base_model = regression_metrics(clean["log_price"], base_oof)
     grouped_base = regression_metrics(clean["log_price"], baseline_oof)
+    comparison = grouped_bootstrap_mape_delta(clean, model_oof, base_oof)
     lift = grouped_base["mape_pct"] - grouped_model["mape_pct"]
 
     print(f"\nGrouped 5-fold CV без leakage дублей ({len(clean)} машин):")
@@ -440,6 +483,9 @@ def main():
           f"MAE={grouped_base['mae_tenge']/1e6:.2f}М ₸  "
           f"MAPE={grouped_base['mape_pct']:.1f}%")
     print(f"  Выигрыш CatBoost по MAPE: {lift:+.1f} п.п.")
+    ci = comparison["bootstrap_95_ci"]
+    print(f"  Routed − основная: {comparison['mape_delta_pct_points']:+.2f} п.п.  "
+          f"95% bootstrap ДИ [{ci[0]:+.2f}; {ci[1]:+.2f}]")
 
     temporal = evaluate_temporal(clean)
     if temporal:
@@ -450,6 +496,10 @@ def main():
               f"R²(log)={tm_base['r2_log']:.3f}")
         print(f"  + специалист MAPE={tm['mape_pct']:.1f}%  "
               f"R²(log)={tm['r2_log']:.3f}")
+        tci = temporal["routed_vs_base"]["bootstrap_95_ci"]
+        print("  Routed − основная: "
+              f"{temporal['routed_vs_base']['mape_delta_pct_points']:+.2f} п.п.  "
+              f"95% bootstrap ДИ [{tci[0]:+.2f}; {tci[1]:+.2f}]")
         print(f"  Baseline MAPE={tb['mape_pct']:.1f}%  R²(log)={tb['r2_log']:.3f}")
     else:
         print("\nOut-of-time: пока недостаточно временного диапазона")
@@ -500,7 +550,8 @@ def main():
         "validation": {
             "grouped_cv": {"model": grouped_model,
                            "base_model": grouped_base_model,
-                           "baseline": grouped_base},
+                           "baseline": grouped_base,
+                           "routed_vs_base": comparison},
             "temporal_holdout": temporal,
             "segments": segments,
         },

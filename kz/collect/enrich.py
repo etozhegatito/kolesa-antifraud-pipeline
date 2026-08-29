@@ -18,7 +18,7 @@ JS-ом и в статичном HTML отсутствует. Слова о со
 описание из листинга уже есть в raw/clean).
 
 Запуск: python -m kz.collect.enrich   (после clean.py, раз в день)
-Выход:  enriched.csv (append-only, по строке на объявление)
+Выход: Postgres `enriched` + append-only CSV-зеркало
 """
 
 # ─── Самопроверка файла (защита от путаницы при копировании) ────────────────
@@ -205,12 +205,30 @@ def parse_ad_page(html: str) -> dict:
 
 
 def load_done() -> set:
+    """ID, уже сохранённые хотя бы в одном долговечном слое.
+
+    После миграции Postgres стал рабочим источником clean-слоя, а CSV остался
+    append-only резервом. Исторически в БД оказалось 30 строк, которых нет в
+    CSV. Смотреть только в CSV означало повторно тратить на них сетевой бюджет.
+    Объединение безопасно: строка уже добыта и доступна конвейеру; удалять или
+    переписывать ручные/runtime-данные ради синхронизации не требуется.
+    """
     if not Path(ENRICHED_CSV).exists():
         with open(ENRICHED_CSV, "w", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=FIELDS).writeheader()
-        return set()
-    with open(ENRICHED_CSV, encoding="utf-8") as f:
-        return {r["ad_id"] for r in csv.DictReader(f)}
+        csv_done = set()
+    else:
+        with open(ENRICHED_CSV, encoding="utf-8") as f:
+            csv_done = {r["ad_id"] for r in csv.DictReader(f)}
+    try:
+        db_done = set(pd.read_sql(
+            "SELECT ad_id FROM enriched", get_engine(), dtype={"ad_id": str}
+        )["ad_id"].astype(str))
+    except Exception as e:
+        # Чистый CSV-сценарий остаётся работоспособным при недоступной БД.
+        log.warning(f"Не удалось сверить enriched с Postgres: {e}")
+        db_done = set()
+    return csv_done | db_done
 
 
 def pick_targets(done: set) -> list[str]:
@@ -336,9 +354,9 @@ def main():
             csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore") \
                .writerow(row)
 
-        # Двойная запись (пилот миграции на Postgres, см. план): CSV
-        # остаётся источником истины, сбой записи в БД не должен ронять
-        # прогон — обогащение стоит дорого (запросы), терять его нельзя.
+        # Двойная запись: Postgres — рабочий источник clean-слоя, CSV —
+        # append-only резерв. Сбой одной записи не должен стирать вторую:
+        # обогащение стоит дорого, повторно запрашивать страницу нельзя.
         try:
             # "" → NULL: в CSV пустое значение — это "", но в БД пустая
             # строка и NULL — разные вещи, и смешивать их нельзя (бэкфилл

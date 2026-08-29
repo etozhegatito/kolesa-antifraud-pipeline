@@ -702,6 +702,24 @@ def test_parser_and_catch_up_share_one_daily_budget(tmp_path, monkeypatch):
         parser.reserve_kolesa_request()
 
 
+def test_enrich_done_unions_csv_and_postgres(tmp_path, monkeypatch):
+    """Строка только в БД не должна повторно сжигать запрос из-за старого CSV."""
+    import csv
+    import pandas as pd
+    from kz.collect import enrich
+
+    path = tmp_path / "enriched.csv"
+    with path.open("w", newline="", encoding="utf-8") as out:
+        writer = csv.DictWriter(out, fieldnames=enrich.FIELDS)
+        writer.writeheader()
+        writer.writerow({"ad_id": "csv-only"})
+    monkeypatch.setattr(enrich, "ENRICHED_CSV", str(path))
+    monkeypatch.setattr(enrich, "get_engine", lambda: None)
+    monkeypatch.setattr(pd, "read_sql", lambda *_args, **_kwargs:
+                        pd.DataFrame({"ad_id": ["db-only"]}))
+    assert enrich.load_done() == {"csv-only", "db-only"}
+
+
 def test_budget_reservation_does_not_overshoot(tmp_path, monkeypatch):
     """Проверка и списание — одна операция, а не два гоняющихся чтения."""
     from kz.ops import catch_up
@@ -2015,6 +2033,36 @@ def test_routed_price_model_uses_specialist_only_below_threshold():
                          "special": [3_500_000, 1_000_000]})
     routed = np.exp(RoutedPriceModel(Fake("base"), Fake("special")).predict(rows))
     assert np.allclose(routed, [3_500_000, 6_000_000])
+
+
+def test_routed_model_bootstrap_compares_paired_duplicate_groups():
+    """Интервал сравнения маршрута с base должен жить в артефакте, не в заметке."""
+    import numpy as np
+    import pandas as pd
+    from kz.ml.train_price_model import grouped_bootstrap_mape_delta
+
+    df = pd.DataFrame({
+        "ad_id": ["a", "b", "c", "d"],
+        "price_tenge": [1_000_000, 2_000_000, 3_000_000, 4_000_000],
+        "text_full": ["", "", "", ""],
+    })
+    truth = np.log(df.price_tenge.to_numpy())
+    result = grouped_bootstrap_mape_delta(
+        df, truth, truth + np.log(2), n_boot=200
+    )
+    assert np.isclose(result["mape_delta_pct_points"], -100.0)
+    assert result["bootstrap_95_ci"][1] < 0
+    assert result["bootstrap_probability_better"] == 1.0
+
+
+def test_temporal_metrics_include_routed_vs_base_uncertainty():
+    """OOT-выигрыш маршрута тоже нельзя публиковать без интервала разницы."""
+    import inspect
+    from kz.ml import train_price_model
+
+    src = inspect.getsource(train_price_model.evaluate_temporal)
+    assert "grouped_bootstrap_mape_delta" in src
+    assert '"routed_vs_base": comparison' in src
 
 
 def test_web_binds_localhost_only():
