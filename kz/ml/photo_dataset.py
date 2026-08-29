@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from kz.report.photo_labels import read_journal
+from kz.report.photo_labels import boxes_from_row, read_journal
 
 OUT_DIR = Path("data/eda")
 DETECTION_LABELS = {"damaged", "intact"}
@@ -30,16 +30,6 @@ CATEGORIES = [{"id": 1, "name": "damage", "supercategory": "vehicle"}]
 def _split(row: dict) -> str:
     # Пустое поле означает старую метку, которая уже участвовала в обучении.
     return str(row.get("dataset_split") or "train")
-
-
-def _box(row: dict) -> tuple[float, float, float, float] | None:
-    if not row.get("x1"):
-        return None
-    values = tuple(float(row[k]) for k in ("x1", "y1", "x2", "y2"))
-    x1, y1, x2, y2 = values
-    if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
-        raise ValueError(f"некорректная рамка {values} у {row.get('path')}")
-    return values
 
 
 def build_coco(rows: list[dict], split: str) -> dict:
@@ -77,25 +67,26 @@ def build_coco(rows: list[dict], split: str) -> dict:
             "selection_source": str(row.get("selection_source") or "legacy"),
         })
 
-        box = _box(row)
-        if row.get("label") == "damaged" and box is None:
+        boxes = boxes_from_row(row)
+        if row.get("label") == "damaged" and not boxes:
             raise ValueError(f"damaged без рамки: {path}")
-        if row.get("label") != "damaged" or box is None:
+        if row.get("label") != "damaged":
             continue
-        x1, y1, x2, y2 = box
-        x, y = x1 * width, y1 * height
-        w, h = (x2 - x1) * width, (y2 - y1) * height
-        annotations.append({
-            "id": annotation_id,
-            "image_id": image_id,
-            "category_id": 1,
-            # Округление убирает артефакты двоичной арифметики вроде
-            # 49.99999999999999 из переносимого JSON.
-            "bbox": [round(v, 6) for v in (x, y, w, h)],
-            "area": round(w * h, 6),
-            "iscrowd": 0,
-        })
-        annotation_id += 1
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            x, y = x1 * width, y1 * height
+            w, h = (x2 - x1) * width, (y2 - y1) * height
+            annotations.append({
+                "id": annotation_id,
+                "image_id": image_id,
+                "category_id": 1,
+                # Округление убирает артефакты двоичной арифметики вроде
+                # 49.99999999999999 из переносимого JSON.
+                "bbox": [round(v, 6) for v in (x, y, w, h)],
+                "area": round(w * h, 6),
+                "iscrowd": 0,
+            })
+            annotation_id += 1
 
     return {
         "info": {

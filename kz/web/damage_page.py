@@ -13,7 +13,8 @@
 журнал, который нельзя восстановить пересчётом.
 
 Теперь порядок такой: **обвёл → появилось окно с выбором → подтвердил**.
-Рамку можно перерисовать сколько угодно, пока не нажато «сохранить».
+Рамку можно перерисовать сколько угодно, а если повреждений несколько —
+добавить несколько рамок и сохранить их одной меткой кадра.
 
 ЧТО ВАЖНО ДЛЯ СКОРОСТИ. Триста кадров — это часа полтора, и разница между
 удобным и неудобным интерфейсом решает, будет разметка сделана или нет:
@@ -35,7 +36,7 @@ from __future__ import annotations
 import html
 import json
 
-from kz.report.photo_labels import LABELS
+from kz.report.photo_labels import LABELS, MAX_BOXES_PER_FRAME
 
 TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
@@ -79,6 +80,10 @@ TEMPLATE = """<!doctype html>
   #box { position: absolute; border: 2px solid var(--bad); border-radius: 2px;
          background: rgba(255,95,86,.12); pointer-events: none; display: none;
          box-shadow: 0 0 0 9999px rgba(0,0,0,.35); }
+  .saved-box { position: absolute; border: 2px solid var(--warn);
+               border-radius: 2px; background: rgba(251,191,36,.10);
+               color: #111; font: 700 11px/18px system-ui; text-align: center;
+               pointer-events: none; min-width: 18px; min-height: 18px; }
 
   #meta { color: var(--muted); font-size: 13px; text-align: center;
           min-height: 20px; }
@@ -141,6 +146,7 @@ TEMPLATE = """<!doctype html>
 <main>
   <div id="stage">
     <img id="shot" alt="фотография объявления">
+    <div id="saved-boxes"></div>
     <div id="box"></div>
   </div>
 
@@ -152,6 +158,8 @@ TEMPLATE = """<!doctype html>
     <button id="b-wreck">авария<kbd>W</kbd></button>
     <button id="b-parts">разобрана<kbd>P</kbd></button>
     <button id="b-unclear">не понять<kbd>U</kbd></button>
+    <button id="b-pop-box" disabled>убрать последнюю рамку</button>
+    <span class="sub">рамок: <b id="boxcount">0</b></span>
     <span class="sub">или обведите удар мышью</span>
   </div>
 
@@ -167,10 +175,10 @@ TEMPLATE = """<!doctype html>
     <b>рамка или авария</b> — по простому правилу: можно обвести одно
     место, значит «повреждение»; разрушен весь перёд или зад и обводить
     нечего, значит «авария».<br>
-    <b>рамка</b> — обводи самое явное место, а не всё подряд. Пропущенный
-    кусок ничего не портит: рамка нужна как чистый пример повреждения.
-    А рамка наполовину из асфальта и неба портит. Рамка сохраняется при
-    любой метке — обвёл ржавчину и поставил «целая», область запишется.
+    <b>рамки</b> — отдельные удары обводи отдельно. После первой нажми
+    «добавить ещё рамку», обведи следующую и только затем сохрани кадр.
+    Не захватывай асфальт и небо. Рамки сохраняются при любой метке —
+    обвёл ржавчину и поставил «целая», области тоже запишутся.
   </p>
 
   <div id="ask">
@@ -188,6 +196,7 @@ TEMPLATE = """<!doctype html>
       <button id="a-intact">целая<kbd>I</kbd></button>
     </div>
     <div class="row">
+      <button id="a-add">добавить ещё рамку</button>
       <button id="a-save" class="primary">сохранить<kbd>Enter</kbd></button>
       <button id="a-cancel">отменить рамку<kbd>Esc</kbd></button>
     </div>
@@ -204,24 +213,30 @@ TEMPLATE = """<!doctype html>
 <script>
 const QUEUE = __QUEUE__;
 const DONE = __DONE__;
+const MAX_BOXES = __MAX_BOXES__;
 // Просмотр уже размеченного — второй режим той же страницы. Отдельной
 // страницы не делаем: смысл в том, чтобы поправить метку не выходя из
 // разметки, а переход туда-обратно сбивал бы темп.
 let view = QUEUE, mode = 'queue';
-let i = 0, box = null, drawing = null, choice = null;
+let i = 0, box = null, boxes = [], drawing = null, choice = null;
 
 const img = document.getElementById('shot');
 const boxEl = document.getElementById('box');
+const savedBoxesEl = document.getElementById('saved-boxes');
 const ask = document.getElementById('ask');
 const hint = document.getElementById('hint');
 
 function show() {
   const it = view[i];
   if (!it) { hint.textContent = 'Очередь закончилась.'; return; }
-  img.src = '/photos/' + it.path.replace(/^data\\/photos\\//, '');
   box = null; choice = null;
+  boxes = Array.isArray(it.boxes) ? it.boxes.map(b => b.map(Number)) : [];
+  if (!boxes.length && it.x1 !== undefined && it.x1 !== null && it.x1 !== '')
+    boxes = [[+it.x1, +it.y1, +it.x2, +it.y2]];
   boxEl.style.display = 'none';
+  renderBoxes();
   closeAsk();
+  img.src = '/photos/' + it.path.replace(/^data\\/photos\\//, '');
   document.getElementById('comment').value = it.comment || '';
   document.getElementById('pos').textContent = (i + 1) + ' / ' + view.length;
   document.getElementById('bar').style.width =
@@ -237,8 +252,6 @@ function show() {
       + ' — можно поправить, запись обновится на месте'
     : '';
   hint.innerHTML = '';
-  if (it.x1 !== undefined && it.x1 !== null && it.x1 !== '')
-    drawBox(+it.x1, +it.y1, +it.x2, +it.y2);
 }
 
 function rel(e) {
@@ -247,16 +260,45 @@ function rel(e) {
            y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
 }
 
-function drawBox(x1, y1, x2, y2) {
+function placeBox(el, coords) {
+  const [x1, y1, x2, y2] = coords;
   const r = img.getBoundingClientRect();
   const o = document.getElementById('stage').getBoundingClientRect();
-  boxEl.style.left = (r.left - o.left + x1 * r.width) + 'px';
-  boxEl.style.top = (r.top - o.top + y1 * r.height) + 'px';
-  boxEl.style.width = ((x2 - x1) * r.width) + 'px';
-  boxEl.style.height = ((y2 - y1) * r.height) + 'px';
+  el.style.left = (r.left - o.left + x1 * r.width) + 'px';
+  el.style.top = (r.top - o.top + y1 * r.height) + 'px';
+  el.style.width = ((x2 - x1) * r.width) + 'px';
+  el.style.height = ((y2 - y1) * r.height) + 'px';
+}
+
+function updateBoxCount() {
+  document.getElementById('boxcount').textContent = boxes.length;
+  document.getElementById('b-pop-box').disabled = boxes.length === 0;
+}
+
+function renderBoxes() {
+  savedBoxesEl.innerHTML = '';
+  boxes.forEach((coords, n) => {
+    const el = document.createElement('div');
+    el.className = 'saved-box'; el.textContent = n + 1;
+    placeBox(el, coords); savedBoxesEl.appendChild(el);
+  });
+  updateBoxCount();
+}
+
+function drawBox(x1, y1, x2, y2) {
+  placeBox(boxEl, [x1, y1, x2, y2]);
   boxEl.style.display = 'block';
   box = [x1, y1, x2, y2];
 }
+
+img.addEventListener('load', () => {
+  renderBoxes();
+  if (box) placeBox(boxEl, box);
+});
+window.addEventListener('resize', () => {
+  renderBoxes();
+  if (box) placeBox(boxEl, box);
+});
 
 function openAsk(pick) {
   choice = pick || 'damaged';
@@ -271,7 +313,14 @@ function paintChoice() {
     document.getElementById('a-' + k).classList.toggle('sel', choice === k);
 }
 
-img.addEventListener('mousedown', e => { e.preventDefault(); drawing = rel(e); });
+img.addEventListener('mousedown', e => {
+  e.preventDefault();
+  if (boxes.length >= MAX_BOXES) {
+    hint.innerHTML = '<span class="warn">На одном кадре максимум ' + MAX_BOXES + ' рамок.</span>';
+    return;
+  }
+  drawing = rel(e);
+});
 window.addEventListener('mousemove', e => {
   if (!drawing) return;
   const p = rel(e);
@@ -294,8 +343,10 @@ async function commit(label, useBox) {
   // QUEUE[i] в режиме правки указывал на ДРУГОЙ кадр и мог испортить
   // ручной журнал при попытке исправить старую метку.
   const it = view[i];
+  const finalBoxes = boxes.map(b => b.slice());
+  if (useBox && box) finalBoxes.push(box.slice());
   const body = { ad_id: it.ad_id, position: it.position, path: it.path,
-                 label: label, box: useBox ? box : null,
+                 label: label, boxes: finalBoxes,
                  comment: document.getElementById('comment').value };
   const r = await fetch('/damage/label', { method: 'POST',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -304,14 +355,18 @@ async function commit(label, useBox) {
     hint.innerHTML = '<span class="warn">' + (j.error || 'ошибка') + '</span>';
     return;
   }
-  it.label = label; it.comment = body.comment;
+  boxes = finalBoxes;
+  it.label = label; it.comment = body.comment; it.boxes = finalBoxes;
   // держим DONE в согласии с журналом, иначе просмотр покажет старую метку
   const k = DONE.findIndex(r => r.ad_id === it.ad_id && r.position === it.position);
   const rec = { ad_id: it.ad_id, position: it.position, path: it.path,
-                label: label, comment: body.comment };
-  if (useBox && box) { rec.x1 = box[0]; rec.y1 = box[1]; rec.x2 = box[2]; rec.y2 = box[3]; }
+                label: label, comment: body.comment, boxes: finalBoxes };
+  for (const target of [it, rec]) {
+    for (const key of ['x1', 'y1', 'x2', 'y2']) delete target[key];
+    if (finalBoxes.length)
+      [target.x1, target.y1, target.x2, target.y2] = finalBoxes[0];
+  }
   if (k >= 0) DONE[k] = rec; else DONE.push(rec);
-  if (useBox && box) { it.x1 = box[0]; it.y1 = box[1]; it.x2 = box[2]; it.y2 = box[3]; }
   for (const k of ['damaged', 'wreck', 'parts', 'intact', 'unclear'])
     document.getElementById('c-' + k).textContent = j.stats[k];
   hint.innerHTML = '<span class="ok">сохранено</span>';
@@ -323,6 +378,19 @@ async function commit(label, useBox) {
 // отбрасывали для всего кроме «повреждения», и обведённая ржавчина
 // пропадала молча.
 document.getElementById('a-save').onclick = () => commit(choice, !!box);
+document.getElementById('a-add').onclick = () => {
+  if (!box) {
+    hint.innerHTML = '<span class="warn">Сначала нарисуйте рамку.</span>';
+    return;
+  }
+  if (boxes.length >= MAX_BOXES) {
+    hint.innerHTML = '<span class="warn">На одном кадре максимум ' + MAX_BOXES + ' рамок.</span>';
+    return;
+  }
+  boxes.push(box.slice()); box = null; boxEl.style.display = 'none';
+  renderBoxes(); closeAsk();
+  hint.innerHTML = '<span class="ok">Рамка добавлена. Обведите следующую или сохраните метку.</span>';
+};
 document.getElementById('a-cancel').onclick = () => {
   box = null; boxEl.style.display = 'none'; closeAsk(); hint.textContent = '';
 };
@@ -336,6 +404,11 @@ document.getElementById('b-intact').onclick = () => commit('intact', false);
 document.getElementById('b-parts').onclick = () => commit('parts', false);
 document.getElementById('b-unclear').onclick = () => commit('unclear', false);
 document.getElementById('b-wreck').onclick = () => commit('wreck', false);
+document.getElementById('b-pop-box').onclick = () => {
+  if (!boxes.length) return;
+  boxes.pop(); renderBoxes();
+  hint.innerHTML = '<span class="warn">Последняя рамка убрана. Сохраните метку, чтобы записать правку.</span>';
+};
 document.getElementById('a-wreck').onclick = () => { choice = 'wreck'; paintChoice(); };
 document.getElementById('b-prev').onclick = () => { i = Math.max(0, i - 1); show(); };
 document.getElementById('b-next').onclick = () => {
@@ -359,6 +432,7 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'Enter' && open) { document.getElementById('a-save').click(); }
   else if (k === 'd' || k === 'в') {
     if (open) { choice = 'damaged'; paintChoice(); }
+    else if (boxes.length) openAsk('damaged');
     else hint.innerHTML = '<span class="warn">Сначала обведите повреждение мышью.</span>';
   }
   else if (k === 'w' || k === 'ц') { open ? (choice = 'wreck', paintChoice())
@@ -414,6 +488,7 @@ def page(queue_rows: list[dict], counts: dict,
     out = TEMPLATE.replace("__QUEUE__", json.dumps(queue_rows, ensure_ascii=False))
     out = out.replace("__DONE__",
                       json.dumps(done_rows or [], ensure_ascii=False))
+    out = out.replace("__MAX_BOXES__", str(MAX_BOXES_PER_FRAME))
     # Перечень берётся из LABELS, а не списком здесь: захардкоженный кортеж
     # уже разошёлся с метками — «parts» добавили, сюда вписать забыли, и
     # счётчик разобранных на свежей странице показывал ноль.

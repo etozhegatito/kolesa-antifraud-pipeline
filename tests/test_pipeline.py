@@ -3256,7 +3256,7 @@ def test_damage_box_is_stored_relative_not_in_pixels():
     мимо повреждений."""
     import inspect
     from kz.report import photo_labels
-    src = inspect.getsource(photo_labels.save_label)
+    src = inspect.getsource(photo_labels._normalise_boxes)
     assert "0 <= x1 < x2 <= 1" in src, "рамка обязана быть в долях 0..1"
 
 
@@ -3319,6 +3319,37 @@ def test_photo_labels_export_to_detector_ready_coco(tmp_path):
     assert len(coco["images"]) == 2
     assert len(coco["annotations"]) == 1
     assert coco["annotations"][0]["bbox"] == [20.0, 20.0, 100.0, 50.0]
+
+
+def test_multiple_damage_boxes_round_trip_and_export_to_coco(tmp_path, monkeypatch):
+    """Один кадр с двумя ударами — одно решение кадра и две COCO-аннотации."""
+    from PIL import Image
+    from kz.ml.photo_dataset import build_coco
+    from kz.report import photo_labels as pl
+
+    labels = tmp_path / "labels.csv"
+    image = tmp_path / "two-dents.jpg"
+    Image.new("RGB", (200, 100), "white").save(image)
+    monkeypatch.setattr(pl, "LABELS_CSV", str(labels))
+    monkeypatch.setattr(pl, "LABELS_PREV", str(tmp_path / "labels.prev.csv"))
+    monkeypatch.setattr(pl, "_snapshot_done", False)
+
+    pl.save_label("a", 1, str(image), "damaged", boxes=[
+        (0.1, 0.2, 0.3, 0.4),
+        (0.5, 0.1, 0.9, 0.6),
+    ])
+    header, rows = pl.read_journal()
+    assert "boxes_json" in header
+    assert len(pl.boxes_from_row(rows[0])) == 2
+    assert len(pl.labelled_frames()[0]["boxes"]) == 2
+    assert pl.stats()["damage_boxes"] == 2
+
+    coco = build_coco(rows, "train")
+    assert len(coco["images"]) == 1
+    assert [a["bbox"] for a in coco["annotations"]] == [
+        [20.0, 20.0, 40.0, 20.0],
+        [100.0, 10.0, 80.0, 50.0],
+    ]
 
 
 def test_damage_label_rejects_what_would_poison_training(tmp_path, monkeypatch):
@@ -3462,6 +3493,32 @@ def test_damage_relabel_saves_the_visible_frame_not_queue_index():
                  src.index("document.getElementById('a-save')")]
     assert "const it = view[i]" in commit
     assert "const it = QUEUE[i]" not in commit
+
+
+def test_damage_ui_collects_multiple_boxes_before_one_commit():
+    """Несколько рамок отправляются одним списком, а не перетирают кадр."""
+    from pathlib import Path
+    from kz.web import damage_page
+
+    src = Path("kz/web/damage_page.py").read_text(encoding="utf-8")
+    assert 'id="a-add"' in src
+    assert "boxes.push(box.slice())" in src
+    assert "label: label, boxes: finalBoxes" in src
+    html = damage_page.page([], {}, [])
+    assert f"const MAX_BOXES = {damage_page.MAX_BOXES_PER_FRAME};" in html
+    assert "__MAX_BOXES__" not in html
+
+
+def test_damage_endpoint_ignores_client_supplied_photo_path():
+    """Путь берётся с сервера, а сохранённый кадр удаляется из кэша."""
+    import importlib
+    import inspect
+
+    web = importlib.import_module("kz.web.app")
+    src = inspect.getsource(web.damage_label)
+    assert 'str(provenance["path"])' in src
+    assert 'str(data["path"])' not in src
+    assert "_damage_queue = [r for r in _damage_queue" in src
 
 
 def test_verdict_counter_shows_the_journal_not_just_the_queue():

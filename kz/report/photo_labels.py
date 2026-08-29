@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -65,7 +66,7 @@ LABELS_PREV = str(Path(_DIR) / "photo_labels.prev.csv")
 
 HEADER = ["ad_id", "position", "path", "label", "x1", "y1", "x2", "y2",
           "comment", "labeled_at", "selection_source", "dataset_split",
-          "annotator", "label_version"]
+          "annotator", "label_version", "boxes_json"]
 
 # Новые объявления получают split детерминированно по ad_id. Старые метки
 # НЕЛЬЗЯ задним числом объявить holdout: они уже участвовали в экспериментах.
@@ -73,7 +74,8 @@ HEADER = ["ad_id", "position", "path", "label", "x1", "y1", "x2", "y2",
 # случайно выбранных объявлений.
 AUDIT_PERCENT = 20
 AUDIT_PER_QUEUE = 60
-LABEL_VERSION = "2"
+LABEL_VERSION = "3"
+MAX_BOXES_PER_FRAME = 20
 
 
 def split_for_ad(ad_id: str) -> str:
@@ -330,18 +332,61 @@ def write_journal(header: list[str], rows: list[dict]) -> None:
     os.replace(tmp, LABELS_CSV)
 
 
+def _normalise_boxes(boxes) -> list[tuple[float, float, float, float]]:
+    """Проверить список относительных рамок и вернуть числа 0..1."""
+    if boxes is None:
+        return []
+    if not isinstance(boxes, (list, tuple)):
+        raise ValueError("boxes должен быть списком рамок")
+    if len(boxes) > MAX_BOXES_PER_FRAME:
+        raise ValueError(f"слишком много рамок: максимум {MAX_BOXES_PER_FRAME}")
+
+    out = []
+    for raw in boxes:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+            raise ValueError(f"рамка должна содержать четыре координаты: {raw!r}")
+        try:
+            x1, y1, x2, y2 = (float(v) for v in raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"координаты рамки должны быть числами: {raw!r}") from e
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError(f"рамка вне картинки или вывернута: {raw}")
+        out.append((x1, y1, x2, y2))
+    return out
+
+
+def boxes_from_row(row: dict) -> list[tuple[float, float, float, float]]:
+    """Все рамки строки; старые x1..y2 читаются как список из одной рамки."""
+    payload = str(row.get("boxes_json") or "").strip()
+    if payload:
+        try:
+            return _normalise_boxes(json.loads(payload))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"некорректный boxes_json у {row.get('path')}: {e}") from e
+    if row.get("x1") not in (None, ""):
+        return _normalise_boxes([[row.get(k) for k in ("x1", "y1", "x2", "y2")]])
+    return []
+
+
 def save_label(ad_id: str, position, path: str, label: str,
-               box=None, comment: str = "", selection_source: str = "manual",
+               box=None, boxes=None, comment: str = "",
+               selection_source: str = "manual",
                dataset_split: str = "train", annotator: str | None = None) -> None:
     """Записать метку кадра. Повторная разметка ОБНОВЛЯЕТ строку, не плодит.
 
-    box — (x1, y1, x2, y2) в долях от размера картинки, либо None для
-    кадров без повреждения.
+    ``boxes`` — список (x1, y1, x2, y2) в долях от картинки. ``box``
+    оставлен для совместимости со старыми вызовами и означает одну рамку.
+    В CSV все рамки лежат в ``boxes_json``; x1..y2 дублируют первую, чтобы
+    старые исследовательские скрипты продолжили работать.
     """
     if label not in LABELS:
         raise ValueError(f"неизвестная метка: {label!r}")
-    if label == "damaged" and not box:
-        raise ValueError("для «damaged» нужна рамка")
+    if box is not None and boxes is not None:
+        raise ValueError("передайте box или boxes, но не оба сразу")
+    frame_boxes = _normalise_boxes(boxes if boxes is not None
+                                   else ([box] if box is not None else []))
+    if label == "damaged" and not frame_boxes:
+        raise ValueError("для «damaged» нужна хотя бы одна рамка")
     # Рамка РАЗРЕШЕНА при любой метке, обязательна только для «damaged».
     #
     # Запрещать было ошибкой. Разметчик обводил ржавчину и ставил «целая» —
@@ -352,11 +397,6 @@ def save_label(ad_id: str, position, path: str, label: str,
     # делать. Ржавчину мы и так детектим (AUC 0,881 zero-shot), но области
     # могут пригодиться: например, чтобы проверить, смотрит ли детектор
     # ржавчины туда же, куда человек.
-    if box:
-        x1, y1, x2, y2 = (float(v) for v in box)
-        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
-            raise ValueError(f"рамка вне картинки или вывернута: {box}")
-
     _snapshot_once()
     header, rows = read_journal()
     # Миграция только при следующей осознанной записи: существующий журнал
@@ -365,19 +405,23 @@ def save_label(ad_id: str, position, path: str, label: str,
     key = (str(ad_id), str(position))
     if dataset_split not in {"train", "audit"}:
         raise ValueError(f"неизвестный dataset_split: {dataset_split!r}")
+    first = frame_boxes[0] if frame_boxes else None
     row = {
         "ad_id": str(ad_id), "position": str(position), "path": path,
         "label": label,
-        "x1": f"{box[0]:.4f}" if box else "",
-        "y1": f"{box[1]:.4f}" if box else "",
-        "x2": f"{box[2]:.4f}" if box else "",
-        "y2": f"{box[3]:.4f}" if box else "",
+        "x1": f"{first[0]:.4f}" if first else "",
+        "y1": f"{first[1]:.4f}" if first else "",
+        "x2": f"{first[2]:.4f}" if first else "",
+        "y2": f"{first[3]:.4f}" if first else "",
         "comment": comment,
         "labeled_at": datetime.now().isoformat(timespec="seconds"),
         "selection_source": selection_source,
         "dataset_split": dataset_split,
         "annotator": annotator or os.environ.get("KZ_ANNOTATOR", "sanzhar"),
         "label_version": LABEL_VERSION,
+        "boxes_json": (json.dumps([[round(v, 4) for v in b] for b in frame_boxes],
+                                  separators=(",", ":"))
+                       if frame_boxes else ""),
     }
     for i, r in enumerate(rows):
         if (r.get("ad_id"), str(r.get("position"))) == key:
@@ -407,8 +451,10 @@ def labelled_frames() -> list[dict]:
                "dataset_split": r.get("dataset_split", "train") or "train",
                "annotator": r.get("annotator", ""),
                "label_version": r.get("label_version", "1") or "1"}
-        if r.get("x1"):
-            rec |= {k: float(r[k]) for k in ("x1", "y1", "x2", "y2")}
+        boxes = boxes_from_row(r)
+        if boxes:
+            rec["boxes"] = [list(b) for b in boxes]
+            rec |= dict(zip(("x1", "y1", "x2", "y2"), boxes[0]))
         out.append(rec)
     return out
 
@@ -421,11 +467,14 @@ def stats() -> dict:
     """
     _, rows = read_journal()
     out = dict.fromkeys(LABELS, 0)
+    out["damage_boxes"] = 0
     ads = {label: set() for label in LABELS}
     for r in rows:
         if r.get("label") in out:
             out[r["label"]] += 1
             ads[r["label"]].add(str(r.get("ad_id", "")))
+            if r["label"] == "damaged":
+                out["damage_boxes"] += len(boxes_from_row(r))
     out["total"] = len(rows)
     out["ads_total"] = len(set().union(*ads.values()))
     for label in LABELS:
@@ -446,6 +495,7 @@ def main():
         need = 200 - s["positive_ads"]
         print(f"\nНезависимых объявлений damaged/wreck: {s['positive_ads']}. "
               "Это главный размер выборки для grouped CV.")
+        print(f"Рамок локальных повреждений: {s['damage_boxes']}")
         print(f"Новый случайный audit holdout: {s['audit_ads']} объявлений, "
               f"{s['audit_frames']} кадров (legacy-метки туда не переносятся).")
         print("Ориентир для устойчивого локального замера — около 200: "

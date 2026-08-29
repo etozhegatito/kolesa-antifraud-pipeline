@@ -206,6 +206,7 @@ def damage_page():
 async def damage_label(request: Request):
     """Сохранить метку кадра. Валидация на сервере, а не в браузере:
     страница может прислать что угодно, а журнал портить нельзя."""
+    global _damage_queue
     if PUBLIC_DEMO:
         return JSONResponse({"error": "not found"}, status_code=404)
     from kz.report.photo_labels import labelled_frames, save_label, stats
@@ -222,12 +223,18 @@ async def damage_label(request: Request):
             raise ValueError(f"кадр не из очереди: {key}")
         provenance = known[key]
         save_label(str(data["ad_id"]), int(data["position"]),
-                   str(data["path"]), str(data.get("label", "")),
-                   box=data.get("box"), comment=str(data.get("comment") or ""),
+                   str(provenance["path"]), str(data.get("label", "")),
+                   boxes=data.get("boxes"), comment=str(data.get("comment") or ""),
                    selection_source=str(provenance.get("selection_source")
                                         or "legacy"),
                    dataset_split=str(provenance.get("dataset_split") or "train"),
                    annotator=str(provenance.get("annotator") or "sanzhar"))
+        # Очередь кэшируется из-за тяжёлого чтения CLIP и БД. Убираем кадр
+        # сразу после записи, иначе обновление страницы снова предложит уже
+        # размеченную фотографию до перезапуска процесса.
+        if _damage_queue is not None:
+            _damage_queue = [r for r in _damage_queue
+                             if (r["ad_id"], r["position"]) != key]
     except Exception as e:                      # noqa: BLE001 — ответ клиенту
         return JSONResponse({"error": _html.escape(str(e))}, status_code=400)
     return JSONResponse({"ok": True, "stats": stats()})
