@@ -122,7 +122,7 @@ def score_photos(paths: list[str], log=print,
     нужны, а пересчёт стоит десять минут.
     """
     import torch
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     model, preprocess, tokenizer, device = _load_model()
     log(f"  устройство: {device}, картинок: {len(paths)}")
@@ -136,7 +136,8 @@ def score_photos(paths: list[str], log=print,
     with torch.no_grad():
         for i in range(0, len(paths), BATCH):
             chunk = paths[i:i + BATCH]
-            batch = torch.stack([preprocess(Image.open(p).convert("RGB"))
+            batch = torch.stack([preprocess(ImageOps.exif_transpose(
+                                 Image.open(p)).convert("RGB"))
                                  for p in chunk]).to(device)
             feats = model.encode_image(batch)
             feats = feats / feats.norm(dim=-1, keepdim=True)
@@ -463,6 +464,9 @@ def build_damage_rank(log=print) -> pd.DataFrame:
         raise RuntimeError(f"журнал разметки пуст: {LABELS_CSV}")
     lab = lab.drop_duplicates(["ad_id", "position"], keep="last")
     lab["position"] = lab.position.astype(int)
+    if "dataset_split" in lab:
+        split = lab.dataset_split.fillna("").replace("", "train")
+        lab = lab[split != "audit"]
 
     idx, emb = load_embeddings()
     idx = idx.reset_index(drop=True)

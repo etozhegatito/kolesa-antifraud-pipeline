@@ -19,8 +19,9 @@
 
 ПРО РАЗМЕРНОСТЬ. 2048 признаков на ~2700 машин — верный способ переобучиться:
 признаков почти столько же, сколько наблюдений. Поэтому эмбеддинг сжимается
-методом главных компонент (PCA) до N_COMPONENTS. PCA не смотрит на цену,
-только на сами картинки, поэтому утечки цели здесь нет.
+методом главных компонент (PCA) до N_COMPONENTS. PCA не смотрит на цену, но
+это не разрешает fit до CV: распределение test-фотографий тоже информация.
+`photo_ablation` обучает отдельную PCA только на train каждого фолда.
 
 Запуск: python -m kz.ml.photo_features        посчитать и сохранить
         python -m kz.ml.photo_features --stats  что уже посчитано
@@ -74,9 +75,9 @@ def quality_metrics(path: str) -> dict:
     яркости, поэтому дисперсия мала. Классический приём, работает без
     обучения и объясним человеку.
     """
-    from PIL import Image, ImageFilter, ImageStat
+    from PIL import Image, ImageFilter, ImageOps, ImageStat
 
-    img = Image.open(path).convert("L")
+    img = ImageOps.exif_transpose(Image.open(path)).convert("L")
     lap = img.filter(ImageFilter.FIND_EDGES)
     st_lap, st_img = ImageStat.Stat(lap), ImageStat.Stat(img)
     return {
@@ -112,7 +113,7 @@ def _model_and_transform():
 def embed_paths(paths: list[str], log=print) -> np.ndarray:
     """Векторы для списка картинок, батчами."""
     import torch
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     net, tf, device = _model_and_transform()
     log(f"  устройство: {device}, картинок: {len(paths)}")
@@ -120,7 +121,10 @@ def embed_paths(paths: list[str], log=print) -> np.ndarray:
     with torch.no_grad():
         for i in range(0, len(paths), BATCH):
             chunk = paths[i:i + BATCH]
-            batch = torch.stack([tf(Image.open(p).convert("RGB")) for p in chunk])
+            batch = torch.stack([
+                tf(ImageOps.exif_transpose(Image.open(p)).convert("RGB"))
+                for p in chunk
+            ])
             out.append(net(batch.to(device)).cpu().numpy())
             if (i // BATCH) % 10 == 0:
                 log(f"  {min(i + BATCH, len(paths))}/{len(paths)}")
@@ -209,8 +213,9 @@ def reduce_embeddings(emb: np.ndarray, n_components: int = N_COMPONENTS,
     """Сжать эмбеддинг до n_components главных компонент.
 
     Без сжатия признаков было бы почти столько же, сколько машин, и модель
-    выучила бы шум. PCA работает только с картинками и не видит цену,
-    поэтому утечки цели не создаёт.
+    выучила бы шум. Это низкоуровневый helper для fit на уже разрешённом
+    train-наборе. Вызывать его на всей выборке до CV нельзя: target leakage
+    не будет, но test distribution попадёт в преобразование.
     """
     from sklearn.decomposition import PCA
 

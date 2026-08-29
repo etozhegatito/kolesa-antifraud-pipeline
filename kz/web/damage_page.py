@@ -290,7 +290,10 @@ window.addEventListener('mouseup', () => {
 });
 
 async function commit(label, useBox) {
-  const it = QUEUE[i];
+  // `view` бывает очередью или отфильтрованным списком уже размеченного.
+  // QUEUE[i] в режиме правки указывал на ДРУГОЙ кадр и мог испортить
+  // ручной журнал при попытке исправить старую метку.
+  const it = view[i];
   const body = { ad_id: it.ad_id, position: it.position, path: it.path,
                  label: label, box: useBox ? box : null,
                  comment: document.getElementById('comment').value };

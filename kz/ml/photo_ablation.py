@@ -27,6 +27,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from catboost import Pool
+from sklearn.decomposition import PCA
 from sklearn.model_selection import GroupKFold
 
 from kz.ml import photo_features
@@ -59,6 +60,43 @@ def cv_mape(df: pd.DataFrame, features: list[str], cats: list[str]) -> dict:
             "r2": r["r2_log"]}
 
 
+def cv_mape_with_embeddings(df: pd.DataFrame, emb: np.ndarray,
+                            base_features: list[str],
+                            cats: list[str]) -> dict:
+    """Grouped CV с PCA, обученной только внутри train-фолда.
+
+    PCA не использует цену, но это всё равно обучаемое преобразование:
+    если сделать ``fit_transform`` до CV, направления компонент увидят
+    распределение test-фотографий. Это feature leakage. Поэтому каждый
+    фолд получает собственную PCA, fit только на ``tr``.
+    """
+    groups = duplicate_groups(df)
+    n_splits = min(N_SPLITS, groups.nunique())
+    y = df["log_price"].to_numpy()
+    oof = np.full(len(df), np.nan)
+
+    for tr, te in GroupKFold(n_splits=n_splits).split(df, y, groups):
+        n_components = min(photo_features.N_COMPONENTS, len(tr), emb.shape[1])
+        pca = PCA(n_components=n_components, random_state=42)
+        train_pc = pca.fit_transform(emb[tr])
+        test_pc = pca.transform(emb[te])
+        ecols = [f"img_pc{i}" for i in range(n_components)]
+
+        train_x = df.iloc[tr][base_features].reset_index(drop=True).copy()
+        test_x = df.iloc[te][base_features].reset_index(drop=True).copy()
+        train_x[ecols] = train_pc
+        test_x[ecols] = test_pc
+
+        model = new_model()
+        model.fit(Pool(train_x, y[tr], cat_features=cats))
+        oof[te] = model.predict(test_x)
+
+    r = regression_metrics(y, oof)
+    ape = np.abs(np.exp(oof) - np.exp(y)) / np.exp(y)
+    return {"mape": r["mape_pct"], "median": float(np.median(ape) * 100),
+            "r2": r["r2_log"]}
+
+
 def main():
     df = prepare_training_data(load())
     quality, emb = photo_features.load()
@@ -74,19 +112,21 @@ def main():
         print("  python -m kz.collect.photo_fetch --limit 1200")
 
     qcols = [c for c in quality.columns if c != "ad_id"]
-    reduced = photo_features.reduce_embeddings(emb)
-    ecols = [f"img_pc{i}" for i in range(reduced.shape[1])]
-    df[ecols] = reduced
-    print(f"Эмбеддинг сжат до {reduced.shape[1]} компонент\n")
+    n_components = min(photo_features.N_COMPONENTS, len(df), emb.shape[1])
+    print(f"Эмбеддинг сжимается до {n_components} компонент ВНУТРИ каждого "
+          "train-фолда\n")
 
     runs = [
         ("только табличные признаки", FEATURES, CAT_FEATURES),
         ("+ качество снимка", FEATURES + qcols, CAT_FEATURES),
-        ("+ эмбеддинг картинки", FEATURES + qcols + ecols, CAT_FEATURES),
+        ("+ эмбеддинг картинки", None, CAT_FEATURES),
     ]
     base = None
     for label, feats, cats in runs:
-        r = cv_mape(df, feats, cats)
+        if feats is None:
+            r = cv_mape_with_embeddings(df, emb, FEATURES + qcols, cats)
+        else:
+            r = cv_mape(df, feats, cats)
         delta = "" if base is None else f"   {r['mape'] - base:+.2f} п.п."
         base = r["mape"] if base is None else base
         print(f"  {label:28} MAPE={r['mape']:5.2f}%  медиана={r['median']:5.2f}%"

@@ -66,7 +66,7 @@ def tile_boxes(w: int, h: int, grid: int = GRID,
 def score_tiles(paths: list[str], log=print) -> pd.DataFrame:
     """Оценки CLIP по плиткам каждого кадра: максимум и среднее."""
     import torch
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     from kz.ml.photo_clip import PROMPT_PAIRS, _load_model, _text_vectors
 
@@ -80,7 +80,7 @@ def score_tiles(paths: list[str], log=print) -> pd.DataFrame:
     rows = []
     with torch.no_grad():
         for n, path in enumerate(paths):
-            img = Image.open(path).convert("RGB")
+            img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
             crops = [img.crop(b) for b in tile_boxes(*img.size)]
             per_tile = {name: [] for name in axes}
             for i in range(0, len(crops), BATCH):

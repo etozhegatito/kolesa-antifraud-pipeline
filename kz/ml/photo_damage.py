@@ -20,10 +20,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -41,6 +43,59 @@ POSITIVE = {"damaged", "wreck"}
 USED = POSITIVE | {"intact"}
 
 
+def groups_from_hashes(ad_ids, hashes) -> np.ndarray:
+    """Компоненты объявлений, связанных одинаковой локальной фотографией.
+
+    Одной группировки по ``ad_id`` мало: продавец может переопубликовать ту
+    же машину под новым номером объявления. Если одинаковый кадр окажется в
+    train и test, CV измерит запоминание картинки. Объединяем такие ad_id
+    консервативно — только по ТОЧНО равному perceptual hash.
+    """
+    ads = np.asarray([str(x) for x in ad_ids])
+    hs = np.asarray([str(x) if x is not None else "" for x in hashes])
+    parent = {ad: ad for ad in np.unique(ads)}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    first_by_hash = {}
+    for ad, phash in zip(ads, hs, strict=True):
+        if not phash:
+            continue
+        if phash in first_by_hash:
+            union(ad, first_by_hash[phash])
+        else:
+            first_by_hash[phash] = ad
+    return np.asarray([find(ad) for ad in ads])
+
+
+def visual_groups(d: pd.DataFrame) -> np.ndarray:
+    """Группы CV: ad_id плюс точные pHash-дубли между объявлениями."""
+    import imagehash
+    from PIL import Image, ImageOps
+
+    hashes = []
+    cache = {}
+    for raw in d.get("path", pd.Series("", index=d.index)).fillna(""):
+        path = str(raw)
+        if path not in cache:
+            try:
+                with Image.open(Path(path)) as img:
+                    cache[path] = str(imagehash.phash(ImageOps.exif_transpose(img)))
+            except (OSError, ValueError):
+                cache[path] = ""
+        hashes.append(cache[path])
+    return groups_from_hashes(d.ad_id.to_numpy(), hashes)
+
+
 def load_labelled() -> tuple[pd.DataFrame, np.ndarray]:
     """Метки + индекс сохранённых эмбеддингов + цена/возраст."""
     _, rows = read_journal()
@@ -49,6 +104,9 @@ def load_labelled() -> tuple[pd.DataFrame, np.ndarray]:
         raise RuntimeError("Журнал photo_labels пуст")
     labels = labels.drop_duplicates(["ad_id", "position"], keep="last")
     labels = labels[labels.label.isin(USED)].copy()
+    if "dataset_split" not in labels:
+        labels["dataset_split"] = "train"
+    labels["dataset_split"] = labels.dataset_split.fillna("").replace("", "train")
     labels["ad_id"] = labels.ad_id.astype(str)
     labels["position"] = pd.to_numeric(labels.position, errors="coerce")
     labels = labels.dropna(subset=["position"])
@@ -75,14 +133,17 @@ def load_labelled() -> tuple[pd.DataFrame, np.ndarray]:
 
 
 def _splits(d: pd.DataFrame):
-    positive_ads = d.loc[d.target == 1, "ad_id"].nunique()
-    negative_ads = d.loc[d.target == 0, "ad_id"].nunique()
-    n = min(N_SPLITS, positive_ads, negative_ads)
+    groups = visual_groups(d)
+    independent = pd.DataFrame({"group": groups, "target": d.target}) \
+        .groupby("group").target.max()
+    positive_groups = int(independent.sum())
+    negative_groups = int((independent == 0).sum())
+    n = min(N_SPLITS, positive_groups, negative_groups)
     if n < 2:
-        raise RuntimeError("Нужно хотя бы по два независимых объявления класса")
+        raise RuntimeError("Нужно хотя бы по две независимые визуальные группы класса")
     cv = StratifiedGroupKFold(n_splits=n, shuffle=True, random_state=SEED)
     dummy = np.zeros((len(d), 1))
-    return list(cv.split(dummy, d.target.to_numpy(), d.ad_id.to_numpy()))
+    return list(cv.split(dummy, d.target.to_numpy(), groups))
 
 
 def oof_scores(d: pd.DataFrame, emb: np.ndarray) -> pd.DataFrame:
@@ -145,6 +206,22 @@ def auc_ci(y, score, n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
     return auc, float(lo), float(hi)
 
 
+def average_precision_ci(y, score,
+                         n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
+    """PR-AUC (average precision) и bootstrap CI по объявлениям."""
+    y = np.asarray(y, dtype=int)
+    score = np.asarray(score, dtype=float)
+    value = float(average_precision_score(y, score))
+    rng = np.random.default_rng(SEED)
+    values = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, len(y), len(y))
+        if np.unique(y[idx]).size == 2:
+            values.append(average_precision_score(y[idx], score[idx]))
+    lo, hi = np.percentile(values, [2.5, 97.5])
+    return value, float(lo), float(hi)
+
+
 def auc_delta_ci(y, candidate, baseline,
                  n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
     """Парный bootstrap для AUC(candidate) − AUC(baseline).
@@ -185,15 +262,20 @@ def zero_shot_per_ad(d: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     d, emb = load_labelled()
     d = d[d.price_tenge < CHEAP_EDGE].reset_index(drop=True)
+    audit_ads = d.loc[d.dataset_split == "audit", "ad_id"].nunique()
+    d = d[d.dataset_split != "audit"].reset_index(drop=True)
     n_pos_ads = d.loc[d.target == 1, "ad_id"].nunique()
     n_neg_ads = d.loc[d.target == 0, "ad_id"].nunique()
     print(f"Дешёвый сегмент: {len(d)} кадров, {n_pos_ads} повреждённых и "
           f"{n_neg_ads} целых объявлений")
+    if audit_ads:
+        print(f"Audit holdout: {audit_ads} новых объявлений исключены из "
+              "обучения/CV; отдельная оценка включится после набора классов")
 
     ads = per_ad(oof_scores(d, emb))
     zero = zero_shot_per_ad(d)
     ads = ads.merge(zero[["ad_id", "zero_shot"]], on="ad_id", how="left")
-    print("\nOOF AUC по независимым объявлениям (95% bootstrap CI):")
+    print("\nOOF метрики по независимым объявлениям (95% bootstrap CI):")
     for col, name in [
         ("table", "возраст + цена"),
         ("zero_shot", "CLIP zero-shot"),
@@ -202,7 +284,9 @@ def main() -> None:
     ]:
         work = ads[["target", col]].dropna()
         auc, lo, hi = auc_ci(work.target, work[col])
-        print(f"  {name:27} {auc:.3f}  [{lo:.3f}; {hi:.3f}]")
+        ap, ap_lo, ap_hi = average_precision_ci(work.target, work[col])
+        print(f"  {name:27} ROC-AUC {auc:.3f} [{lo:.3f}; {hi:.3f}]  "
+              f"PR-AUC {ap:.3f} [{ap_lo:.3f}; {ap_hi:.3f}]")
     print("\nПарная разница против возраста+цены:")
     for col, name in [("photo", "CLIP-вектор"),
                       ("combined", "таблица + CLIP")]:

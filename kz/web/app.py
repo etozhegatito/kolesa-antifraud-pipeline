@@ -170,6 +170,8 @@ def _damage_rows():
         _damage_queue = [
             {"ad_id": str(r.ad_id), "position": int(r.position),
              "path": str(r.path), "suspect": bool(r.suspect),
+             "selection_source": str(r.selection_source),
+             "dataset_split": str(r.dataset_split),
              "price": (f"{r.price_tenge/1e6:.1f} млн"
                        if pd_notna(r.price_tenge) else "")}
             for r in q.itertuples()
@@ -212,15 +214,20 @@ async def damage_label(request: Request):
     # Кадр допустим, если он в очереди ИЛИ уже размечен: со страницы можно
     # открыть уже проставленные метки и передумать. Проверка нужна, чтобы
     # в журнал не приезжали произвольные пути, а не чтобы запрещать правку.
-    known = {(r["ad_id"], r["position"]) for r in _damage_rows()}
-    known |= {(r["ad_id"], r["position"]) for r in labelled_frames()}
+    known = {(r["ad_id"], r["position"]): r for r in _damage_rows()}
+    known.update({(r["ad_id"], r["position"]): r for r in labelled_frames()})
     try:
         key = (str(data.get("ad_id")), int(data.get("position", -1)))
         if key not in known:
             raise ValueError(f"кадр не из очереди: {key}")
+        provenance = known[key]
         save_label(str(data["ad_id"]), int(data["position"]),
                    str(data["path"]), str(data.get("label", "")),
-                   box=data.get("box"), comment=str(data.get("comment") or ""))
+                   box=data.get("box"), comment=str(data.get("comment") or ""),
+                   selection_source=str(provenance.get("selection_source")
+                                        or "legacy"),
+                   dataset_split=str(provenance.get("dataset_split") or "train"),
+                   annotator=str(provenance.get("annotator") or "sanzhar"))
     except Exception as e:                      # noqa: BLE001 — ответ клиенту
         return JSONResponse({"error": _html.escape(str(e))}, status_code=400)
     return JSONResponse({"ok": True, "stats": stats()})

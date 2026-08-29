@@ -24,6 +24,9 @@ debug/*.html
 
 # сгенерированные HTML-отчёты (ml_report.py) — артефакт
 data/**/*.html
+# COCO-export содержит производную ручной фото-разметки и локальные пути;
+# это пересобираемый приватный артефакт, а не публичный код.
+data/eda/*.coco.json
 # обученные модели и их metadata содержат fingerprint локального датасета;
 # воспроизводятся командами train_price_model.py / residual_detector.py
 data/models/*.cbm

@@ -45,7 +45,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from PIL import Image
+from PIL import Image, ImageOps
 
 from kz.collect.enrich import HEADERS
 from kz.core import pacing
@@ -160,7 +160,7 @@ def save_image(content: bytes, dest: Path) -> tuple[int, int, int]:
     Приводим к RGB: часть картинок приходит в webp с альфа-каналом, а JPEG
     прозрачность не умеет и падает на сохранении.
     """
-    img = Image.open(io.BytesIO(content))
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(content)))
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     img.thumbnail((MAX_SIDE, MAX_SIDE))

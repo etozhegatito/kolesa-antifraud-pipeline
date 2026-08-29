@@ -3171,6 +3171,42 @@ def test_photo_damage_reports_paired_auc_difference():
     assert lo > 0 and hi > 0
 
 
+def test_photo_damage_groups_same_image_across_different_ads():
+    """Новый ad_id не делает переопубликованную фотографию независимой."""
+    from kz.ml.photo_damage import groups_from_hashes
+
+    groups = groups_from_hashes(
+        ["ad-a", "ad-a", "ad-b", "ad-c"],
+        ["hash-1", "hash-2", "hash-1", "hash-3"],
+    )
+    assert groups[0] == groups[1] == groups[2]
+    assert groups[3] != groups[0]
+
+
+def test_photo_damage_reports_pr_auc_with_interval():
+    """ROC-AUC скрывает редкий класс; рядом обязана быть PR-AUC."""
+    import numpy as np
+    from kz.ml.photo_damage import average_precision_ci
+
+    y = np.array([0, 0, 0, 0, 1, 1])
+    good = np.array([0.1, 0.2, 0.3, 0.4, 0.8, 0.9])
+    value, lo, hi = average_precision_ci(y, good, n_boot=200)
+    assert value == 1.0
+    assert 0.9 < lo <= hi <= 1.0
+
+
+def test_photo_ablation_fits_pca_inside_train_fold():
+    """Даже unsupervised PCA не должна видеть test-фотографии до оценки."""
+    import inspect
+    from kz.ml import photo_ablation
+
+    src = inspect.getsource(photo_ablation.cv_mape_with_embeddings)
+    assert "fit_transform(emb[tr])" in src
+    assert "transform(emb[te])" in src
+    main = inspect.getsource(photo_ablation.main)
+    assert "reduce_embeddings" not in main
+
+
 # ─── Разметка повреждений по фотографиям ────────────────────────────────────
 
 def test_damage_box_is_stored_relative_not_in_pixels():
@@ -3184,6 +3220,67 @@ def test_damage_box_is_stored_relative_not_in_pixels():
     from kz.report import photo_labels
     src = inspect.getsource(photo_labels.save_label)
     assert "0 <= x1 < x2 <= 1" in src, "рамка обязана быть в долях 0..1"
+
+
+def test_new_photo_labels_keep_provenance_and_old_rows(tmp_path, monkeypatch):
+    """Добавление split/source не переписывает и не теряет legacy-разметку."""
+    from kz.report import photo_labels as pl
+
+    labels = tmp_path / "labels.csv"
+    previous = tmp_path / "labels.prev.csv"
+    legacy_header = pl.HEADER[:10]
+    monkeypatch.setattr(pl, "LABELS_CSV", str(labels))
+    monkeypatch.setattr(pl, "LABELS_PREV", str(previous))
+    monkeypatch.setattr(pl, "_snapshot_done", False)
+    pl.write_journal(legacy_header, [{
+        "ad_id": "old", "position": "1", "path": "old.jpg",
+        "label": "intact", "labeled_at": "2026-01-01T00:00:00",
+    }])
+
+    pl.save_label("new", 2, "new.jpg", "intact",
+                  selection_source="random_audit", dataset_split="audit",
+                  annotator="sanzhar")
+    header, rows = pl.read_journal()
+    assert all(c in header for c in pl.HEADER)
+    assert [r["ad_id"] for r in rows] == ["old", "new"]
+    assert rows[0]["label"] == "intact"
+    assert rows[1]["selection_source"] == "random_audit"
+    assert rows[1]["dataset_split"] == "audit"
+    assert rows[1]["label_version"] == pl.LABEL_VERSION
+
+
+def test_photo_audit_split_is_stable_and_not_everything():
+    """Audit membership воспроизводится из ad_id и не зависит от CSV order."""
+    from kz.report.photo_labels import split_for_ad
+
+    once = [split_for_ad(str(i)) for i in range(200)]
+    twice = [split_for_ad(str(i)) for i in range(200)]
+    assert once == twice
+    assert 20 <= once.count("audit") <= 60
+
+
+def test_photo_labels_export_to_detector_ready_coco(tmp_path):
+    """Нормированная рамка переводится в пиксели, intact остаётся негативом."""
+    from PIL import Image
+    from kz.ml.photo_dataset import build_coco
+
+    damaged = tmp_path / "damaged.jpg"
+    intact = tmp_path / "intact.jpg"
+    Image.new("RGB", (200, 100), "white").save(damaged)
+    Image.new("RGB", (80, 60), "white").save(intact)
+    rows = [
+        {"ad_id": "a", "position": "1", "path": str(damaged),
+         "label": "damaged", "x1": "0.1", "y1": "0.2",
+         "x2": "0.6", "y2": "0.7", "dataset_split": "train"},
+        {"ad_id": "b", "position": "1", "path": str(intact),
+         "label": "intact", "dataset_split": "train"},
+        {"ad_id": "c", "position": "1", "path": str(intact),
+         "label": "intact", "dataset_split": "audit"},
+    ]
+    coco = build_coco(rows, "train")
+    assert len(coco["images"]) == 2
+    assert len(coco["annotations"]) == 1
+    assert coco["annotations"][0]["bbox"] == [20.0, 20.0, 100.0, 50.0]
 
 
 def test_damage_label_rejects_what_would_poison_training(tmp_path, monkeypatch):
@@ -3312,6 +3409,21 @@ def test_damage_flow_asks_before_it_records():
                   src.index("async function commit")]
     assert "commit(" not in mouseup, "сохранение не должно идти по отпусканию мыши"
     assert "a-save" in src and "a-cancel" in src
+
+
+def test_damage_relabel_saves_the_visible_frame_not_queue_index():
+    """В режиме просмотра старых меток `i` относится к DONE, не к QUEUE.
+
+    Использовать QUEUE[i] означало тихо изменить другой кадр именно в
+    операции, которая должна исправлять ручную разметку.
+    """
+    from pathlib import Path
+
+    src = Path("kz/web/damage_page.py").read_text(encoding="utf-8")
+    commit = src[src.index("async function commit"):
+                 src.index("document.getElementById('a-save')")]
+    assert "const it = view[i]" in commit
+    assert "const it = QUEUE[i]" not in commit
 
 
 def test_verdict_counter_shows_the_journal_not_just_the_queue():

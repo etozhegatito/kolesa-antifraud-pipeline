@@ -40,12 +40,14 @@ Zero-shot до этого не дотянулся: `clip_damaged` неотлич
 from __future__ import annotations
 
 import csv
+import hashlib
 import os
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # Путь журнала переопределяется переменной окружения. Нужно не для гибкости,
@@ -62,7 +64,22 @@ LABELS_CSV = str(Path(_DIR) / "photo_labels.csv")
 LABELS_PREV = str(Path(_DIR) / "photo_labels.prev.csv")
 
 HEADER = ["ad_id", "position", "path", "label", "x1", "y1", "x2", "y2",
-          "comment", "labeled_at"]
+          "comment", "labeled_at", "selection_source", "dataset_split",
+          "annotator", "label_version"]
+
+# Новые объявления получают split детерминированно по ad_id. Старые метки
+# НЕЛЬЗЯ задним числом объявить holdout: они уже участвовали в экспериментах.
+# Они остаются legacy-train, а независимый audit набирается только из новых,
+# случайно выбранных объявлений.
+AUDIT_PERCENT = 20
+AUDIT_PER_QUEUE = 60
+LABEL_VERSION = "2"
+
+
+def split_for_ad(ad_id: str) -> str:
+    """Стабильный train/audit split, не зависящий от порядка строк."""
+    bucket = int(hashlib.sha256(str(ad_id).encode()).hexdigest()[:8], 16) % 100
+    return "audit" if bucket < AUDIT_PERCENT else "train"
 
 # Метки. «unclear» нужен обязательно: без него человек вынужден выбирать
 # между двумя неверными вариантами, и в данные попадает шум под видом
@@ -167,14 +184,28 @@ def queue(limit: int = 400) -> pd.DataFrame:
     done = {(r["ad_id"], str(r["position"])) for r in read_journal()[1]}
     d = d[~d.apply(lambda r: (r.ad_id, str(r.position)) in done, axis=1)]
 
-    d = _mark_candidates(d)
-    pos = d[d.suspect]
+    d["dataset_split"] = d.ad_id.map(split_for_ad)
+    d["selection_source"] = np.where(
+        d.suspect, "text_or_badge", "random_control")
+
+    # Audit выбирается ДО model-rank и текстовой приоритизации. Иначе это
+    # был бы ещё один удобный срез active learning, а не случайная проверка.
+    audit_pool = d[d.dataset_split == "audit"].copy()
+    n_audit = min(AUDIT_PER_QUEUE, limit, len(audit_pool))
+    audit = (audit_pool.sample(n=n_audit, random_state=29)
+             if n_audit else audit_pool.head(0))
+    audit["selection_source"] = "random_audit"
+
+    train = _mark_candidates(d[d.dataset_split == "train"].copy())
+    remaining = max(0, limit - len(audit))
+    pos = train[train.suspect]
     per_pos = (CONTROL_PER_POSITIVE if _negatives_so_far() < ENOUGH_NEGATIVES
                else 0)
-    n_ctrl = min(len(d[~d.suspect]), max(0, limit - len(pos)),
+    n_ctrl = min(len(train[~train.suspect]), max(0, remaining - len(pos)),
                  (len(pos) * per_pos) if per_pos else CONTROL_WHEN_ENOUGH)
-    ctrl = d[~d.suspect].sample(n=n_ctrl, random_state=42) if n_ctrl else d.head(0)
-    out = pd.concat([pos, ctrl]).head(limit)
+    ctrl = (train[~train.suspect].sample(n=n_ctrl, random_state=42)
+            if n_ctrl else train.head(0))
+    out = pd.concat([audit, pos, ctrl]).head(limit)
     # перемешиваем: иначе разметчик первые сто кадров видит только битые,
     # привыкает и начинает искать повреждения там, где их нет
     out = out.sample(frac=1.0, random_state=7).reset_index(drop=True)
@@ -230,7 +261,9 @@ def _mark_candidates(d: pd.DataFrame) -> pd.DataFrame:
     pick = (m[m.ad_id.isin(by_ad.index)]
             .sort_values("damage_rank", ascending=False)
             .groupby("ad_id").head(FRAMES_PER_AD).index)
+    newly_ranked = pick[~m.loc[pick, "suspect"].to_numpy()]
     m.loc[pick, "suspect"] = True
+    m.loc[newly_ranked, "selection_source"] = "model_rank"
     return m.drop(columns=["damage_rank"])
 
 
@@ -298,7 +331,8 @@ def write_journal(header: list[str], rows: list[dict]) -> None:
 
 
 def save_label(ad_id: str, position, path: str, label: str,
-               box=None, comment: str = "") -> None:
+               box=None, comment: str = "", selection_source: str = "manual",
+               dataset_split: str = "train", annotator: str | None = None) -> None:
     """Записать метку кадра. Повторная разметка ОБНОВЛЯЕТ строку, не плодит.
 
     box — (x1, y1, x2, y2) в долях от размера картинки, либо None для
@@ -325,7 +359,12 @@ def save_label(ad_id: str, position, path: str, label: str,
 
     _snapshot_once()
     header, rows = read_journal()
+    # Миграция только при следующей осознанной записи: существующий журнал
+    # не переписывается при импорте модуля. Все старые поля и строки остаются.
+    header = list(dict.fromkeys([*header, *HEADER]))
     key = (str(ad_id), str(position))
+    if dataset_split not in {"train", "audit"}:
+        raise ValueError(f"неизвестный dataset_split: {dataset_split!r}")
     row = {
         "ad_id": str(ad_id), "position": str(position), "path": path,
         "label": label,
@@ -335,6 +374,10 @@ def save_label(ad_id: str, position, path: str, label: str,
         "y2": f"{box[3]:.4f}" if box else "",
         "comment": comment,
         "labeled_at": datetime.now().isoformat(timespec="seconds"),
+        "selection_source": selection_source,
+        "dataset_split": dataset_split,
+        "annotator": annotator or os.environ.get("KZ_ANNOTATOR", "sanzhar"),
+        "label_version": LABEL_VERSION,
     }
     for i, r in enumerate(rows):
         if (r.get("ad_id"), str(r.get("position"))) == key:
@@ -359,7 +402,11 @@ def labelled_frames() -> list[dict]:
             continue
         rec = {"ad_id": r.get("ad_id", ""), "position": int(r.get("position") or 0),
                "path": r.get("path", ""), "label": r["label"],
-               "comment": r.get("comment", "")}
+               "comment": r.get("comment", ""),
+               "selection_source": r.get("selection_source", "legacy"),
+               "dataset_split": r.get("dataset_split", "train") or "train",
+               "annotator": r.get("annotator", ""),
+               "label_version": r.get("label_version", "1") or "1"}
         if r.get("x1"):
             rec |= {k: float(r[k]) for k in ("x1", "y1", "x2", "y2")}
         out.append(rec)
@@ -384,6 +431,9 @@ def stats() -> dict:
     for label in LABELS:
         out[f"{label}_ads"] = len(ads[label])
     out["positive_ads"] = len(ads["damaged"] | ads["wreck"])
+    audit_rows = [r for r in rows if r.get("dataset_split") == "audit"]
+    out["audit_frames"] = len(audit_rows)
+    out["audit_ads"] = len({str(r.get("ad_id", "")) for r in audit_rows})
     return out
 
 
@@ -396,6 +446,8 @@ def main():
         need = 200 - s["positive_ads"]
         print(f"\nНезависимых объявлений damaged/wreck: {s['positive_ads']}. "
               "Это главный размер выборки для grouped CV.")
+        print(f"Новый случайный audit holdout: {s['audit_ads']} объявлений, "
+              f"{s['audit_frames']} кадров (legacy-метки туда не переносятся).")
         print("Ориентир для устойчивого локального замера — около 200: "
               f"{'хватает' if need <= 0 else f'ещё {need} объявлений'}")
         for k in ("parts", "wreck"):
