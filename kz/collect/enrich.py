@@ -82,6 +82,48 @@ DT_MAP = {
     "VIN": "has_vin",
 }
 
+
+def _normalise_parameter_label(value: str) -> str:
+    """Привести подпись характеристики к устойчивому ключу.
+
+    Одна и та же подпись может прийти как ``Состояние``, ``Состояние
+    автомобиля`` или с двоеточием/неразрывным пробелом. Точное сравнение
+    строки превращает такие косметические различия в молчаливые NULL.
+    """
+    value = value.replace("\u00a0", " ")
+    value = re.sub(r"\s+", " ", value).strip().rstrip(":").strip()
+    return value.casefold()
+
+
+_NORMALISED_DT_MAP = {
+    _normalise_parameter_label(label): field for label, field in DT_MAP.items()
+}
+_NORMALISED_DT_MAP.update({
+    "состояние автомобиля": "page_condition",
+    "vin-код": "has_vin",
+    "vin код": "has_vin",
+    "vin-номер": "has_vin",
+    "vin номер": "has_vin",
+})
+
+_VIN_NEGATIVE_VALUES = {"нет", "не указан", "не указано", "отсутствует", "-"}
+_VIN_HISTORY_MARKER = "у этого объявления есть история авто"
+
+
+def _vin_presence(value: str) -> str | None:
+    """Сохранить только факт наличия VIN, но никогда не сам VIN.
+
+    Колонка называется ``has_vin`` и не должна случайно стать хранилищем
+    17-значных идентификаторов автомобиля. Пустое значение означает
+    «неизвестно», а не «VIN отсутствует».
+    """
+    normalised = _normalise_parameter_label(value)
+    if not normalised:
+        return None
+    if normalised in _VIN_NEGATIVE_VALUES:
+        return "Нет"
+    return "Да"
+
 # Лексикон «убитости» и поиск с учётом отрицаний — в damage.py
 # (единственный источник; раньше список дублировался здесь и в clean.py).
 # DAMAGE_PATTERNS здесь не вызывается, но импортируется НАМЕРЕННО:
@@ -161,14 +203,31 @@ def parse_ad_page(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     out = {}
 
-    # Характеристики: пары dt/dd
-    for dl in soup.select("dl"):
-        dt, dd = dl.select_one("dt"), dl.select_one("dd")
-        if not (dt and dd):
+    # Характеристики: пары dt/dd. Ищем от dt, а не от dl: HTML допускает и
+    # отдельный dl на каждую пару, и один общий dl с несколькими парами.
+    # Вторую форму старый цикл читал только частично.
+    for dt in soup.select("dt"):
+        dd = dt.find_next_sibling("dd")
+        if dd is None and dt.parent is not None:
+            dd = dt.parent.select_one("dd")
+        if dd is None:
             continue
-        key = DT_MAP.get(dt.get_text(" ", strip=True))
+        label = _normalise_parameter_label(dt.get_text(" ", strip=True))
+        key = _NORMALISED_DT_MAP.get(label)
         if key:
-            out[key] = dd.get_text(" ", strip=True)
+            value = dd.get_text(" ", strip=True)
+            if key == "has_vin":
+                value = _vin_presence(value)
+            if value:
+                out[key] = value
+
+    # В текущей публичной карточке сам VIN не показывается. Положительное
+    # доказательство его наличия — VIN-backed блок «История авто». Отсутствие
+    # блока НЕ доказывает отсутствие VIN, поэтому записываем только «Да», а
+    # неизвестность оставляем NULL. Это честнее ложного «Нет».
+    page_text = _normalise_parameter_label(soup.get_text(" ", strip=True))
+    if "has_vin" not in out and _VIN_HISTORY_MARKER in page_text:
+        out["has_vin"] = "Да"
 
     # Пробег со страницы → число (заполнит дыры VIP-паспортов!)
     if "page_mileage" in out:

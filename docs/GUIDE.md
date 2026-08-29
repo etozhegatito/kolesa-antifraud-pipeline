@@ -657,7 +657,7 @@ python -m kz.ops.run_all --ml               # пересчитать всё по
 python -m kz.ops.run_all --fast             # то же без обучения, секунды
 python -m kz.ops.run_all --collect          # собрать данные под лимитом
 python -m kz.ml.learning_curve              # окупается ли ещё сбор
-python -m pytest tests/ -q                  # 218 passed, 6 skipped без test-БД
+python -m pytest tests/ -q                  # 228 passed, 6 skipped без test-БД
 ```
 
 Куда смотреть:

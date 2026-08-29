@@ -455,6 +455,44 @@ def test_extract_status_badge():
     assert enrich.parse_ad_page("<div>нет бейджа</div>")["page_status_badge"] == "-"
 
 
+def test_enrich_parameters_tolerate_layout_and_label_variants():
+    """Пары могут лежать в одном dl, а подписи — содержать NBSP/двоеточие.
+
+    Старый цикл брал первый dt/dd из общего dl и молча терял следующие поля.
+    """
+    html = """
+    <dl class="offer__parameters">
+      <dt>Город&nbsp;:</dt><dd>Алматы</dd>
+      <dt>Состояние автомобиля:</dt><dd>б/у</dd>
+      <dt>VIN-код</dt><dd>JTDBR32E720012345</dd>
+    </dl>
+    """
+    parsed = enrich.parse_ad_page(html)
+    assert parsed["page_city"] == "Алматы"
+    assert parsed["page_condition"] == "б/у"
+    assert parsed["has_vin"] == "Да"
+    assert "JTDBR32E720012345" not in str(parsed)
+
+
+def test_enrich_vin_history_is_positive_only_evidence():
+    """Карточка не раскрывает VIN, но явно сообщает о VIN-backed истории.
+
+    Обычная кнопка «Проверить Историю авто» может быть рекламой услуги и не
+    считается доказательством. Без явного маркера значение остаётся NULL.
+    """
+    positive = enrich.parse_ad_page(
+        "<section>У этого объявления есть История авто</section>"
+    )
+    unknown = enrich.parse_ad_page("<a>Проверить Историю авто</a>")
+    assert positive["has_vin"] == "Да"
+    assert "has_vin" not in unknown
+
+
+def test_enrich_explicit_missing_vin_is_not_positive():
+    html = "<dl><dt>VIN:</dt><dd>не указан</dd></dl>"
+    assert enrich.parse_ad_page(html)["has_vin"] == "Нет"
+
+
 def test_used_zero_mileage_excludes_current_year_new():
     """б/у + 0 км = сокрытие пробега ТОЛЬКО у не-новой машины. У текущего
     модельного года 0 км — правда «новая со склада» (реальный кейс Changan
