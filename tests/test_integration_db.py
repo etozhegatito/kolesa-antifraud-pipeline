@@ -155,7 +155,12 @@ def test_enrichment_queue_join_actually_runs(clean_tables, monkeypatch):
             "INSERT INTO raw_ads (ad_id, scraped_at) VALUES "
             "('old', '2026-07-01'), ('new', '2026-08-20'), ('susp', '2026-07-01')"))
     pd.DataFrame({"ad_id": ["old", "new", "susp"],
-                  "is_suspicious": [0, 0, 1]}).to_sql(
+                  "is_suspicious": [0, 0, 1],
+                  # pick_targets приоритизирует дешёвый сегмент, поэтому
+                  # реальный контракт запроса включает price_tenge. Fixture
+                  # обязан повторять его схему, иначе CI проверяет старую
+                  # версию функции и падает на корректном SQL.
+                  "price_tenge": [10_000_000, 10_000_000, 10_000_000]}).to_sql(
         "clean_data", eng, if_exists="replace", index=False)
 
     from kz.collect import enrich
