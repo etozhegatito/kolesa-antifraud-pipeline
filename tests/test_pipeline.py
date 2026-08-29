@@ -2570,22 +2570,62 @@ def test_enrichment_queue_puts_fresh_ads_ahead_of_stale_backlog(monkeypatch):
     from kz.collect import enrich
 
     rows = pd.DataFrame([
-        {"ad_id": "old_plain",  "is_suspicious": 0, "scraped_at": "2026-07-17"},
-        {"ad_id": "new_plain",  "is_suspicious": 0, "scraped_at": "2026-08-10"},
-        {"ad_id": "old_susp",   "is_suspicious": 1, "scraped_at": "2026-07-17"},
-        {"ad_id": "mid_plain",  "is_suspicious": 0, "scraped_at": "2026-08-01"},
+        {"ad_id": "old_plain", "is_suspicious": 0, "scraped_at": "2026-07-17",
+         "price_tenge": 9_000_000},
+        {"ad_id": "new_plain", "is_suspicious": 0, "scraped_at": "2026-08-10",
+         "price_tenge": 9_000_000},
+        {"ad_id": "old_susp", "is_suspicious": 1, "scraped_at": "2026-07-17",
+         "price_tenge": 9_000_000},
+        {"ad_id": "mid_plain", "is_suspicious": 0, "scraped_at": "2026-08-01",
+         "price_tenge": 9_000_000},
     ])
     monkeypatch.setattr(enrich.pd, "read_sql", lambda *a, **k: rows.copy())
     monkeypatch.setattr(enrich, "get_engine", lambda: None)
 
-    assert enrich.pick_targets(set()) == [
-        "old_susp",    # подозрительное вперёд, несмотря на возраст
-        "new_plain",   # дальше — новейшие, их страницы ещё живы
-        "mid_plain",
-        "old_plain",
-    ]
-    # уже обогащённые в очередь не возвращаются
-    assert "new_plain" not in enrich.pick_targets({"new_plain"})
+    got = enrich.pick_targets(set())
+    assert got[0] == "old_susp", "подозрительное вперёд, несмотря на возраст"
+    assert got[1] == "new_plain", "дальше новейшее — его страница ещё жива"
+    assert got.index("mid_plain") < got.index("old_plain")
+
+
+def test_enrichment_queue_prefers_the_cheap_segment(monkeypatch):
+    """Дешёвый сегмент вперёд, но не любой ценой.
+
+    Вся ошибка модели сидит в машинах до 5 млн (29,16% против 15,5%), и
+    признаки со страницы дают там −3,4 п.п. Значит запросы тратим туда.
+
+    Две оговорки, обе проверяются здесь. Подозрительные не должны терять
+    первое место: их обогащение снимает ложные подозрения и стоит копейки.
+    И часть прогона обязана уходить самым свежим ВНЕ зависимости от цены —
+    иначе заполненные поля окажутся ровно у дешёвых, и «есть комплектация»
+    станет для модели меткой «дешёвая машина». Это та же ловушка, что с
+    длиной текста в FINDINGS §17.
+    """
+    from kz.collect import enrich
+
+    rows = pd.DataFrame(
+        [{"ad_id": "susp", "is_suspicious": 1, "scraped_at": "2026-07-01",
+          "price_tenge": 20_000_000}]
+        + [{"ad_id": f"fresh_rich_{i}", "is_suspicious": 0,
+            "scraped_at": "2026-08-20", "price_tenge": 30_000_000}
+           for i in range(10)]
+        + [{"ad_id": f"stale_cheap_{i}", "is_suspicious": 0,
+            "scraped_at": "2026-07-05", "price_tenge": 1_000_000}
+           for i in range(30)]
+    )
+    monkeypatch.setattr(enrich.pd, "read_sql", lambda *a, **k: rows.copy())
+    monkeypatch.setattr(enrich, "get_engine", lambda: None)
+
+    got = enrich.pick_targets(set())
+    assert got[0] == "susp", "подозрительное по-прежнему первое"
+
+    cheap = sum(a.startswith("stale_cheap") for a in got)
+    rich = sum(a.startswith("fresh_rich") for a in got)
+    assert cheap > rich, (
+        f"дешёвых должно быть больше: дешёвых {cheap}, дорогих {rich}")
+    assert rich >= 2, (
+        "часть прогона обязана уходить свежим независимо от цены, иначе "
+        "пропущенность признаков совпадёт с сегментом и станет утечкой")
 
 
 def test_drift_check_runs_before_retraining():
@@ -3098,22 +3138,39 @@ def test_disassembled_car_is_its_own_class_not_damage():
     assert LABELS["parts"] != LABELS["damaged"]
 
 
-def test_box_belongs_only_to_body_damage(tmp_path, monkeypatch):
-    """Рамка отмечает УЧАСТОК. У разобранной машины свидетельство — весь
-    кадр, поэтому рамка там бессмысленна и принимать её нельзя: иначе в
-    обучение попадут вырезы, не значащие ничего."""
+def test_box_is_required_for_damage_and_allowed_everywhere_else(tmp_path,
+                                                                monkeypatch):
+    """Рамка обязательна для «повреждения» и разрешена при любой метке.
+
+    Обязательна — потому что смысл метки в участке: без рамки в обучение
+    попал бы целый кадр, где повреждение тонет в асфальте и небе.
+
+    Разрешена везде — потому что запрет молча съедал ручной труд. Разметчик
+    обводил ржавчину, ставил «целая», и координаты отбрасывались; человек
+    считал, что отмечает область, а не сохранялось ничего. Терять сделанное
+    руками нельзя, даже когда не знаешь, что с ним делать сегодня.
+    """
     from kz.report import photo_labels as pl
     monkeypatch.setattr(pl, "LABELS_CSV", str(tmp_path / "l.csv"))
     monkeypatch.setattr(pl, "LABELS_PREV", str(tmp_path / "p.csv"))
     monkeypatch.setattr(pl, "_snapshot_done", False)
 
-    for label in ("parts", "intact", "unclear"):
+    try:
+        pl.save_label("1", 1, "p.jpg", "damaged")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("принял «damaged» без рамки")
+
+    for n, label in enumerate(("parts", "intact", "unclear", "wreck"), start=2):
+        pl.save_label(str(n), 1, "p.jpg", label, box=(0.1, 0.1, 0.5, 0.5))
+    _, rows = pl.read_journal()
+    assert all(r["x1"] for r in rows), "рамка должна сохраняться при любой метке"
+
+    # вывернутая или выходящая за кадр рамка не принимается ни при какой метке
+    for bad in ((0.5, 0.1, 0.2, 0.5), (-0.1, 0.1, 0.5, 0.5), (0.1, 0.1, 1.5, 0.5)):
         try:
-            pl.save_label("1", 1, "p.jpg", label, box=(0.1, 0.1, 0.5, 0.5))
+            pl.save_label("9", 1, "p.jpg", "intact", box=bad)
         except ValueError:
             continue
-        raise AssertionError(f"принял рамку для «{label}»")
-
-    pl.save_label("1", 1, "p.jpg", "parts")
-    pl.save_label("2", 1, "p.jpg", "damaged", box=(0.1, 0.1, 0.5, 0.5))
-    assert pl.stats()["parts"] == 1 and pl.stats()["damaged"] == 1
+        raise AssertionError(f"принял негодную рамку {bad}")

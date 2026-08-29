@@ -51,6 +51,9 @@ ENRICHED_CSV = "data/enriched/enriched.csv"
 LOG_FILE     = "logs/enrich.log"
 
 MAX_PER_RUN           = 20      # мелкая порция: анти-бан (2026-07-23 IP словил блок на больших)
+CHEAP_EDGE            = 5_000_000   # граница дешёвого сегмента, ₸
+FRESH_RESERVE         = 0.25    # доля прогона на самые свежие вне зависимости от цены
+SUSPICIOUS_SHARE      = 0.5     # потолок доли подозрительных в одном прогоне
 DELAY_RANGE           = (4.0, 8.0)
 MAX_CONSECUTIVE_FAILS = 3
 
@@ -237,21 +240,65 @@ def pick_targets(done: set) -> list[str]:
     убывать медленно или не убывать вовсе. Это осознанный размен — страницы
     старых объявлений всё равно умирают, и гнаться за ними дороже, чем не
     терять новые.
+
+    ТРЕТИЙ КЛЮЧ, добавлен 29 августа: дешёвый сегмент вперёд.
+
+    Вся ошибка модели сидит в машинах до 5 млн — 29,16% против 15,5% у
+    остальных, при 40% выборки. Замер на полностью обогащённой подвыборке
+    показал, что текст продавца и комплектация дают там −3,4 п.п.
+    (FINDINGS §17). Дорогой сегмент уже укладывается в цель, и обогащать
+    его ради MAPE незачем.
+
+    ПОЧЕМУ НЕ ТОЛЬКО ДЕШЁВЫЕ. Если заполнить признаки у дешёвых и оставить
+    пустыми у дорогих, «есть комплектация» станет меткой «дешёвая машина» —
+    и модель выучит нашу очередь обогащения вместо свойств автомобиля. Это
+    та же ловушка, что с длиной текста (FINDINGS §17, поправка). Поэтому
+    доля FRESH_RESERVE каждого прогона уходит просто самым свежим, вне
+    зависимости от цены: и страницы не мрут, и пропущенность не становится
+    идеально совпадающей с сегментом.
+
+    Полностью развязать это отбором нельзя. Правильное лекарство — при
+    добавлении признаков в модель обучать НА ДЕШЁВОМ СЕГМЕНТЕ отдельно, а
+    не подмешивать полупустые колонки в общую таблицу.
     """
     df = pd.read_sql(
-        "SELECT c.ad_id, c.is_suspicious, r.scraped_at "
+        "SELECT c.ad_id, c.is_suspicious, c.price_tenge, r.scraped_at "
         "FROM clean_data c JOIN raw_ads r ON r.ad_id = c.ad_id",
         get_engine(), dtype={"ad_id": str})
     df = df[~df["ad_id"].isin(done)]
-    df = df.sort_values(["is_suspicious", "scraped_at"], ascending=False)
-    return df["ad_id"].head(MAX_PER_RUN).tolist()
+    if df.empty:
+        return []
+    df = df.sort_values("scraped_at", ascending=False)
+    df["cheap"] = (df.price_tenge.fillna(0) > 0) & (df.price_tenge < CHEAP_EDGE)
+
+    out: list[str] = []
+
+    def take(rows, n):
+        """Дописать до n идентификаторов, не повторяя уже взятые."""
+        for a in rows["ad_id"]:
+            if len(out) >= n or len(out) >= MAX_PER_RUN:
+                break
+            if a not in out:
+                out.append(a)
+
+    # 1. Подозрительные — всегда первыми, но не больше половины прогона:
+    #    иначе очередь из семидесяти подозрительных заняла бы четыре дня и
+    #    дешёвый сегмент не начался бы вовсе.
+    take(df[df.is_suspicious == 1], round(MAX_PER_RUN * SUSPICIOUS_SHARE))
+    # 2. Резерв на самые свежие вне зависимости от цены — см. докстроку.
+    take(df, len(out) + max(1, round(MAX_PER_RUN * FRESH_RESERVE)))
+    # 3. Дешёвый сегмент, внутри — свежие вперёд.
+    take(df[df.cheap], MAX_PER_RUN)
+    # 4. Остаток, если дешёвые кончились.
+    take(df, MAX_PER_RUN)
+    return out
 
 
 def main():
     done = load_done()
     targets = pick_targets(done)
-    log.info(f"К обогащению: {len(targets)} "
-             f"(подозрительные, затем новейшие; уже готово: {len(done)})")
+    log.info(f"К обогащению: {len(targets)} (свежие {int(FRESH_RESERVE*100)}%, "
+             f"дальше подозрительные и дешёвые; уже готово: {len(done)})")
 
     session = requests.Session()
     fails = 0

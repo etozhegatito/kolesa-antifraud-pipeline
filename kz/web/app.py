@@ -192,10 +192,12 @@ def damage_page():
     if PUBLIC_DEMO:
         return HTMLResponse("Разметка доступна только в локальном режиме.",
                             status_code=404)
-    from kz.report.photo_labels import stats
+    from kz.report.photo_labels import labelled_frames, stats
     from kz.web.damage_page import page
 
-    return page(_damage_rows(), stats())
+    # размеченные читаются на КАЖДЫЙ запрос, не кэшируются: журнал меняется
+    # тем же процессом, и устаревший список показал бы старые метки
+    return page(_damage_rows(), stats(), labelled_frames())
 
 
 @app.post("/damage/label")
@@ -204,10 +206,14 @@ async def damage_label(request: Request):
     страница может прислать что угодно, а журнал портить нельзя."""
     if PUBLIC_DEMO:
         return JSONResponse({"error": "not found"}, status_code=404)
-    from kz.report.photo_labels import save_label, stats
+    from kz.report.photo_labels import labelled_frames, save_label, stats
 
     data = await request.json()
+    # Кадр допустим, если он в очереди ИЛИ уже размечен: со страницы можно
+    # открыть уже проставленные метки и передумать. Проверка нужна, чтобы
+    # в журнал не приезжали произвольные пути, а не чтобы запрещать правку.
     known = {(r["ad_id"], r["position"]) for r in _damage_rows()}
+    known |= {(r["ad_id"], r["position"]) for r in labelled_frames()}
     try:
         key = (str(data.get("ad_id")), int(data.get("position", -1)))
         if key not in known:

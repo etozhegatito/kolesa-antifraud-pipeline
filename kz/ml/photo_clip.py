@@ -54,6 +54,21 @@ PROMPT_PAIRS = {
         ["a dirty muddy car", "an unwashed car"],
         ["a freshly washed clean car", "a polished car"],
     ),
+    # Ось «кузова в кадре нет»: салон, подкапотное, колесо крупным планом,
+    # фото документов. Не признак машины, а признак КАДРА — нужна, чтобы не
+    # гонять разметчика по кадрам, где повреждение кузова увидеть нельзя.
+    "clip_no_body": (
+        ["a photo of the interior of a car",
+         "a car dashboard and steering wheel",
+         "car seats inside the cabin",
+         "a close-up of a car engine bay",
+         "a close-up photo of a car wheel",
+         "a photo of vehicle documents"],
+        ["a photo of a car exterior parked outside",
+         "the side of a car body",
+         "a car seen from the front outside",
+         "a whole car photographed on the street"],
+    ),
     "clip_studio": (
         ["a professional dealership photo of a car in a showroom",
          "a studio photograph of a car"],
@@ -331,11 +346,133 @@ def _redundancy_check(d: pd.DataFrame, log=print) -> None:
 
 
 def main():
+    if "--no-body" in sys.argv:
+        build_no_body()
+        return
+    if "--rank" in sys.argv:
+        build_damage_rank()
+        return
     if "--validate" in sys.argv:
         validate()
         return
     build()
     validate()
+
+
+
+
+# ─── оси по сохранённым векторам ────────────────────────────────────────────
+
+NO_BODY_CSV = "data/models/photo_no_body.csv"
+# Порог откалиброван 29 августа по 117 кадрам, которые разметчик вручную
+# отметил как салон, подкапотное, колесо и багажник. Ось по ним даёт
+# AUC 0,986 — она работает, слишком строгим был именно порог.
+#
+#   порог   поймано салонов   ложно отложено   из них битых
+#   +0,05        81%                2               0
+#   +0,03        85%               15               0
+#   +0,02        91%               24               1
+#
+# Берём 0,03: ложные срабатывания стоят дёшево (кадр откладывается в хвост,
+# а не выбрасывается), но битые кадры — дефицит, и терять их в хвост нельзя.
+NO_BODY_THRESHOLD = 0.03
+
+
+def score_axis(name: str = "clip_no_body") -> pd.DataFrame:
+    """Счёт по текстовой оси на СОХРАНЁННЫХ векторах, без чтения картинок.
+
+    Новая ось — это новый текстовый вектор, а картинки уже закодированы.
+    Прогонять 5633 файла заново ради одного скалярного произведения
+    незачем: грузим модель только ради текстового энкодера.
+    """
+    idx, emb = load_embeddings()
+    model, _, tokenizer, device = _load_model()
+    pos, neg = PROMPT_PAIRS[name]
+    v = (_text_vectors(model, tokenizer, device, pos)
+         - _text_vectors(model, tokenizer, device, neg)).cpu().numpy()
+    out = idx[["ad_id", "position"]].copy()
+    out[name] = emb @ (v / np.linalg.norm(v))
+    return out
+
+
+def build_no_body(log=print) -> pd.DataFrame:
+    """Посчитать и сохранить ось «кузова в кадре нет»."""
+    d = score_axis("clip_no_body")
+    Path(NO_BODY_CSV).parent.mkdir(parents=True, exist_ok=True)
+    d.to_csv(NO_BODY_CSV, index=False)
+    n = int((d.clip_no_body > NO_BODY_THRESHOLD).sum())
+    log(f"Ось «без кузова»: {n} из {len(d)} кадров выше порога "
+        f"{NO_BODY_THRESHOLD} ({n/len(d)*100:.0f}%) → {NO_BODY_CSV}")
+    return d
+
+
+def load_no_body() -> pd.DataFrame | None:
+    """Сохранённая ось или None, если ещё не считали."""
+    p = Path(NO_BODY_CSV)
+    if not p.exists():
+        return None
+    return pd.read_csv(p, dtype={"ad_id": str})
+
+
+# ─── ранжирование очереди разметки ──────────────────────────────────────────
+
+RANK_CSV = "data/models/photo_damage_rank.csv"
+
+
+def build_damage_rank(log=print) -> pd.DataFrame:
+    """Оценить все кадры слабым классификатором, обученным на наших метках.
+
+    ЗАЧЕМ И ЧЕМ ЭТО НЕ ЯВЛЯЕТСЯ. Классификатор здесь — ПОИСКОВИК, а не
+    детектор. Замер 29 августа показал, что внутри дешёвого сегмента он не
+    отличим от «цены и возраста» (AUC 0,718 против 0,735, интервалы
+    перекрываются): 24 положительных примера в 13 объявлениях — слишком
+    мало, чтобы утверждать, что сеть видит повреждение.
+
+    Но для ПОИСКА смещение к старой дешёвой машине не порок: битые
+    действительно такие. Верхние 25 кадров ранжирования содержат 40%
+    положительных против 6,9% в случайной очереди — плотнее в 5,8 раза.
+    Сотня положительных примеров набирается за 18 минут вместо 72.
+
+    Использовать этот счёт как «вероятность повреждения» в продукте нельзя.
+    Только как порядок показа разметчику.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    from kz.report.photo_labels import LABELS_CSV, read_journal
+
+    _, rows = read_journal()
+    lab = pd.DataFrame(rows)
+    if lab.empty:
+        raise RuntimeError(f"журнал разметки пуст: {LABELS_CSV}")
+    lab = lab.drop_duplicates(["ad_id", "position"], keep="last")
+    lab["position"] = lab.position.astype(int)
+
+    idx, emb = load_embeddings()
+    idx = idx.reset_index(drop=True)
+    idx["row"] = idx.index
+    idx["position"] = idx.position.astype(int)
+    d = lab.merge(idx[["ad_id", "position", "row"]], on=["ad_id", "position"])
+    d = d[d.label.isin(["damaged", "wreck", "intact"])]
+    y = d.label.isin(["damaged", "wreck"]).astype(int).to_numpy()
+    if y.sum() < 5:
+        raise RuntimeError(f"положительных примеров всего {y.sum()} — рано ранжировать")
+
+    model = LogisticRegression(C=0.003, max_iter=3000, class_weight="balanced")
+    model.fit(emb[d.row.to_numpy()], y)
+    out = idx[["ad_id", "position"]].copy()
+    out["damage_rank"] = model.predict_proba(emb)[:, 1]
+    Path(RANK_CSV).parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(RANK_CSV, index=False)
+    log(f"Ранжирование: обучено на {len(d)} метках ({y.sum()} положительных), "
+        f"оценено {len(out)} кадров → {RANK_CSV}")
+    return out
+
+
+def load_damage_rank() -> pd.DataFrame | None:
+    p = Path(RANK_CSV)
+    if not p.exists():
+        return None
+    return pd.read_csv(p, dtype={"ad_id": str})
 
 
 if __name__ == "__main__":

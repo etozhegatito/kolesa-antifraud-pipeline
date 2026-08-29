@@ -19,7 +19,7 @@
 удобным и неудобным интерфейсом решает, будет разметка сделана или нет:
 
   без рамки    «целая» и «не понять» ставятся одной клавишей, рисовать не надо
-  клавиши      D — повреждение кузова, P — разобрана, I — целая,
+  клавиши      D — удар/вмятина, W — авария, P — разобрана, I — целая,
                U — не понять, Enter — подтвердить
   Esc          отменить рамку и начать заново
   стрелки      назад и вперёд, метку можно поправить
@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import html
 import json
+
+from kz.report.photo_labels import LABELS
 
 TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
@@ -107,8 +109,17 @@ TEMPLATE = """<!doctype html>
   #ask .row { justify-content: flex-start }
   #comment { font: inherit; padding: 8px 10px; border-radius: 7px;
              border: 1px solid var(--line); background: #11141a;
-             color: var(--text); width: 100%; margin: 12px 0 12px; }
+             color: var(--text); width: 100%; }
+  #commentrow { max-width: 640px; margin: 10px auto 0 }
   #hint { font-size: 13px; min-height: 20px; text-align: center }
+  .pill.tap { cursor: pointer; user-select: none }
+  .pill.tap:hover { border-color: var(--accent); color: var(--text) }
+  .pill.on { border-color: var(--accent); color: var(--accent) }
+  .hid { display: none }
+  #again { text-align: center; font-size: 13px; margin-top: 8px;
+           color: var(--warn) }
+  #legend { max-width: 640px; margin: 10px auto 0; text-align: center;
+            line-height: 1.5 }
   .ok { color: var(--ok) } .warn { color: var(--warn) }
 </style>
 
@@ -117,10 +128,12 @@ TEMPLATE = """<!doctype html>
   <span class="sub"><a href="/">← главная</a></span>
   <span class="spacer"></span>
   <span class="pill">кадр <b id="pos">—</b></span>
-  <span class="pill">повреждений <b id="c-damaged">0</b></span>
-  <span class="pill">разобрано <b id="c-parts">0</b></span>
-  <span class="pill">целых <b id="c-intact">0</b></span>
-  <span class="pill">неясных <b id="c-unclear">0</b></span>
+  <span class="pill tap" data-lab="damaged">повреждений <b id="c-damaged">0</b></span>
+  <span class="pill tap" data-lab="wreck">аварий <b id="c-wreck">0</b></span>
+  <span class="pill tap" data-lab="parts">разобрано <b id="c-parts">0</b></span>
+  <span class="pill tap" data-lab="intact">целых <b id="c-intact">0</b></span>
+  <span class="pill tap" data-lab="unclear">неясных <b id="c-unclear">0</b></span>
+  <span class="pill hid" id="backpill">← вернуться к очереди<kbd>Esc</kbd></span>
 </header>
 
 <div id="barwrap"><div id="bar"></div></div>
@@ -132,26 +145,48 @@ TEMPLATE = """<!doctype html>
   </div>
 
   <div id="meta"></div>
+  <div id="again"></div>
 
   <div class="row" id="quick">
     <button id="b-intact">целая<kbd>I</kbd></button>
+    <button id="b-wreck">авария<kbd>W</kbd></button>
     <button id="b-parts">разобрана<kbd>P</kbd></button>
     <button id="b-unclear">не понять<kbd>U</kbd></button>
-    <span class="sub">или обведите повреждение кузова мышью</span>
+    <span class="sub">или обведите удар мышью</span>
   </div>
+
+  <div class="row" id="commentrow">
+    <input type="text" id="comment"
+           placeholder="комментарий: ржавчина, шпатлёвка, что заметил (необязательно)">
+  </div>
+
+  <p class="sub" id="legend">
+    <b>целая</b> — ударов и вмятин нет. Ржавчина, грязь, потёртости тоже
+    сюда: ржавчину сеть уже различает сама, а вмятину нет — ради неё и
+    размечаем. Заметил ржавчину — напиши в комментарий, не теряй.<br>
+    <b>рамка или авария</b> — по простому правилу: можно обвести одно
+    место, значит «повреждение»; разрушен весь перёд или зад и обводить
+    нечего, значит «авария».<br>
+    <b>рамка</b> — обводи самое явное место, а не всё подряд. Пропущенный
+    кусок ничего не портит: рамка нужна как чистый пример повреждения.
+    А рамка наполовину из асфальта и неба портит. Рамка сохраняется при
+    любой метке — обвёл ржавчину и поставил «целая», область запишется.
+  </p>
 
   <div id="ask">
     <h3>Что на выделенной области?</h3>
     <p>Рамку можно перерисовать — запись произойдёт только по кнопке.
-       «Разобрана» — если снят двигатель или коробка: там свидетельство весь
-       кадр, а не участок.</p>
+       «Повреждение» — это удар в одном месте: вмятина, залом, разбитая
+       деталь. «Авария» — если разрушен весь узел и обводить нечего.
+       «Разобрана» — если снят двигатель или коробка. У последних двух
+       свидетельство весь кадр, а не участок.</p>
     <div class="row">
       <button id="a-damaged" class="sel">повреждение кузова<kbd>D</kbd></button>
+      <button id="a-wreck">серьёзная авария<kbd>W</kbd></button>
       <button id="a-parts">разобрана / снят агрегат<kbd>P</kbd></button>
       <button id="a-unclear">не понять<kbd>U</kbd></button>
-      <button id="a-intact">целая, рамка не нужна<kbd>I</kbd></button>
+      <button id="a-intact">целая<kbd>I</kbd></button>
     </div>
-    <input type="text" id="comment" placeholder="комментарий (необязательно)">
     <div class="row">
       <button id="a-save" class="primary">сохранить<kbd>Enter</kbd></button>
       <button id="a-cancel">отменить рамку<kbd>Esc</kbd></button>
@@ -168,6 +203,11 @@ TEMPLATE = """<!doctype html>
 
 <script>
 const QUEUE = __QUEUE__;
+const DONE = __DONE__;
+// Просмотр уже размеченного — второй режим той же страницы. Отдельной
+// страницы не делаем: смысл в том, чтобы поправить метку не выходя из
+// разметки, а переход туда-обратно сбивал бы темп.
+let view = QUEUE, mode = 'queue';
 let i = 0, box = null, drawing = null, choice = null;
 
 const img = document.getElementById('shot');
@@ -176,22 +216,27 @@ const ask = document.getElementById('ask');
 const hint = document.getElementById('hint');
 
 function show() {
-  const it = QUEUE[i];
+  const it = view[i];
   if (!it) { hint.textContent = 'Очередь закончилась.'; return; }
   img.src = '/photos/' + it.path.replace(/^data\\/photos\\//, '');
   box = null; choice = null;
   boxEl.style.display = 'none';
   closeAsk();
   document.getElementById('comment').value = it.comment || '';
-  document.getElementById('pos').textContent = (i + 1) + ' / ' + QUEUE.length;
+  document.getElementById('pos').textContent = (i + 1) + ' / ' + view.length;
   document.getElementById('bar').style.width =
-    ((i + 1) / QUEUE.length * 100) + '%';
+    ((i + 1) / view.length * 100) + '%';
   document.getElementById('meta').innerHTML =
     it.ad_id + ' · кадр ' + it.position +
     (it.price ? ' · ' + it.price : '') +
     (it.suspect ? ' · <span class="flag">объявление отмечено как возможно повреждённое</span>' : '');
-  hint.innerHTML = it.label
-    ? '<span class="ok">уже размечено: ' + it.label + '</span>' : '';
+  const again = document.getElementById('again');
+  again.innerHTML = it.label
+    ? 'вы уже отмечали это как «' + RU[it.label] + '»'
+      + (it.comment ? ' · ' + it.comment : '')
+      + ' — можно поправить, запись обновится на месте'
+    : '';
+  hint.innerHTML = '';
   if (it.x1 !== undefined && it.x1 !== null && it.x1 !== '')
     drawBox(+it.x1, +it.y1, +it.x2, +it.y2);
 }
@@ -222,7 +267,7 @@ function openAsk(pick) {
 function closeAsk() { ask.classList.remove('on'); }
 
 function paintChoice() {
-  for (const k of ['damaged', 'parts', 'intact', 'unclear'])
+  for (const k of ['damaged', 'wreck', 'parts', 'intact', 'unclear'])
     document.getElementById('a-' + k).classList.toggle('sel', choice === k);
 }
 
@@ -257,16 +302,24 @@ async function commit(label, useBox) {
     return;
   }
   it.label = label; it.comment = body.comment;
+  // держим DONE в согласии с журналом, иначе просмотр покажет старую метку
+  const k = DONE.findIndex(r => r.ad_id === it.ad_id && r.position === it.position);
+  const rec = { ad_id: it.ad_id, position: it.position, path: it.path,
+                label: label, comment: body.comment };
+  if (useBox && box) { rec.x1 = box[0]; rec.y1 = box[1]; rec.x2 = box[2]; rec.y2 = box[3]; }
+  if (k >= 0) DONE[k] = rec; else DONE.push(rec);
   if (useBox && box) { it.x1 = box[0]; it.y1 = box[1]; it.x2 = box[2]; it.y2 = box[3]; }
-  for (const k of ['damaged', 'parts', 'intact', 'unclear'])
+  for (const k of ['damaged', 'wreck', 'parts', 'intact', 'unclear'])
     document.getElementById('c-' + k).textContent = j.stats[k];
   hint.innerHTML = '<span class="ok">сохранено</span>';
   closeAsk();
-  setTimeout(() => { if (i < QUEUE.length - 1) { i++; show(); } }, 170);
+  setTimeout(() => { if (i < view.length - 1) { i++; show(); } }, 170);
 }
 
-document.getElementById('a-save').onclick = () =>
-  commit(choice, choice === 'damaged');
+// Рамку сохраняем при ЛЮБОЙ метке, если она нарисована: раньше её
+// отбрасывали для всего кроме «повреждения», и обведённая ржавчина
+// пропадала молча.
+document.getElementById('a-save').onclick = () => commit(choice, !!box);
 document.getElementById('a-cancel').onclick = () => {
   box = null; boxEl.style.display = 'none'; closeAsk(); hint.textContent = '';
 };
@@ -279,23 +332,34 @@ document.getElementById('a-unclear').onclick = () => { choice = 'unclear'; paint
 document.getElementById('b-intact').onclick = () => commit('intact', false);
 document.getElementById('b-parts').onclick = () => commit('parts', false);
 document.getElementById('b-unclear').onclick = () => commit('unclear', false);
+document.getElementById('b-wreck').onclick = () => commit('wreck', false);
+document.getElementById('a-wreck').onclick = () => { choice = 'wreck'; paintChoice(); };
 document.getElementById('b-prev').onclick = () => { i = Math.max(0, i - 1); show(); };
 document.getElementById('b-next').onclick = () => {
-  i = Math.min(i + 1, QUEUE.length - 1); show(); };
+  i = Math.min(i + 1, view.length - 1); show(); };
 
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') {
-    if (e.key === 'Enter') document.getElementById('a-save').click();
+    // Enter в комментарии подтверждает только когда диалог открыт: вне его
+    // метка ещё не выбрана, и сохранять нечего.
+    if (e.key === 'Enter' && ask.classList.contains('on'))
+      document.getElementById('a-save').click();
+    if (e.key === 'Escape') e.target.blur();
     return;
   }
   const k = e.key.toLowerCase();
   const open = ask.classList.contains('on');
-  if (e.key === 'Escape') { document.getElementById('a-cancel').click(); }
+  if (e.key === 'Escape') {
+    if (ask.classList.contains('on')) document.getElementById('a-cancel').click();
+    else if (mode !== 'queue') setMode(null);
+  }
   else if (e.key === 'Enter' && open) { document.getElementById('a-save').click(); }
   else if (k === 'd' || k === 'в') {
     if (open) { choice = 'damaged'; paintChoice(); }
     else hint.innerHTML = '<span class="warn">Сначала обведите повреждение мышью.</span>';
   }
+  else if (k === 'w' || k === 'ц') { open ? (choice = 'wreck', paintChoice())
+                                          : commit('wreck', false); }
   else if (k === 'p' || k === 'з') { open ? (choice = 'parts', paintChoice())
                                           : commit('parts', false); }
   else if (k === 'i' || k === 'ш') { open ? (choice = 'intact', paintChoice())
@@ -303,15 +367,41 @@ window.addEventListener('keydown', e => {
   else if (k === 'u' || k === 'г') { open ? (choice = 'unclear', paintChoice())
                                           : commit('unclear', false); }
   else if (e.key === 'ArrowLeft') { i = Math.max(0, i - 1); show(); }
-  else if (e.key === 'ArrowRight') { i = Math.min(i + 1, QUEUE.length - 1); show(); }
+  else if (e.key === 'ArrowRight') { i = Math.min(i + 1, view.length - 1); show(); }
 });
+
+const RU = { damaged: 'повреждение', wreck: 'авария', parts: 'разобрана',
+             intact: 'целая', unclear: 'не понять' };
+
+function setMode(label) {
+  const back = document.getElementById('backpill');
+  document.querySelectorAll('.pill.tap').forEach(
+    p => p.classList.toggle('on', p.dataset.lab === label));
+  if (!label) {
+    mode = 'queue'; view = QUEUE; back.classList.add('hid');
+  } else {
+    const rows = DONE.filter(r => r.label === label);
+    if (!rows.length) {
+      hint.innerHTML = '<span class="warn">таких меток пока нет</span>';
+      return;
+    }
+    mode = label; view = rows; back.classList.remove('hid');
+  }
+  i = 0; show();
+}
+
+document.querySelectorAll('.pill.tap').forEach(p => {
+  p.onclick = () => setMode(mode === p.dataset.lab ? null : p.dataset.lab);
+});
+document.getElementById('backpill').onclick = () => setMode(null);
 
 show();
 </script>
 """
 
 
-def page(queue_rows: list[dict], counts: dict) -> str:
+def page(queue_rows: list[dict], counts: dict,
+         done_rows: list[dict] | None = None) -> str:
     """HTML страницы. Очередь уезжает в JavaScript одним куском.
 
     json.dumps со всеми полями сразу, а не подстановка по одному: очередь
@@ -319,7 +409,12 @@ def page(queue_rows: list[dict], counts: dict) -> str:
     ради того, чтобы браузер показывал по одному, бессмысленно.
     """
     out = TEMPLATE.replace("__QUEUE__", json.dumps(queue_rows, ensure_ascii=False))
-    for key in ("damaged", "intact", "unclear"):
+    out = out.replace("__DONE__",
+                      json.dumps(done_rows or [], ensure_ascii=False))
+    # Перечень берётся из LABELS, а не списком здесь: захардкоженный кортеж
+    # уже разошёлся с метками — «parts» добавили, сюда вписать забыли, и
+    # счётчик разобранных на свежей странице показывал ноль.
+    for key in LABELS:
         out = out.replace(f'id="c-{key}">0<',
                           f'id="c-{key}">{html.escape(str(counts.get(key, 0)))}<')
     return out
