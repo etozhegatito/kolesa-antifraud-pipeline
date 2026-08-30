@@ -2110,6 +2110,64 @@ def test_routed_model_bootstrap_compares_paired_duplicate_groups():
     assert result["bootstrap_probability_better"] == 1.0
 
 
+def test_mape_stability_bootstrap_is_grouped_and_deterministic():
+    """Перезалив одной машины нельзя считать независимыми наблюдениями."""
+    import numpy as np
+    from kz.ml.mape_stability import grouped_bootstrap_mape
+
+    ape = np.array([10.0, 10.0, 50.0, 30.0])
+    groups = np.array(["same-car", "same-car", "b", "c"])
+    first = grouped_bootstrap_mape(ape, groups, n_boot=200, seed=7)
+    second = grouped_bootstrap_mape(ape, groups, n_boot=200, seed=7)
+    assert first == second
+    assert first["independent_groups"] == 3
+    assert first["n"] == 4
+    assert np.isclose(first["mape_pct"], 25.0)
+
+
+def test_mape_stability_separates_age_from_price():
+    """Возрастный вывод обязан проверяться внутри цены, а не по корреляции."""
+    import pandas as pd
+    from kz.ml.mape_stability import build_report
+
+    oof = pd.DataFrame({
+        "duplicate_group": ["a", "b", "c", "d"],
+        "age": [3, 8, 12, 25],
+        "actual_price_tenge": [4e6, 6e6, 4e6, 6e6],
+        "absolute_percentage_error_pct": [40.0, 10.0, 30.0, 20.0],
+    })
+    report, rows = build_report(oof, n_boot=50)
+    assert len(report["by_age"]) == 4
+    assert set(rows[rows.segment_type == "price"].segment) == {"<5M", "5M+"}
+    assert set(rows[rows.segment_type == "age_x_price"].segment) == {
+        "0-5 | <5M", "6-10 | 5M+", "11-20 | <5M", "21+ | 5M+",
+    }
+
+
+def test_oof_diagnostics_are_local_minimal_and_atomic(tmp_path, monkeypatch):
+    """Диагностика не должна уносить текст/URL и обязана переживать запись."""
+    import numpy as np
+    import pandas as pd
+    from kz.ml import train_price_model as model
+
+    target = tmp_path / "oof.csv"
+    monkeypatch.setattr(model, "OOF_DIAGNOSTICS_PATH", target)
+    df = pd.DataFrame({
+        "ad_id": ["a", "b"],
+        "text_full": ["достаточно длинный текст", "другой длинный текст"],
+        "brand": ["X", "Y"], "model": ["A", "B"], "year": [2020, 2010],
+        "age": [7, 17], "price_tenge": [1_000_000, 2_000_000],
+    })
+    truth = np.log(df["price_tenge"].to_numpy())
+    model.save_oof_diagnostics(df, truth, truth, truth)
+    saved = pd.read_csv(target)
+    assert len(saved) == 2
+    assert "ad_id" not in saved
+    assert "text_full" not in saved
+    assert "actual_price_tenge" in saved
+    assert np.allclose(saved["absolute_percentage_error_pct"], 0)
+
+
 def test_temporal_metrics_include_routed_vs_base_uncertainty():
     """OOT-выигрыш маршрута тоже нельзя публиковать без интервала разницы."""
     import inspect

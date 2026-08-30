@@ -15,6 +15,7 @@ brand/model, brand и общей медианы. Без baseline высокая 
 
 Запуск: python -m kz.ml.train_price_model   (офлайн, только Postgres)
 Выход: data/models/price_model.cbm + price_model.metadata.json
+       data/eda/price_model_oof.csv — обезличенные OOF-прогнозы для аудита
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ MODEL_DIR = Path("data/models")
 MODEL_PATH = MODEL_DIR / "price_model.cbm"
 SPECIALIST_MODEL_PATH = MODEL_DIR / "price_cheap_specialist.cbm"
 METADATA_PATH = MODEL_DIR / "price_model.metadata.json"
+OOF_DIAGNOSTICS_PATH = Path("data/eda/price_model_oof.csv")
 ARTIFACT_SCHEMA_VERSION = 1
 RANDOM_SEED = 42
 
@@ -361,6 +363,39 @@ def segment_metrics(df: pd.DataFrame, pred_log: np.ndarray) -> dict[str, dict]:
     return result
 
 
+def save_oof_diagnostics(
+    df: pd.DataFrame,
+    routed_log: np.ndarray,
+    base_log: np.ndarray,
+    baseline_log: np.ndarray,
+) -> None:
+    """Сохраняет честные построчные OOF-прогнозы для сегментного аудита.
+
+    Повторно обучать десять CatBoost-моделей только ради вопроса «где именно
+    ошибаемся?» дорого и создаёт риск сравнить разные разбиения. Поэтому
+    сохраняем прогнозы того же grouped CV, из которого попала MAPE в metadata.
+    Тексты, URL и фотографии сюда не входят; артефакт остаётся локальным в
+    gitignored ``data/``.
+    """
+    actual = df["price_tenge"].to_numpy(dtype=float)
+    report = pd.DataFrame({
+        "duplicate_group": duplicate_groups(df).astype(str).to_numpy(),
+        "age": pd.to_numeric(df["age"], errors="coerce").to_numpy(),
+        "actual_price_tenge": actual,
+        "routed_pred_tenge": np.exp(np.asarray(routed_log, dtype=float)),
+        "base_pred_tenge": np.exp(np.asarray(base_log, dtype=float)),
+        "baseline_pred_tenge": np.exp(np.asarray(baseline_log, dtype=float)),
+    })
+    report["absolute_percentage_error_pct"] = (
+        np.abs(report["routed_pred_tenge"] - actual) / actual * 100
+    )
+
+    OOF_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = OOF_DIAGNOSTICS_PATH.with_suffix(".csv.tmp")
+    report.to_csv(tmp, index=False)
+    os.replace(tmp, OOF_DIAGNOSTICS_PATH)
+
+
 def _data_fingerprint(df: pd.DataFrame) -> str:
     cols = [c for c in ["ad_id", "scraped_at", "price_tenge"] if c in df.columns]
     stable = df[cols].astype(str).sort_values(cols).to_csv(index=False)
@@ -555,11 +590,17 @@ def main():
             "temporal_holdout": temporal,
             "segments": segments,
         },
+        "oof_diagnostics": {
+            "path": str(OOF_DIAGNOSTICS_PATH),
+            "rows": int(len(clean)),
+        },
     }
     save_artifact(final, specialist, metadata)
+    save_oof_diagnostics(clean, model_oof, base_oof, baseline_oof)
     print(f"\nАртефакт модели → {MODEL_PATH}")
     print(f"Специалист       → {SPECIALIST_MODEL_PATH}")
     print(f"Метаданные       → {METADATA_PATH}")
+    print(f"OOF-диагностика  → {OOF_DIAGNOSTICS_PATH}")
 
 
 if __name__ == "__main__":

@@ -132,16 +132,17 @@ ML_CHAIN = [
     # показывали 0.000 и бодрое «данные стабильны», ничего не измерив.
     step("ML 1 · дрейф данных",      "kz.ml.monitoring"),
     step("ML 2 · модель цены",       "kz.ml.train_price_model"),
-    step("ML 3 · ценовой пол",       "kz.ml.residual_detector"),
+    step("ML 3 · стабильность MAPE", "kz.ml.mape_stability"),
+    step("ML 4 · ценовой пол",       "kz.ml.residual_detector"),
     # Интервал цены. Отдельно от ценового пола, хотя оба квантильные: пол —
     # это антифрод («подозрительно дёшево для такой машины»), а интервал —
     # продукт («восемь из десяти попадают внутрь»). Разные цели, разные
     # уровни квантилей, разная калибровка; смешивать нельзя.
-    step("ML 4 · интервал цены",     "kz.ml.price_interval"),
-    step("ML 5 · графики модели",    "kz.report.ml_dashboard"),
-    step("ML 6 · HTML-отчёт",        "kz.report.ml_report"),
-    step("ML 7 · метрики антифрода", "kz.report.evaluate_detector"),
-    step("ML 8 · срок жизни объявления", "kz.ml.survival"),
+    step("ML 5 · интервал цены",     "kz.ml.price_interval"),
+    step("ML 6 · графики модели",    "kz.report.ml_dashboard"),
+    step("ML 7 · HTML-отчёт",        "kz.report.ml_report"),
+    step("ML 8 · метрики антифрода", "kz.report.evaluate_detector"),
+    step("ML 9 · срок жизни объявления", "kz.ml.survival"),
 ]
 
 

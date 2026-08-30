@@ -9,7 +9,8 @@ otherwise it would just be an expensive cron.
 
     clean ──┬── explore ── label_cards ───────────────────────┐
             ├── evaluate_detector ────────────────────────────┤
-            └── data_drift ── train_price_model ──┬── ml_dashboard ──┤
+            └── data_drift ── train_price_model ──┬── mape_stability ─┤
+                                    ├── ml_dashboard ─────────┤
                                     ├── time_on_market ───────┤
                                     ├── price_interval ───────┤
                                     └── residual_detector ── ml_report
@@ -27,6 +28,8 @@ Why the graph looks like this:
     currently deployed model was trained on, so it must finish BEFORE training
     replaces that model. Running it after training makes PSI compare the current
     data with itself and produces a meaningless zero;
+  mape_stability reads the exact grouped OOF predictions emitted by training
+    and measures sample uncertainty plus age/price segments without retraining;
   time_on_market fits Kaplan-Meier and Cox on the clean layer but needs the
     price model to place each ad against its fair price, so it waits too —
     and then runs alongside the reports rather than behind them;
@@ -84,6 +87,7 @@ with DAG(
     cards     = job("label_cards",       "kz.report.label_cards")
     evaluate  = job("evaluate_detector", "kz.report.evaluate_detector")
     train     = job("train_price_model", "kz.ml.train_price_model")
+    stability = job("mape_stability",    "kz.ml.mape_stability")
     residual  = job("residual_detector", "kz.ml.residual_detector")
     dashboard = job("ml_dashboard",      "kz.report.ml_dashboard")
     report    = job("ml_report",         "kz.report.ml_report")
@@ -95,9 +99,10 @@ with DAG(
     clean >> explore >> cards
     clean >> evaluate
     clean >> monitor >> train >> dashboard
+    train >> stability
     train >> residual >> report
     # Monitoring must read the PREVIOUSLY deployed model before `train`
     # overwrites it. This is a dependency, not just a preferred ordering.
     train >> survival
     train >> interval
-    [cards, evaluate, dashboard, report, monitor, survival, interval] >> state
+    [cards, evaluate, dashboard, report, monitor, survival, interval, stability] >> state
