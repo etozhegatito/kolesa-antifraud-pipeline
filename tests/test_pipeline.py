@@ -2136,6 +2136,18 @@ def test_photo_fetch_skips_unresolvable_hosts():
     assert "example.invalid" not in alive       # заведомо нерезолвимый TLD
 
 
+def test_photo_dedup_skips_unresolvable_hosts():
+    """pHash-джоб должен делать тот же DNS-preflight, что и скачивание.
+
+    Реальный сбой 2026-08-30: старый CDN чередовался с живым,
+    поэтому consecutive-fail предохранитель не срабатывал, а каждая
+    мёртвая ссылка ждала timeout + 30 секунд.
+    """
+    from kz.collect.photo_dedup import live_hosts
+    alive = live_hosts(["https://example.invalid/a.jpg", "https://localhost/b.jpg"])
+    assert "example.invalid" not in alive
+
+
 def test_photo_fetch_path_layout_shards_by_ad_id():
     """Тысячи файлов в одном каталоге тормозят файловую систему, поэтому
     раскладываем по подпапкам."""

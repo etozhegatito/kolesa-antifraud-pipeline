@@ -42,6 +42,7 @@ import csv
 import io
 import logging
 import random
+import socket
 import sys
 import time
 from datetime import datetime
@@ -106,6 +107,25 @@ def load_hashes() -> pd.DataFrame:
     return pd.read_csv(HASHES_CSV, dtype={"ad_id": str})
 
 
+def live_hosts(urls) -> set[str]:
+    """DNS-preflight один раз на хост.
+
+    CDN иногда выводит домен из эксплуатации, но десятки тысяч
+    старых URL остаются в базе. Без preflight каждая такая ссылка
+    ждёт сетевой timeout, а успешные ссылки между ними сбрасывают
+    счётчик consecutive failures. Итог — джоб может висеть часами.
+    """
+    hosts = {str(u).split("/")[2] for u in urls if str(u).startswith("http")}
+    alive = set()
+    for host in sorted(hosts):
+        try:
+            socket.getaddrinfo(host, 443)
+            alive.add(host)
+        except OSError:
+            log.warning(f"хост {host} не резолвится — пропускаю его ссылки")
+    return alive
+
+
 def append_hash(row: dict):
     with open(HASHES_CSV, "a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=HASH_FIELDS, extrasaction="ignore").writerow(row)
@@ -137,6 +157,11 @@ def pick_targets(done_urls: set) -> pd.DataFrame:
     # Реальные фото у kolesa всегда абсолютные https-URL — фильтр по
     # префиксу отсекает заглушки, не завязываясь на конкретное имя файла.
     photos = photos[photos["url"].fillna("").str.startswith("http")]
+
+    # Мёртвый CDN-хост отсекаем ДО .head(MAX_PER_RUN), иначе он
+    # занял бы дефицитную порцию и не оставил места живым ссылкам.
+    alive = live_hosts(photos["url"])
+    photos = photos[photos["url"].str.split("/").str[2].isin(alive)]
 
     clean = pd.read_sql("SELECT ad_id, is_suspicious FROM clean_data", engine,
                          dtype={"ad_id": str})
