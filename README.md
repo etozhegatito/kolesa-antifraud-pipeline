@@ -29,7 +29,7 @@
             в 65 случайных контролях фрода нет → верхняя граница 4,6% (95%)
 разметка    782 кадра; 38 независимых damaged/wreck-объявлений
 фото-CV     ROC-AUC 0,658 и PR-AUC 0,392 против table 0,739 / 0,519
-код         11 500+ строк, 232 офлайн-теста + 6 с test-БД, CI на GitHub Actions
+код         11 500+ строк, 233 офлайн-теста + 6 с test-БД, CI на GitHub Actions
 ```
 
 Средняя ошибка и типичная — разные вещи: **половина машин оценивается точнее
@@ -72,10 +72,10 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env          # пароль к Postgres придумайте свой
 docker compose up -d          # схема применяется автоматически
-python -m pytest tests/ -q    # 231 passed, 6 skipped без test-БД
+python -m pytest tests/ -q    # 233 passed, 6 skipped без test-БД
 ```
 
-Дальше — четыре команды, больше помнить нечего:
+Дальше — пять команд, больше помнить нечего:
 
 ```bash
 python -m kz.ops.run_all --collect       # собрать данные (единственный путь в сеть)
@@ -93,6 +93,8 @@ python -m kz.ml.photo_dataset            # COCO-export ручных damage-ра�
 просмотр `data/eda/ml_report.html`. Нельзя запускать parser и enrich
 параллельно: они обращаются к одному хосту. Единственный
 координированный сетевой вход — `run_all --collect`.
+По умолчанию parser берёт только первые 3 страницы каждого ценового
+сегмента: глубокие страницы не показали измеримой пользы для MAPE.
 
 Подробнее — [SETUP.md](docs/SETUP.md).
 

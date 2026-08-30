@@ -740,6 +740,23 @@ def test_parser_and_catch_up_share_one_daily_budget(tmp_path, monkeypatch):
         parser.reserve_kolesa_request()
 
 
+def test_parser_defaults_to_fresh_first_pages(monkeypatch):
+    """Дефолт — свежак, а не глубинный backfill.
+
+    Блоки до 100-й страницы дали много повторов, но почти не изменили
+    MAPE. Поэтому без явного env-override парсер должен всегда брать
+    страницы 1–3 каждого ценового сегмента.
+    """
+    import importlib
+    from kz.collect import parser
+
+    monkeypatch.delenv("KOLESA_MAX_PAGES", raising=False)
+    monkeypatch.delenv("KOLESA_START_PAGE", raising=False)
+    fresh = importlib.reload(parser)
+    assert fresh.START_PAGE == 1
+    assert fresh.MAX_PAGES_PER_CATEGORY == 3
+
+
 def test_enrich_done_unions_csv_and_postgres(tmp_path, monkeypatch):
     """Строка только в БД не должна повторно сжигать запрос из-за старого CSV."""
     import csv
