@@ -3655,6 +3655,24 @@ def test_damage_ui_collects_multiple_boxes_before_one_commit():
     assert "__MAX_BOXES__" not in html
 
 
+def test_damage_ui_uses_exact_english_dataset_labels():
+    """Кнопки должны совпадать с CSV-классами и не маскировать их переводом.
+
+    Русское «повреждение кузова» было шире целевого класса и привело к тому,
+    что ржавчина и потёртости попадали в damaged. Определение оставляем рядом.
+    """
+    from kz.web import damage_page
+
+    page = damage_page.page([], {}, [])
+    for label in ("Damaged", "Wreck", "Parts", "Intact", "Unclear"):
+        assert f">{label}<" in page or f">{label}<kbd>" in page
+    assert "Intact = no impact/dent" in page
+    assert "Ржавчина, грязь, потёртости тоже" in page
+    for old in (">повреждение кузова<", ">серьёзная авария<",
+                ">разобрана / снят агрегат<", ">целая<", ">не понять<"):
+        assert old not in page
+
+
 def test_damage_endpoint_ignores_client_supplied_photo_path():
     """Путь берётся с сервера, а сохранённый кадр удаляется из кэша."""
     import importlib

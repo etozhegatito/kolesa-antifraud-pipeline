@@ -19,9 +19,9 @@
 ЧТО ВАЖНО ДЛЯ СКОРОСТИ. Триста кадров — это часа полтора, и разница между
 удобным и неудобным интерфейсом решает, будет разметка сделана или нет:
 
-  без рамки    «целая» и «не понять» ставятся одной клавишей, рисовать не надо
-  клавиши      D — удар/вмятина, W — авария, P — разобрана, I — целая,
-               U — не понять, Enter — подтвердить
+  без рамки    Intact и Unclear ставятся одной клавишей, рисовать не надо
+  клавиши      D — Damaged, W — Wreck, P — Parts, I — Intact,
+               U — Unclear, Enter — подтвердить
   Esc          отменить рамку и начать заново
   стрелки      назад и вперёд, метку можно поправить
   автопереход  после сохранения сразу следующий кадр
@@ -41,7 +41,7 @@ from kz.report.photo_labels import LABELS, MAX_BOXES_PER_FRAME
 TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Разметка повреждений</title>
+<title>Damage labeling</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -129,16 +129,16 @@ TEMPLATE = """<!doctype html>
 </style>
 
 <header>
-  <h1>Разметка повреждений</h1>
+  <h1>Damage labeling</h1>
   <span class="sub"><a href="/">← главная</a></span>
   <span class="spacer"></span>
-  <span class="pill">кадр <b id="pos">—</b></span>
-  <span class="pill tap" data-lab="damaged">повреждений <b id="c-damaged">0</b></span>
-  <span class="pill tap" data-lab="wreck">аварий <b id="c-wreck">0</b></span>
-  <span class="pill tap" data-lab="parts">разобрано <b id="c-parts">0</b></span>
-  <span class="pill tap" data-lab="intact">целых <b id="c-intact">0</b></span>
-  <span class="pill tap" data-lab="unclear">неясных <b id="c-unclear">0</b></span>
-  <span class="pill hid" id="backpill">← вернуться к очереди<kbd>Esc</kbd></span>
+  <span class="pill">Frame <b id="pos">—</b></span>
+  <span class="pill tap" data-lab="damaged">Damaged <b id="c-damaged">0</b></span>
+  <span class="pill tap" data-lab="wreck">Wreck <b id="c-wreck">0</b></span>
+  <span class="pill tap" data-lab="parts">Parts <b id="c-parts">0</b></span>
+  <span class="pill tap" data-lab="intact">Intact <b id="c-intact">0</b></span>
+  <span class="pill tap" data-lab="unclear">Unclear <b id="c-unclear">0</b></span>
+  <span class="pill hid" id="backpill">← Back to queue<kbd>Esc</kbd></span>
 </header>
 
 <div id="barwrap"><div id="bar"></div></div>
@@ -154,13 +154,13 @@ TEMPLATE = """<!doctype html>
   <div id="again"></div>
 
   <div class="row" id="quick">
-    <button id="b-intact">целая<kbd>I</kbd></button>
-    <button id="b-wreck">авария<kbd>W</kbd></button>
-    <button id="b-parts">разобрана<kbd>P</kbd></button>
-    <button id="b-unclear">не понять<kbd>U</kbd></button>
-    <button id="b-pop-box" disabled>убрать последнюю рамку</button>
-    <span class="sub">рамок: <b id="boxcount">0</b></span>
-    <span class="sub">или обведите удар мышью</span>
+    <button id="b-intact">Intact<kbd>I</kbd></button>
+    <button id="b-wreck">Wreck<kbd>W</kbd></button>
+    <button id="b-parts">Parts<kbd>P</kbd></button>
+    <button id="b-unclear">Unclear<kbd>U</kbd></button>
+    <button id="b-pop-box" disabled>Remove last box</button>
+    <span class="sub">Boxes: <b id="boxcount">0</b></span>
+    <span class="sub">or draw a box around an impact/dent</span>
   </div>
 
   <div class="row" id="commentrow">
@@ -169,44 +169,44 @@ TEMPLATE = """<!doctype html>
   </div>
 
   <p class="sub" id="legend">
-    <b>целая</b> — ударов и вмятин нет. Ржавчина, грязь, потёртости тоже
+    <b>Intact = no impact/dent</b> — ударов и вмятин нет. Ржавчина, грязь, потёртости тоже
     сюда: ржавчину сеть уже различает сама, а вмятину нет — ради неё и
     размечаем. Заметил ржавчину — напиши в комментарий, не теряй.<br>
-    <b>рамка или авария</b> — по простому правилу: можно обвести одно
-    место, значит «повреждение»; разрушен весь перёд или зад и обводить
-    нечего, значит «авария».<br>
-    <b>рамки</b> — отдельные удары обводи отдельно. После первой нажми
-    «добавить ещё рамку», обведи следующую и только затем сохрани кадр.
+    <b>Damaged or Wreck</b> — по простому правилу: можно обвести одно
+    место, значит Damaged; разрушен весь перёд или зад и обводить
+    нечего, значит Wreck.<br>
+    <b>Boxes</b> — отдельные удары обводи отдельно. После первой нажми
+    Add another box, обведи следующую и только затем сохрани кадр.
     Не захватывай асфальт и небо. Рамки сохраняются при любой метке —
-    обвёл ржавчину и поставил «целая», области тоже запишутся.
+    обвёл ржавчину и выбрал Intact, области тоже запишутся.
   </p>
 
   <div id="ask">
-    <h3>Что на выделенной области?</h3>
+    <h3>What is inside the box?</h3>
     <p>Рамку можно перерисовать — запись произойдёт только по кнопке.
-       «Повреждение» — это удар в одном месте: вмятина, залом, разбитая
-       деталь. «Авария» — если разрушен весь узел и обводить нечего.
-       «Разобрана» — если снят двигатель или коробка. У последних двух
+       Damaged — это удар в одном месте: вмятина, залом, разбитая
+       деталь. Wreck — если разрушен весь узел и обводить нечего.
+       Parts — если снят двигатель или коробка. У последних двух
        свидетельство весь кадр, а не участок.</p>
     <div class="row">
-      <button id="a-damaged" class="sel">повреждение кузова<kbd>D</kbd></button>
-      <button id="a-wreck">серьёзная авария<kbd>W</kbd></button>
-      <button id="a-parts">разобрана / снят агрегат<kbd>P</kbd></button>
-      <button id="a-unclear">не понять<kbd>U</kbd></button>
-      <button id="a-intact">целая<kbd>I</kbd></button>
+      <button id="a-damaged" class="sel">Damaged<kbd>D</kbd></button>
+      <button id="a-wreck">Wreck<kbd>W</kbd></button>
+      <button id="a-parts">Parts<kbd>P</kbd></button>
+      <button id="a-unclear">Unclear<kbd>U</kbd></button>
+      <button id="a-intact">Intact<kbd>I</kbd></button>
     </div>
     <div class="row">
-      <button id="a-add">добавить ещё рамку</button>
-      <button id="a-save" class="primary">сохранить<kbd>Enter</kbd></button>
-      <button id="a-cancel">отменить рамку<kbd>Esc</kbd></button>
+      <button id="a-add">Add another box</button>
+      <button id="a-save" class="primary">Save<kbd>Enter</kbd></button>
+      <button id="a-cancel">Cancel box<kbd>Esc</kbd></button>
     </div>
   </div>
 
   <div id="hint"></div>
 
   <div class="row">
-    <button id="b-prev">← назад</button>
-    <button id="b-next">вперёд →</button>
+    <button id="b-prev">← Previous</button>
+    <button id="b-next">Next →</button>
   </div>
 </main>
 
@@ -247,7 +247,7 @@ function show() {
     (it.suspect ? ' · <span class="flag">объявление отмечено как возможно повреждённое</span>' : '');
   const again = document.getElementById('again');
   again.innerHTML = it.label
-    ? 'вы уже отмечали это как «' + RU[it.label] + '»'
+    ? 'Already labeled as ' + LABEL_NAMES[it.label]
       + (it.comment ? ' · ' + it.comment : '')
       + ' — можно поправить, запись обновится на месте'
     : '';
@@ -447,8 +447,8 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'ArrowRight') { i = Math.min(i + 1, view.length - 1); show(); }
 });
 
-const RU = { damaged: 'повреждение', wreck: 'авария', parts: 'разобрана',
-             intact: 'целая', unclear: 'не понять' };
+const LABEL_NAMES = { damaged: 'Damaged', wreck: 'Wreck', parts: 'Parts',
+                      intact: 'Intact', unclear: 'Unclear' };
 
 function setMode(label) {
   const back = document.getElementById('backpill');
