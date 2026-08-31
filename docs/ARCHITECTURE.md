@@ -306,7 +306,8 @@ docker-compose.yaml           # Postgres и опциональный Airflow
 
 ```bash
 python -m kz.ops.run_all --fast
-python -m kz.report.label_cards --serve
+python -m kz.web
+# /label — вердикт объявления, /damage — рамки на отдельных фото
 ```
 
 Так работает и импорт между модулями, и запуск из корня, без правок

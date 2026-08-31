@@ -17,8 +17,13 @@ from kz.report.label_cards.journal import LABELS_CSV
 
 QUEUE_CSV = "data/eda/labeling_queue.csv"
 
-def load_rows(include_queue: bool = False) -> pd.DataFrame:
-    """Подозрительные из clean_data (+ опционально residual-кандидаты)."""
+def load_rows(include_queue: bool = True) -> pd.DataFrame:
+    """Полная очередь вердиктов; ``False`` оставлен для аудита правил.
+
+    Одних правиловых подозрительных недостаточно: без random_control нельзя
+    оценить пропущенный fraud, а без residual_candidate — второй детектор.
+    Поэтому статистически корректная полная выборка является default.
+    """
     eng = get_engine()
     cd = pd.read_sql("SELECT * FROM clean_data", eng, dtype={"ad_id": str})
     ids = set(cd.loc[cd["is_suspicious"] == 1, "ad_id"])

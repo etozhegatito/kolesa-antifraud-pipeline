@@ -312,6 +312,11 @@ def build(rows: pd.DataFrame, serve_mode: bool = False,
                     for i, (_, r) in enumerate(rows.iterrows()))
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
     n_done = int(rows["existing_verdict"].notna().sum())
+    n_left = len(rows) - n_done
+    strata = rows.get("stratum", pd.Series(dtype=str)).fillna("").value_counts()
+    n_rules = int(strata.get("rule_positive", 0))
+    n_residual = int(strata.get("residual_candidate", 0))
+    n_control = int(strata.get("random_control", 0))
     n_nophoto = sum(1 for _, r in rows.iterrows()
                     if r["photos"] and not any(
                         photo_src(str(r["ad_id"]), p, u, serve_mode)
@@ -324,6 +329,12 @@ def build(rows: pd.DataFrame, serve_mode: bool = False,
             .replace("__NDEAD__", str(n_dead))
             .replace("__NOPHOTO__", str(n_nophoto))
             .replace("__NDONE__", str(n_done))
+            .replace("__NLEFT__", str(n_left))
+            .replace("__NRULES__", str(n_rules))
+            .replace("__NRESIDUAL__", str(n_residual))
+            .replace("__NCONTROL__", str(n_control))
+            .replace("__HOME__", ('<a class="count" href="/">← главная</a>'
+                                  if serve_mode else ""))
             .replace("__SERVER__", "true" if serve_mode else "false")
             .replace("__JOURNAL__", str(journal_total))
             .replace("__MODECLS__", "live" if serve_mode else "draft")
@@ -586,8 +597,9 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
   <div class="progress"><i id="bar"></i></div>
   <div class="topin">
     <h1>Разметка антифрода</h1>
+    __HOME__
     <span class="count"><b id="cnt">0</b> из __N__ в этой очереди</span>
-    <span class="count total-note">всего в журнале: <b>__JOURNAL__</b></span>
+    <span class="count total-note" title="включая прошлые очереди и unknown">всего в журнале: <b>__JOURNAL__</b></span>
     <span class="count" id="restored"></span>
     <span class="mode __MODECLS__">__MODE__</span>
     <button class="tbtn" id="filter">скрыть размеченные</button>
@@ -596,7 +608,10 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
   </div>
 </div>
 
-<p class="lede">__N__ объявлений. Уже есть вердикт: __NDONE__.
+<p class="lede"><b>__N__ объявлений</b>: __NRULES__ пометили правила,
+__NRESIDUAL__ добавил residual-детектор, __NCONTROL__ взяты случайно для
+проверки пропусков. Уже есть окончательный fraud/legit-вердикт: __NDONE__.
+Осталось принять окончательное решение по __NLEFT__.
 __NDEAD__ с закрытой страницей на kolesa, __NOPHOTO__ без доступных фотографий —
 у них сервер, где лежали снимки, отключён.</p>
 
@@ -636,7 +651,7 @@ __CARDS__
 </div>
 
 <script>
-const SERVER = __SERVER__;   /* true — запущено через --serve, можно писать в журнал */
+const SERVER = __SERVER__;   /* true — страница /label, можно писать в журнал */
 const cards = Array.from(document.querySelectorAll('.card'));
 /* Объявления, по которым вердикт уже лежит в журнале. */
 const ALREADY = new Set(cards.filter(c => c.querySelector('.done-note'))

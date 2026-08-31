@@ -1762,43 +1762,49 @@ def test_dedupe_journal_collapses_and_keeps_last_verdict(tmp_path, monkeypatch):
     assert (got[0]["verdict"], got[0]["comment"]) == ("legit", "два")
 
 
-def test_serve_only_accepts_shown_ads(tmp_path, monkeypatch):
-    """Сервер пишет в журнал только по ad_id из показанных карточек: тело
-    запроса не должно решать, что попадёт в ground truth."""
-    import json, threading, urllib.error, urllib.request
-    lc, dst = _tmp_journal(tmp_path, monkeypatch)
-    facts = {"111": {"title": "Audi 80", "year": 1994}}
+def test_legacy_label_cards_serve_delegates_to_unified_web(monkeypatch):
+    """Старый флаг не должен поднимать второй сервер с другой очередью.
 
-    # Порт выбирает ОС, а сигнал готовности приходит событием. С жёстким
-    # портом и паузой «подождём 0.8с» тест падал, когда рядом шёл второй
-    # прогон, — а в CI падал бы просто от медленной машины.
-    ready, box = threading.Event(), {}
+    Он остаётся совместимым алиасом, но ведёт в то же приложение, где
+    /label содержит random control, а /damage — отдельную CV-разметку.
+    """
+    import sys
+    from kz.report.label_cards import __main__ as label_cli
+    from kz.web import __main__ as web_cli
 
-    def on_ready(p):
-        box["port"] = p
-        ready.set()
+    called = []
+    monkeypatch.setattr(sys, "argv", ["label_cards", "--serve"])
+    monkeypatch.setattr(web_cli, "main", lambda: called.append(True))
+    label_cli.main()
+    assert called == [True]
 
-    threading.Thread(target=lc.serve, args=("<p>x</p>", facts, 0),
-                     kwargs={"on_ready": on_ready}, daemon=True).start()
-    assert ready.wait(10), "сервер не поднялся за 10 секунд"
 
-    def post(payload):
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{box['port']}/verdict",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=5) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            return e.code
+def test_unified_verdict_endpoint_only_accepts_shown_ads(monkeypatch):
+    """Единая HTTP-точка пишет только ad_id из показанной очереди."""
+    import asyncio
+    from kz.report import label_cards
+    from kz.web import app as web
 
-    n = dst.read_text(encoding="utf-8").count("\n")
-    assert post({"ad_id": "111", "verdict": "legit", "comment": "ок"}) == 200
-    assert post({"ad_id": "999", "verdict": "legit", "comment": ""}) == 400
-    assert post({"ad_id": "111", "verdict": "hack", "comment": ""}) == 400
-    assert post({}) == 400
-    assert dst.read_text(encoding="utf-8").count("\n") == n + 1   # только валидный
+    class Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def json(self):
+            return self.payload
+
+    saved = []
+    monkeypatch.setattr(web, "_cards_html", "<p>готово</p>")
+    monkeypatch.setattr(web, "_cards_facts",
+                        {"111": {"title": "Audi 80", "year": 1994}})
+    monkeypatch.setattr(label_cards, "upsert_verdict",
+                        lambda *args: saved.append(args))
+
+    good = asyncio.run(web.save_verdict(Request(
+        {"ad_id": "111", "verdict": "legit", "comment": "ок"})))
+    bad = asyncio.run(web.save_verdict(Request(
+        {"ad_id": "999", "verdict": "legit", "comment": ""})))
+    assert good.status_code == 200 and len(saved) == 1
+    assert bad.status_code == 400 and len(saved) == 1
 
 
 def test_file_mode_page_cannot_write_journal():
@@ -2057,7 +2063,7 @@ def test_web_app_routes_exist():
     from kz.web.app import app
     paths = {r.path for r in app.routes}
     for p in ("/", "/estimate", "/api/estimate", "/label", "/verdict",
-              "/api/health"):
+              "/damage", "/damage/label", "/api/health"):
         assert p in paths, p
 
 
@@ -2407,6 +2413,38 @@ def test_web_labelling_includes_control_group():
     assert "include_queue=True" in src
 
 
+def test_full_verdict_queue_is_the_default():
+    """Новый caller не должен случайно получить только rule_positive.
+
+    Именно такой default создавал два разных количества карточек между
+    старым :8765 и единым /label.
+    """
+    import inspect
+    from kz.report.label_cards.queue import load_rows
+    assert inspect.signature(load_rows).parameters["include_queue"].default is True
+
+
+def test_verdict_page_explains_why_queue_counts_differ():
+    """Состав полной очереди и единица разметки должны быть видны в UI."""
+    import pandas as pd
+    from kz.report.label_cards import build
+
+    base = {"brand": "Audi", "model": "80", "year": 1994,
+            "price_tenge": 1_000_000, "photos": [], "status": "active",
+            "existing_verdict": None, "suspicion_reasons": "",
+            "price_z": 0.0}
+    rows = pd.DataFrame([
+        {**base, "ad_id": "1", "stratum": "rule_positive"},
+        {**base, "ad_id": "2", "stratum": "residual_candidate"},
+        {**base, "ad_id": "3", "stratum": "random_control"},
+    ])
+    page = build(rows, serve_mode=True, journal_total=7)
+    for text in ("3 объявлений", "1 пометили правила",
+                 "1 добавил residual-детектор", "1 взяты случайно",
+                 "Осталось принять окончательное решение по 3"):
+        assert text in page
+
+
 def test_label_cards_can_filter_control_group():
     """Контрольные лежат вперемешку с помеченными, а размечать их надо
     отдельно: только по ним считается полнота. Без фильтра их пришлось бы
@@ -2434,8 +2472,7 @@ def test_photo_route_blocks_directory_traversal():
     что путь не вылезает за каталог фотографий: иначе через ../ читался бы
     любой файл, включая .env."""
     from pathlib import Path
-    sources = {"kz/web/app.py": Path("kz/web/app.py").read_text(encoding="utf-8"),
-               "kz/report/label_cards/": _label_cards_source()}
+    sources = {"kz/web/app.py": Path("kz/web/app.py").read_text(encoding="utf-8")}
     for where, src in sources.items():
         assert ".resolve()" in src and "parents" in src, where
 
@@ -3176,7 +3213,7 @@ def test_label_cards_package_keeps_its_public_names():
     оркестратора, у веб-приложения и в тестах. Переезд не должен требовать
     правок у всех, кто им пользуется."""
     from kz.report import label_cards as lc
-    for name in ("build", "load_rows", "serve", "upsert_verdict",
+    for name in ("build", "load_rows", "upsert_verdict",
                  "journal_facts", "dedupe_journal", "read_journal",
                  "LABELS_CSV", "BASE_HEADER", "STRATUM_COLS", "FLAG_HELP"):
         assert hasattr(lc, name), name
@@ -3547,6 +3584,8 @@ def test_labels_path_can_be_redirected_away_from_the_real_journal():
     интерфейса физически не могла коснуться ручного труда."""
     import importlib
     import os
+    import subprocess
+    import sys
     from kz.report import photo_labels as pl
 
     saved = os.environ.get("KZ_LABELS_DIR")
@@ -3555,6 +3594,13 @@ def test_labels_path_can_be_redirected_away_from_the_real_journal():
         m = importlib.reload(pl)
         assert m.LABELS_CSV.startswith("/tmp/kz_scratch")
         assert m.LABELS_PREV.startswith("/tmp/kz_scratch")
+        # Проверяем второй журнал в отдельном процессе, чтобы reload не
+        # оставил scratch-константы в уже импортированных queue/render.
+        code = ("from kz.report.label_cards.journal import LABELS_CSV, "
+                "LABELS_PREV; print(LABELS_CSV); print(LABELS_PREV)")
+        paths = subprocess.check_output(
+            [sys.executable, "-c", code], env=os.environ, text=True).splitlines()
+        assert paths and all(p.startswith("/tmp/kz_scratch") for p in paths)
     finally:
         if saved is None:
             os.environ.pop("KZ_LABELS_DIR", None)

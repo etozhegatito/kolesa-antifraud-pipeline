@@ -19,10 +19,11 @@ from pathlib import Path
 
 import pandas as pd
 
-LABELS_CSV  = "data/manual_labels.csv"
+_DIR = os.environ.get("KZ_LABELS_DIR", "data")
+LABELS_CSV = str(Path(_DIR) / "manual_labels.csv")
 # Состояние журнала до правок текущего запуска — точка восстановления.
 # Файл один и перезаписывается, чтобы не разводить гору бэкапов.
-LABELS_PREV = "data/manual_labels.prev.csv"
+LABELS_PREV = str(Path(_DIR) / "manual_labels.prev.csv")
 
 VERDICTS = ("fraud", "legit", "unknown")
 

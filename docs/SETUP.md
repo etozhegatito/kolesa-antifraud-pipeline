@@ -398,9 +398,8 @@ exit()
 docker compose up -d                        # поднять базу, один раз за сеанс
 
 python -m kz.ops.run_all --collect          # собрать данные (сеть)
-python -m kz.report.label_cards --serve     # размечать вердикты
+python -m kz.web                            # оценка, /label и /damage
 python -m kz.ops.run_all --ml               # пересчитать всё после разметки
-python -m kz.web                            # веб-интерфейс
 ```
 
 Обычный день выглядит так: собрал → разметил → пересчитал → посмотрел
