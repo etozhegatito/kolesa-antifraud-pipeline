@@ -2974,6 +2974,19 @@ def test_collection_gaps_are_reported():
                for w in stale_warnings(_fresh(collect_days=8, span_days=39)))
 
 
+def test_model_freshness_converts_utc_to_almaty_calendar_day():
+    """01:15 в Алматы — сегодня, даже если UTC-метка ещё вчерашняя.
+
+    Реальный прогон 1 сентября записал ``2026-08-31T20:15Z`` и сразу после
+    обучения статус ошибочно напечатал «1 дн. назад». Метрика времени была
+    корректной, календарная дата — нет.
+    """
+    from datetime import date
+    from kz.core.freshness import local_date_from_utc_iso
+
+    assert local_date_from_utc_iso("2026-08-31T20:15:44+00:00") == date(2026, 9, 1)
+
+
 def test_estimate_form_covers_the_categories_in_the_data():
     """Форма оценки обязана предлагать те значения, что есть в данных.
 

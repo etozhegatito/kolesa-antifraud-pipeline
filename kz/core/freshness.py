@@ -20,7 +20,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
+
+
+LOCAL_TIMEZONE = ZoneInfo("Asia/Almaty")
+
+
+def local_date_from_utc_iso(value: str) -> date:
+    """Календарный день артефакта в часовом поясе рынка.
+
+    Метаданные правильно пишутся в UTC. Но ``.date()`` до timezone-конвертации
+    превращало обучение в 01:15 Алматы в «вчера», потому что в UTC ещё было
+    20:15 предыдущего дня. Старые naive-метки считаем UTC для совместимости.
+    """
+    created = datetime.fromisoformat(value)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return created.astimezone(LOCAL_TIMEZONE).date()
 
 
 @dataclass
@@ -82,7 +99,7 @@ def measure() -> Freshness:
     try:
         from kz.ml.train_price_model import load_artifact
         _, meta = load_artifact()
-        model_created = datetime.fromisoformat(meta["created_at_utc"]).date()
+        model_created = local_date_from_utc_iso(meta["created_at_utc"])
     except Exception:                       # noqa: BLE001 — артефакта может не быть
         pass
 
