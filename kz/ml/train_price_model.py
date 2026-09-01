@@ -581,7 +581,13 @@ def main():
                       if v != "NA")
             for c in CAT_FEATURES if c not in ("brand", "model")
         },
-        "target": "log(price_tenge)",
+        "target": "log(first_seen_listing_price_tenge)",
+        "target_policy": {
+            "source": "raw_ads.price_tenge",
+            "observation": "first_saved_listing_price",
+            "later_prices_table": "sightings",
+            "is_transaction_price": False,
+        },
         "validation": {
             "grouped_cv": {"model": grouped_model,
                            "base_model": grouped_base_model,

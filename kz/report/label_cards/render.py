@@ -596,7 +596,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 <div class="top">
   <div class="progress"><i id="bar"></i></div>
   <div class="topin">
-    <h1>Разметка антифрода</h1>
+    <h1>Review рыночных аномалий</h1>
     __HOME__
     <span class="count"><b id="cnt">0</b> из __N__ в этой очереди</span>
     <span class="count total-note" title="включая прошлые очереди и unknown">всего в журнале: <b>__JOURNAL__</b></span>
@@ -612,6 +612,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 __NRESIDUAL__ добавил residual-детектор, __NCONTROL__ взяты случайно для
 проверки пропусков. Уже есть окончательный fraud/legit-вердикт: __NDONE__.
 Осталось принять окончательное решение по __NLEFT__.
+До ручного fraud/legit-вердикта это только кандидаты, не обвинение продавца.
 __NDEAD__ с закрытой страницей на kolesa, __NOPHOTO__ без доступных фотографий —
 у них сервер, где лежали снимки, отключён.</p>
 

@@ -473,6 +473,9 @@ def build_damage_rank(log=print) -> pd.DataFrame:
     idx["row"] = idx.index
     idx["position"] = idx.position.astype(int)
     d = lab.merge(idx[["ad_id", "position", "row"]], on=["ad_id", "position"])
+    if "review_status" in d:
+        from kz.report.photo_labels import NEEDS_REVIEW
+        d = d[d.review_status.fillna("") != NEEDS_REVIEW]
     d = d[d.label.isin(["damaged", "wreck", "intact"])]
     y = d.label.isin(["damaged", "wreck"]).astype(int).to_numpy()
     if y.sum() < 5:

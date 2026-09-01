@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from kz.report.photo_labels import boxes_from_row, read_journal
+from kz.report.photo_labels import boxes_from_row, is_training_label, read_journal
 
 OUT_DIR = Path("data/eda")
 DETECTION_LABELS = {"damaged", "intact"}
@@ -43,7 +43,8 @@ def build_coco(rows: list[dict], split: str) -> dict:
         latest[key] = row
 
     selected = [r for r in latest.values()
-                if r.get("label") in DETECTION_LABELS and _split(r) == split]
+                if r.get("label") in DETECTION_LABELS
+                and is_training_label(r) and _split(r) == split]
     selected.sort(key=lambda r: (str(r.get("ad_id", "")),
                                  int(r.get("position") or 0)))
 
@@ -90,7 +91,7 @@ def build_coco(rows: list[dict], split: str) -> dict:
 
     return {
         "info": {
-            "description": "KZ Market manually labelled vehicle damage",
+            "description": "KZ Auto Market Intelligence vehicle-damage labels",
             "split": split,
             "note": "Legacy labels are train; audit contains only newly sampled ads.",
         },

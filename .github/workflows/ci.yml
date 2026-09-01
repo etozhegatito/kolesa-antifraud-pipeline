@@ -93,3 +93,35 @@ jobs:
           if grep -rnE '(Path|open|read_csv|read_text|copy|copyfile)\(\s*"data/' tests/; then
             echo "Тест ЧИТАЕТ файл из data/ — в чистом клоне его нет"; exit 1
           fi
+
+  web-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install web dependencies
+        run: pip install -r requirements-web.txt
+      - name: Create non-production smoke artifact
+        run: python -m kz.ops.create_smoke_artifact --output .ci-smoke/models
+      - name: Build container and check model health
+        run: |
+          docker build \
+            --build-arg MODEL_DIR=.ci-smoke/models \
+            --tag kz-auto-market-intelligence:ci .
+          docker run --detach --name kz-ami-smoke \
+            --publish 18000:8000 --env KZ_PUBLIC_DEMO=1 \
+            kz-auto-market-intelligence:ci
+          trap 'docker logs kz-ami-smoke; docker rm --force kz-ami-smoke' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/api/health \
+              | grep --quiet '"ok":true'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Web container did not become healthy"
+          exit 1

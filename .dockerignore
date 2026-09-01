@@ -3,7 +3,7 @@
 # лежит около 400 МБ картинок, в .venv — ещё больше.
 #
 # Что нужно образу, перечислено в Dockerfile через COPY: kz/, зависимости
-# и два файла модели. Всё остальное можно смело исключать.
+# и три файла routed-модели. Всё остальное можно смело исключать.
 
 .venv/
 .git/
@@ -17,6 +17,7 @@ data/*
 !data/models/
 data/models/*
 !data/models/price_model.cbm
+!data/models/price_cheap_specialist.cbm
 !data/models/price_model.metadata.json
 logs/
 debug/

@@ -74,9 +74,9 @@ def _page(title: str, body: str) -> str:
 
 
 def index_page() -> str:
-    return _page("KZ Car Market", """
-<h1>KZ Car Market</h1>
-<p class="sub">Оценка автомобиля и разметка антифрода.</p>
+    return _page("KZ Auto Market Intelligence", """
+<h1>KZ Auto Market Intelligence</h1>
+<p class="sub">Оценка автомобиля, рыночные аномалии и visual condition.</p>
 <div class="card">
   <h2 style="margin-top:0"><a href="/estimate">Оценить машину →</a></h2>
   <p class="muted">Характеристики и описание — на выходе справедливая цена,
@@ -84,11 +84,11 @@ def index_page() -> str:
   замечания к объявлению.</p>
 </div>
 <div class="card">
-  <h2 style="margin-top:0"><a href="/label">Разметка вердиктов →</a></h2>
-  <p class="muted">Решение по объявлению целиком: fraud, legit или unknown.
+  <h2 style="margin-top:0"><a href="/label">Review рыночных аномалий →</a></h2>
+  <p class="muted">Ручное решение по объявлению: fraud, legit или unknown.
   Здесь вместе находятся подозрительные, кандидаты второй модели и случайный
-  контроль — без него нельзя измерить пропуски детектора. Один объект здесь —
-  одно объявление.</p>
+  контроль. До такого решения система показывает только кандидата и не
+  обвиняет продавца. Один объект здесь — одно объявление.</p>
 </div>
 <div class="card">
   <h2 style="margin-top:0"><a href="/damage">Разметка повреждений →</a></h2>

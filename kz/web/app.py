@@ -9,7 +9,7 @@
   /estimate   продавец описывает машину и получает оценку, диапазон,
               разбор «почему столько», позицию среди похожих и замечания
               к объявлению;
-  /label      разметка вердиктов объявлений для антифрода;
+  /label      ручной review кандидатов рыночных аномалий;
   /damage     разметка фотографий и рамок для computer vision.
 
 Запуск:  python -m kz.web
@@ -44,7 +44,7 @@ PUBLIC_DEMO = os.getenv("KZ_PUBLIC_DEMO", "").lower() in ("1", "true", "yes")
 RATE_LIMIT_PER_MIN = 30
 RATE_WINDOW_SEC = 60
 
-app = FastAPI(title="KZ Car Market", docs_url="/api/docs")
+app = FastAPI(title="KZ Auto Market Intelligence", docs_url="/api/docs")
 
 # Карточки разметки собираются один раз при старте: запрос к базе тяжёлый,
 # а список подозрительных меняется только после пересборки clean-слоя.

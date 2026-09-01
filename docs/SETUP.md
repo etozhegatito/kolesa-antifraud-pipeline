@@ -17,7 +17,7 @@ WSL2.
 Нужны:
 
 - Git;
-- Python 3.11 или новее;
+- Python 3.13.x — точная поддерживаемая ветка;
 - Docker Desktop с запущенным Docker Engine.
 
 Проверка:
@@ -35,8 +35,8 @@ docker compose version
 ## Шаг 1. Скачать проект
 
 ```bash
-git clone https://github.com/etozhegatito/kolesa-antifraud-pipeline.git
-cd kolesa-antifraud-pipeline
+git clone https://github.com/etozhegatito/kz-auto-market-intelligence.git
+cd kz-auto-market-intelligence
 ```
 
 Проверка:
@@ -67,7 +67,7 @@ which python
 Путь должен вести внутрь папки проекта:
 
 ```text
-.../kolesa-antifraud-pipeline/.venv/bin/python
+.../kz-auto-market-intelligence/.venv/bin/python
 ```
 
 Перед каждой новой сессией терминала окружение нужно активировать снова:
@@ -610,6 +610,6 @@ Unit-тесты проверяют код, а не бизнес-качество
 - baseline;
 - out-of-time holdout;
 - сегментные метрики;
-- ручная разметка антифрода.
+- ручной review рыночных аномалий.
 
 ---

@@ -1272,6 +1272,72 @@ def test_model_artifacts_are_runtime_data_not_git_payload():
     assert "data/models/*.json" in ignore
 
 
+def test_runtime_python_contract_is_consistent():
+    """Docker, CI и инструкция не должны обещать разные версии Python.
+
+    Реальный дефект: CI уже жил на 3.13, а Docker оставался на 3.11, где
+    закреплённый NumPy 2.5.1 не устанавливается вообще.
+    """
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert project["project"]["requires-python"] == ">=3.13,<3.14"
+    assert "FROM python:3.13-slim" in Path("Dockerfile").read_text(encoding="utf-8")
+    assert 'python-version: "3.13"' in Path(
+        ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "Python 3.13.x" in Path("docs/SETUP.md").read_text(encoding="utf-8")
+
+
+def test_web_container_includes_every_routed_model_artifact():
+    """Metadata включает specialist, поэтому образ без него собирается,
+    но падает ровно на healthcheck после запуска."""
+    from pathlib import Path
+
+    docker = Path("Dockerfile").read_text(encoding="utf-8")
+    ignore = Path(".dockerignore").read_text(encoding="utf-8")
+    for name in ("price_model.cbm", "price_cheap_specialist.cbm",
+                 "price_model.metadata.json"):
+        assert name in docker
+        assert f"!data/models/{name}" in ignore
+
+
+def test_ci_smoke_artifact_matches_runtime_schema(tmp_path):
+    """CI-артефакт настоящий для CatBoost, но явно помечен как непродуктовый."""
+    import json
+    from kz.ops.create_smoke_artifact import create
+    from kz.ml.train_price_model import FEATURES
+
+    out = tmp_path / "models"
+    create(out)
+    assert (out / "price_model.cbm").stat().st_size > 0
+    assert (out / "price_cheap_specialist.cbm").stat().st_size > 0
+    meta = json.loads((out / "price_model.metadata.json").read_text())
+    assert meta["features"] == FEATURES
+    assert meta["artifact_purpose"] == "ci_smoke_test_only"
+    assert meta["target"] == "log(first_seen_listing_price_tenge)"
+
+
+def test_model_loader_rejects_incompatible_feature_schema(tmp_path, monkeypatch):
+    """Несовместимый артефакт должен упасть до CatBoost inference, а не
+    тихо посчитать цену с перепутанными колонками."""
+    import json
+    import pytest
+    from kz.ml import train_price_model as tm
+
+    model = tmp_path / "model.cbm"
+    meta = tmp_path / "model.json"
+    model.write_bytes(b"not reached")
+    meta.write_text(json.dumps({
+        "schema_version": tm.ARTIFACT_SCHEMA_VERSION,
+        "features": ["wrong_feature"],
+    }), encoding="utf-8")
+    monkeypatch.setattr(tm, "MODEL_PATH", model)
+    monkeypatch.setattr(tm, "METADATA_PATH", meta)
+    with pytest.raises(ValueError, match="Схема признаков"):
+        tm.load_artifact()
+
+
 def test_labeling_queue_contains_positive_residual_and_control_strata():
     """Без random_control очередь не способна находить false negatives."""
     import pandas as pd
@@ -2160,6 +2226,43 @@ def test_web_app_routes_exist():
     for p in ("/", "/estimate", "/api/estimate", "/label", "/verdict",
               "/damage", "/damage/label", "/api/health"):
         assert p in paths, p
+
+
+def test_web_health_reports_loaded_model_metadata(monkeypatch):
+    """Health обязан проверять именно загруженный артефакт, а не только
+    живой процесс uvicorn."""
+    from kz.web import app as web_app
+    from kz.web import service
+
+    meta = {
+        "created_at_utc": "2026-09-02T00:00:00+00:00",
+        "training_rows": 123,
+        "validation": {"grouped_cv": {"model": {"mape_pct": 21.4}}},
+    }
+    monkeypatch.setattr(service, "get_model", lambda: (object(), meta))
+    out = web_app.health()
+    assert out["ok"] is True
+    assert out["training_rows"] == 123
+    assert out["model_mape_pct"] == 21.4
+
+
+def test_web_estimate_rejects_non_numeric_input_before_model_call(monkeypatch):
+    """Мусор в числовом поле возвращает контролируемый 400 и не доходит
+    до модели — важная граница публичного API."""
+    import asyncio
+    import json
+    from kz.web import app as web_app
+
+    class Request:
+        async def json(self):
+            return {"brand": "Toyota", "model": "Camry", "year": "не год"}
+
+    monkeypatch.setattr(web_app, "full_estimate",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("model must not be called")))
+    response = asyncio.run(web_app.api_estimate(Request()))
+    assert response.status_code == 400
+    assert "ожидается число" in json.loads(response.body)["error"]
 
 
 def test_estimate_page_escapes_values_before_inner_html():
@@ -3766,6 +3869,54 @@ def test_damage_ui_uses_exact_english_dataset_labels():
     for old in (">повреждение кузова<", ">серьёзная авария<",
                 ">разобрана / снят агрегат<", ">целая<", ">не понять<"):
         assert old not in page
+    assert "плохой внешний вид не равен удару" in page
+    assert "Needs review" in page
+
+
+def test_legacy_damaged_labels_are_quarantined_until_review(tmp_path, monkeypatch):
+    """Definition drift не исправляется угадыванием класса.
+
+    Старую damaged-метку сохраняем, резервируем и исключаем из CV. Повторная
+    ручная запись по правилу v3 возвращает её в разрешённый набор.
+    """
+    import csv
+    from PIL import Image
+    from kz.report import photo_labels as pl
+    from kz.ml.photo_dataset import build_coco
+
+    journal = tmp_path / "photo_labels.csv"
+    backup = tmp_path / "photo_labels.before_review.csv"
+    image = tmp_path / "frame.jpg"
+    Image.new("RGB", (100, 80), "white").save(image)
+    with journal.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "ad_id", "position", "path", "label", "x1", "y1", "x2", "y2",
+            "comment", "labeled_at",
+        ])
+        writer.writeheader()
+        writer.writerow({
+            "ad_id": "1", "position": "1", "path": str(image),
+            "label": "damaged", "x1": "0.1", "y1": "0.1",
+            "x2": "0.5", "y2": "0.5", "comment": "ржавчина",
+            "labeled_at": "2026-08-29T00:00:00",
+        })
+    monkeypatch.setattr(pl, "LABELS_CSV", str(journal))
+    monkeypatch.setattr(pl, "LABELS_PREV", str(tmp_path / "prev.csv"))
+    monkeypatch.setattr(pl, "LABELS_REVIEW_BACKUP", str(backup))
+    monkeypatch.setattr(pl, "_snapshot_done", False)
+
+    assert pl.mark_legacy_damaged_for_review() == 1
+    assert backup.exists()
+    _, rows = pl.read_journal()
+    assert rows[0]["label"] == "damaged"          # ручной труд не потерян
+    assert rows[0]["review_status"] == pl.NEEDS_REVIEW
+    assert build_coco(rows, "train")["images"] == []
+
+    pl.save_label("1", 1, str(image), "intact", comment="только ржавчина")
+    _, reviewed = pl.read_journal()
+    assert len(reviewed) == 1
+    assert reviewed[0]["review_status"] == pl.REVIEWED
+    assert reviewed[0]["label"] == "intact"
 
 
 def test_damage_endpoint_ignores_client_supplied_photo_path():

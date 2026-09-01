@@ -33,7 +33,7 @@ from sklearn.preprocessing import StandardScaler
 from kz.core.db import get_engine
 from kz.ml.photo_clip import load as load_clip_scores
 from kz.ml.photo_clip import load_embeddings
-from kz.report.photo_labels import read_journal
+from kz.report.photo_labels import NEEDS_REVIEW, read_journal
 
 CHEAP_EDGE = 5_000_000
 N_SPLITS = 5
@@ -103,6 +103,8 @@ def load_labelled() -> tuple[pd.DataFrame, np.ndarray]:
     if labels.empty:
         raise RuntimeError("Журнал photo_labels пуст")
     labels = labels.drop_duplicates(["ad_id", "position"], keep="last")
+    if "review_status" in labels:
+        labels = labels[labels.review_status.fillna("") != NEEDS_REVIEW]
     labels = labels[labels.label.isin(USED)].copy()
     if "dataset_split" not in labels:
         labels["dataset_split"] = "train"

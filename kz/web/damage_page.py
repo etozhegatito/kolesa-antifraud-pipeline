@@ -138,6 +138,7 @@ TEMPLATE = """<!doctype html>
   <span class="pill tap" data-lab="parts">Parts <b id="c-parts">0</b></span>
   <span class="pill tap" data-lab="intact">Intact <b id="c-intact">0</b></span>
   <span class="pill tap" data-lab="unclear">Unclear <b id="c-unclear">0</b></span>
+  <span class="pill">Needs review <b id="c-needs-review">0</b></span>
   <span class="pill hid" id="backpill">← Back to queue<kbd>Esc</kbd></span>
 </header>
 
@@ -169,6 +170,8 @@ TEMPLATE = """<!doctype html>
   </div>
 
   <p class="sub" id="legend">
+    <b>Главное правило:</b> плохой внешний вид не равен удару. Сначала ищи
+    геометрическую деформацию — вмятину, залом или разбитую деталь.<br>
     <b>Intact = no impact/dent</b> — ударов и вмятин нет. Ржавчина, грязь, потёртости тоже
     сюда: ржавчину сеть уже различает сама, а вмятину нет — ради неё и
     размечаем. Заметил ржавчину — напиши в комментарий, не теряй.<br>
@@ -249,6 +252,8 @@ function show() {
   again.innerHTML = it.label
     ? 'Already labeled as ' + LABEL_NAMES[it.label]
       + (it.comment ? ' · ' + it.comment : '')
+      + (it.review_status === 'needs_review'
+          ? ' · <span class="warn">Needs review: старая метка исключена из CV</span>' : '')
       + ' — можно поправить, запись обновится на месте'
     : '';
   hint.innerHTML = '';
@@ -495,4 +500,7 @@ def page(queue_rows: list[dict], counts: dict,
     for key in LABELS:
         out = out.replace(f'id="c-{key}">0<',
                           f'id="c-{key}">{html.escape(str(counts.get(key, 0)))}<')
+    out = out.replace('id="c-needs-review">0<',
+                      'id="c-needs-review">'
+                      f'{html.escape(str(counts.get("needs_review", 0)))}<')
     return out

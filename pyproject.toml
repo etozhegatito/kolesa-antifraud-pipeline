@@ -1,5 +1,12 @@
-# Конфигурация ruff. Отдельного пакета проект не собирает — этот файл
-# существует только ради настроек линтера.
+# Единый машинно-читаемый контракт проекта и конфигурация ruff.
+# requirements*.txt фиксируют библиотеки, а requires-python не даёт
+# установить их на несовместимый интерпретатор.
+
+[project]
+name = "kz-auto-market-intelligence"
+version = "0.1.0"
+description = "Automotive market intelligence, price estimation and anomaly review for Kazakhstan"
+requires-python = ">=3.13,<3.14"
 
 [tool.ruff]
 target-version = "py313"        # та же, что в CI и в локальном .venv

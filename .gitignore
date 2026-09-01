@@ -44,3 +44,4 @@ cache/
 browser_state.json
 data/photos/
 .coverage
+.ci-smoke/

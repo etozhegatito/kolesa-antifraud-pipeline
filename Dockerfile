@@ -7,10 +7,10 @@
 #           перевыкладывать их наружу. Модель — производная (веса дерева),
 #           по ней объявление не восстановить, и её везём.
 #
-# Сборка:  docker build -t kz-price .
-# Запуск:  docker run -p 8000:8000 -e KZ_PUBLIC_DEMO=1 kz-price
+# Сборка:  docker build -t kz-auto-market-intelligence .
+# Запуск:  docker run -p 8000:8000 -e KZ_PUBLIC_DEMO=1 kz-auto-market-intelligence
 
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # PYTHONUNBUFFERED — чтобы логи шли в docker logs сразу, а не когда
 # наполнится буфер: без него падение при старте выглядит как молчание.
@@ -28,10 +28,16 @@ COPY requirements-web.txt .
 RUN pip install --no-cache-dir -r requirements-web.txt
 
 COPY kz/ ./kz/
-# Артефакты модели: они в .gitignore, поэтому попадают в образ только из
-# локальной сборки. Собирать образ на CI из чистого клона не выйдет — там
-# модели нет; это осознанный размен, см. README.
-COPY data/models/price_model.cbm data/models/price_model.metadata.json ./data/models/
+# Production-артефакты в .gitignore и попадают в образ только из локальной
+# сборки. CI вместо них создаёт явно непродуктовый smoke-артефакт: он проверяет
+# контракт запуска, но не публикует настоящую модель и её fingerprint.
+# MODEL_DIR переопределяется только в CI: там создаётся маленький
+# синтетический артефакт, чтобы проверить сборку и /api/health, не публикуя
+# настоящую модель. Обычная локальная сборка по-прежнему берёт data/models.
+ARG MODEL_DIR=data/models
+COPY ${MODEL_DIR}/price_model.cbm \
+     ${MODEL_DIR}/price_cheap_specialist.cbm \
+     ${MODEL_DIR}/price_model.metadata.json ./data/models/
 
 # Не root: если в сервисе найдут дыру, чужой код не должен получить
 # полноправного пользователя внутри контейнера.

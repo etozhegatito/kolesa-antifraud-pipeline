@@ -114,7 +114,7 @@ PAGE = """<!doctype html>
     <table><tr><th>машина</th><th class="num">факт</th><th class="num">оценка</th>
     <th class="num">ошибка</th></tr>__ROWS__</table></div>
 
-  <div class="card" style="margin-top:16px"><h2>🚨 Подозрительно дёшево — модельный антифрод</h2>
+  <div class="card" style="margin-top:16px"><h2>🚨 Кандидаты с аномально низкой ценой</h2>
     <table><tr><th>машина</th><th class="num">цена</th><th class="num">справедливый пол</th>
     <th class="num">ниже пола</th></tr>__SUSPECTS__</table></div>
 

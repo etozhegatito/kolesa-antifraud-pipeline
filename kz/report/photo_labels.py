@@ -63,10 +63,11 @@ import pandas as pd
 _DIR = os.environ.get("KZ_LABELS_DIR", "data")
 LABELS_CSV = str(Path(_DIR) / "photo_labels.csv")
 LABELS_PREV = str(Path(_DIR) / "photo_labels.prev.csv")
+LABELS_REVIEW_BACKUP = str(Path(_DIR) / "photo_labels.pre_definition_review.csv")
 
 HEADER = ["ad_id", "position", "path", "label", "x1", "y1", "x2", "y2",
           "comment", "labeled_at", "selection_source", "dataset_split",
-          "annotator", "label_version", "boxes_json"]
+          "annotator", "label_version", "boxes_json", "review_status"]
 
 # Новые объявления получают split детерминированно по ad_id. Старые метки
 # НЕЛЬЗЯ задним числом объявить holdout: они уже участвовали в экспериментах.
@@ -76,6 +77,8 @@ AUDIT_PERCENT = 20
 AUDIT_PER_QUEUE = 60
 LABEL_VERSION = "3"
 MAX_BOXES_PER_FRAME = 20
+NEEDS_REVIEW = "needs_review"
+REVIEWED = "reviewed"
 
 
 def split_for_ad(ad_id: str) -> str:
@@ -337,6 +340,36 @@ def write_journal(header: list[str], rows: list[dict]) -> None:
     os.replace(tmp, LABELS_CSV)
 
 
+def is_training_label(row: dict) -> bool:
+    """Метка может идти в CV только после разрешения definition drift."""
+    return str(row.get("review_status") or "") != NEEDS_REVIEW
+
+
+def mark_legacy_damaged_for_review() -> int:
+    """Неразрушающе отправить старые ``damaged`` на повторную проверку.
+
+    Старый интерфейс называл класс широким русским словом «повреждение», и
+    туда попали ржавчина, грязь и потёртости. Мы не угадываем правильный
+    класс и ничего не удаляем: добавляем статус, делаем отдельную резервную
+    копию и исключаем спорные строки из обучения до ручного решения.
+    """
+    header, rows = read_journal()
+    pending = [r for r in rows
+               if r.get("label") == "damaged"
+               and not str(r.get("review_status") or "").strip()]
+    if not pending:
+        return 0
+    source = Path(LABELS_CSV)
+    backup = Path(LABELS_REVIEW_BACKUP)
+    if source.exists() and not backup.exists():
+        shutil.copyfile(source, backup)
+    header = list(dict.fromkeys([*header, *HEADER]))
+    for row in pending:
+        row["review_status"] = NEEDS_REVIEW
+    write_journal(header, rows)
+    return len(pending)
+
+
 def _normalise_boxes(boxes) -> list[tuple[float, float, float, float]]:
     """Проверить список относительных рамок и вернуть числа 0..1."""
     if boxes is None:
@@ -427,6 +460,9 @@ def save_label(ad_id: str, position, path: str, label: str,
         "boxes_json": (json.dumps([[round(v, 4) for v in b] for b in frame_boxes],
                                   separators=(",", ":"))
                        if frame_boxes else ""),
+        # Любая новая или повторная ручная запись уже сделана по точному
+        # правилу v3 и тем самым закрывает needs_review.
+        "review_status": REVIEWED,
     }
     for i, r in enumerate(rows):
         if (r.get("ad_id"), str(r.get("position"))) == key:
@@ -455,7 +491,8 @@ def labelled_frames() -> list[dict]:
                "selection_source": r.get("selection_source", "legacy"),
                "dataset_split": r.get("dataset_split", "train") or "train",
                "annotator": r.get("annotator", ""),
-               "label_version": r.get("label_version", "1") or "1"}
+               "label_version": r.get("label_version", "1") or "1",
+               "review_status": r.get("review_status", "")}
         boxes = boxes_from_row(r)
         if boxes:
             rec["boxes"] = [list(b) for b in boxes]
@@ -485,6 +522,13 @@ def stats() -> dict:
     for label in LABELS:
         out[f"{label}_ads"] = len(ads[label])
     out["positive_ads"] = len(ads["damaged"] | ads["wreck"])
+    review_rows = [r for r in rows if r.get("review_status") == NEEDS_REVIEW]
+    out["needs_review"] = len(review_rows)
+    verified_positive = {
+        str(r.get("ad_id", "")) for r in rows
+        if r.get("label") in {"damaged", "wreck"} and is_training_label(r)
+    }
+    out["verified_positive_ads"] = len(verified_positive)
     audit_rows = [r for r in rows if r.get("dataset_split") == "audit"]
     out["audit_frames"] = len(audit_rows)
     out["audit_ads"] = len({str(r.get("ad_id", "")) for r in audit_rows})
@@ -492,14 +536,22 @@ def stats() -> dict:
 
 
 def main():
+    if "--mark-legacy-review" in sys.argv:
+        changed = mark_legacy_damaged_for_review()
+        print(f"Помечено needs_review: {changed}. Ничего не удалено; "
+              f"резервная копия: {LABELS_REVIEW_BACKUP}")
+        return
     if "--stats" in sys.argv:
         s = stats()
         print(f"Размечено кадров: {s['total']}")
         for k, desc in LABELS.items():
             print(f"  {k:9} {s[k]:4} кадров, {s[f'{k}_ads']:3} объявлений   {desc}")
-        need = 200 - s["positive_ads"]
-        print(f"\nНезависимых объявлений damaged/wreck: {s['positive_ads']}. "
-              "Это главный размер выборки для grouped CV.")
+        need = 200 - s["verified_positive_ads"]
+        print(f"\nНезависимых объявлений damaged/wreck: {s['positive_ads']} всего, "
+              f"{s['verified_positive_ads']} проверено для CV.")
+        if s["needs_review"]:
+            print(f"Needs review: {s['needs_review']} кадров — до повторной "
+                  "разметки они исключены из обучения и метрик.")
         print(f"Рамок локальных повреждений: {s['damage_boxes']}")
         print(f"Новый случайный audit holdout: {s['audit_ads']} объявлений, "
               f"{s['audit_frames']} кадров (legacy-метки туда не переносятся).")
