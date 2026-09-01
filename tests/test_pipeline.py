@@ -696,10 +696,10 @@ def test_price_model_features_no_leakage():
     assert not leak, f"утечка цели в фичах модели: {leak}"
 
 
-# ─── catch_up: учёт суточного бюджета запросов ──────────────────────────────
+# ─── catch_up: учёт скользящего бюджета запросов за 24 часа ─────────────────
 # Самая дорогая логика в проекте: ошибка здесь стоит бана IP, и один раз уже
 # стоила. Тесты подменяют файл бюджета на временный — трогать настоящий
-# нельзя, в нём живёт реальный расход за сегодня.
+# нельзя, в нём живёт реальный расход за последние 24 часа.
 
 def _budget_file(tmp_path, monkeypatch):
     from kz.ops import catch_up
@@ -757,6 +757,74 @@ def test_parser_defaults_to_fresh_first_pages(monkeypatch):
     assert fresh.MAX_PAGES_PER_CATEGORY == 3
 
 
+def test_parser_fails_fast_when_listing_selectors_drift():
+    """Нулевая первая страница — поломка контракта, а не успешный конец."""
+    import pytest
+    from kz.collect import parser
+
+    changed_html = "<html><body><div class='new-card-class'>машина</div></body></html>"
+    with pytest.raises(parser.ListingSchemaError, match="изменила HTML"):
+        parser.validate_listing_page(changed_html, [], 1, "almaty_3_7m")
+    # Пустая глубокая страница допустима: сегмент действительно мог кончиться.
+    assert parser.validate_listing_page(changed_html, [], 20, "almaty_3_7m") == 0
+
+
+def test_parser_fails_when_raw_cards_stop_parsing():
+    """Контейнеры ещё видны, но потеря половины полей тоже означает drift."""
+    import pytest
+    from kz.collect import parser
+
+    html = "<html><body>" + "".join(
+        f"<article class='js__a-card' data-id='{i}'></article>" for i in range(10)
+    ) + "</body></html>"
+    with pytest.raises(parser.ListingSchemaError, match="разобрано 1/10"):
+        parser.validate_listing_page(html, [{"ad_id": "1"}], 2, "segment")
+
+
+def test_parser_reports_open_freshness_boundary():
+    """Unseen на последней разрешённой странице = измеримый недобор свежака."""
+    from kz.collect.parser import page_limit_has_unseen
+
+    assert page_limit_has_unseen(3, 9, 23, 1, 3)
+    assert not page_limit_has_unseen(3, 0, 23, 1, 3)
+    assert not page_limit_has_unseen(2, 9, 23, 1, 3)
+    assert not page_limit_has_unseen(30, 9, 23, 26, 30)  # deep backfill ≠ fresh
+
+
+def test_parser_does_not_retry_a_corrupt_budget(monkeypatch):
+    """Fail-closed budget error не должен превращаться в три псевдосетевых retry."""
+    import asyncio
+    import pytest
+    from kz.collect import parser
+
+    class NeverUsedPage:
+        async def goto(self, *_args, **_kwargs):
+            raise AssertionError("сеть не должна вызываться")
+
+    def broken_reservation():
+        raise parser.request_budget.BudgetStateError("broken budget")
+
+    monkeypatch.setattr(parser, "reserve_kolesa_request", broken_reservation)
+    with pytest.raises(parser.request_budget.BudgetStateError):
+        asyncio.run(parser.get_html(NeverUsedPage(), "https://example.invalid"))
+
+
+def test_parser_run_status_marks_unhandled_failure(tmp_path, monkeypatch):
+    """После аварии status JSON не должен навсегда остаться `running`."""
+    import json
+    from kz.collect import parser
+
+    status = tmp_path / "parser_status.json"
+    monkeypatch.setattr(parser, "RUN_STATUS_FILE", str(status))
+    parser.write_run_status({"schema_version": 1, "status": "running",
+                             "segments": {}, "totals": {}})
+    parser.mark_unhandled_failure(RuntimeError("boom"))
+    saved = json.loads(status.read_text(encoding="utf-8"))
+    assert saved["status"] == "failed"
+    assert saved["message"] == "RuntimeError: boom"
+    assert saved["finished_at"]
+
+
 def test_enrich_done_unions_csv_and_postgres(tmp_path, monkeypatch):
     """Строка только в БД не должна повторно сжигать запрос из-за старого CSV."""
     import csv
@@ -785,8 +853,8 @@ def test_budget_reservation_does_not_overshoot(tmp_path, monkeypatch):
     assert catch_up.load_budget_used()["kolesa"] == 2
 
 
-def test_chunk_refreshes_budget_after_calendar_rollover(tmp_path, monkeypatch):
-    """В памяти мог остаться вчерашний полный расход, а файл уже показывает 0."""
+def test_chunk_refreshes_budget_after_rolling_window_moves(tmp_path, monkeypatch):
+    """В памяти мог остаться полный расход, хотя старые события уже отпали."""
     from kz.ops import catch_up
 
     monkeypatch.setattr(catch_up, "BUDGET_FILE", str(tmp_path / "budget.json"))
@@ -797,7 +865,7 @@ def test_chunk_refreshes_budget_after_calendar_rollover(tmp_path, monkeypatch):
     monkeypatch.setattr(catch_up, "run", lambda _script: 0)
     monkeypatch.setattr(catch_up, "count_429", lambda: 0)
 
-    used = {"kolesa": 2, "cdn": 0}  # вчерашняя копия в долгом процессе
+    used = {"kolesa": 2, "cdn": 0}  # устаревшая копия в долгом процессе
     result = catch_up.run_one_chunk(
         "backfill", "unused", "backfill", "kolesa", used,
         run_spent={"kolesa": 0, "cdn": 0},
@@ -807,32 +875,55 @@ def test_chunk_refreshes_budget_after_calendar_rollover(tmp_path, monkeypatch):
     assert catch_up.load_budget_used()["kolesa"] == 1
 
 
-def test_budget_resets_on_a_new_calendar_day(tmp_path, monkeypatch):
-    """Квота суточная, значит вчерашний расход сегодня не считается.
-
-    Раньше файл хранил одну цифру без даты, и прогон, пересёкший полночь,
-    приписывал вчерашние запросы сегодняшнему дню — квота оказывалась
-    съеденной ещё до старта."""
+def test_budget_is_rolling_and_does_not_reset_at_midnight(tmp_path, monkeypatch):
+    """Полночь не дарит вторую квоту: событие живёт ровно 24 часа."""
     import json
-    from datetime import date, timedelta
+    from datetime import datetime, timedelta, timezone
     cu, f = _budget_file(tmp_path, monkeypatch)
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    f.write_text(json.dumps({"days": {yesterday: {"kolesa": 200, "cdn": 900}}}),
-                 encoding="utf-8")
+    now = datetime(2026, 9, 2, 0, 10, tzinfo=timezone(timedelta(hours=5)))
+    monkeypatch.setattr(cu, "_now", lambda: now)
+    recent = now - timedelta(minutes=20)       # вчера по календарю, но в окне
+    expired = now - timedelta(hours=24)        # ровно граница — уже вне окна
+    state = {
+        "schema_version": cu.BUDGET_SCHEMA_VERSION,
+        "days": {"2026-09-01": {"kolesa": 205, "cdn": 900}},
+        "events": [
+            {"at": recent.isoformat(), "host": "kolesa", "cost": 200},
+            {"at": recent.isoformat(), "host": "cdn", "cost": 900},
+            {"at": expired.isoformat(), "host": "kolesa", "cost": 5},
+        ],
+    }
+    f.write_text(json.dumps(state), encoding="utf-8")
+    assert cu.load_budget_used() == {"kolesa": 200, "cdn": 900}
+    # Через 24 часа после реального запроса квота освобождается, не раньше.
+    monkeypatch.setattr(cu, "_now", lambda: recent + timedelta(hours=24))
     assert cu.load_budget_used() == {"kolesa": 0, "cdn": 0}
-    # и вчерашняя запись при этом не затирается
-    assert cu.charge_budget("kolesa", 5)["kolesa"] == 5
-    assert json.loads(f.read_text(encoding="utf-8"))["days"][yesterday]["kolesa"] == 200
 
 
-def test_budget_survives_a_missing_or_corrupt_file(tmp_path, monkeypatch):
-    """Битый файл бюджета не должен ронять сбор — но и не должен молча
-    выдавать неограниченную квоту. Правильный ответ на мусор — нули, то есть
-    самая консервативная позиция."""
+def test_budget_migrates_yesterdays_legacy_sum_conservatively(tmp_path, monkeypatch):
+    """Апдейт старого JSON не должен обнулить потенциально свежий расход."""
+    import json
+    from datetime import datetime, timedelta, timezone
+    cu, f = _budget_file(tmp_path, monkeypatch)
+    now = datetime(2026, 9, 2, 1, 0, tzinfo=timezone(timedelta(hours=5)))
+    monkeypatch.setattr(cu, "_now", lambda: now)
+    f.write_text(json.dumps({
+        "days": {"2026-09-01": {"kolesa": 73, "cdn": 600}}
+    }), encoding="utf-8")
+    assert cu.load_budget_used() == {"kolesa": 73, "cdn": 600}
+    migrated = json.loads(f.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == cu.BUDGET_SCHEMA_VERSION
+    assert all(event.get("legacy") for event in migrated["events"])
+
+
+def test_budget_allows_first_run_but_fails_closed_on_corrupt_file(tmp_path, monkeypatch):
+    """Нет файла = первый запуск; битый существующий файл обязан закрыть сеть."""
+    import pytest
     cu, f = _budget_file(tmp_path, monkeypatch)
     assert cu.load_budget_used() == {"kolesa": 0, "cdn": 0}      # файла нет
     f.write_text("{не json", encoding="utf-8")
-    assert cu.load_budget_used() == {"kolesa": 0, "cdn": 0}
+    with pytest.raises(cu.BudgetStateError, match="сеть заблокирована"):
+        cu.load_budget_used()
 
 
 def test_budget_reads_the_old_single_day_format(tmp_path, monkeypatch):
@@ -860,15 +951,11 @@ def test_budget_history_does_not_grow_forever(tmp_path, monkeypatch):
     assert len(kept) == cu.BUDGET_KEEP_DAYS
 
 
-def test_run_cap_blocks_a_burst_across_midnight(tmp_path, monkeypatch):
-    """Второй потолок — на запуск, и он существует именно из-за полуночи.
-
-    Суточный расход честно обнуляется в 00:00. Без потолка на запуск прогон,
-    начатый в 23:50 и работающий до утра, получил бы двойную квоту всплеском
-    за считанные минуты — а банят именно за всплеск объёма, а не за сутки."""
+def test_run_cap_is_a_second_defence_even_with_rolling_budget(tmp_path, monkeypatch):
+    """Потолок запуска остаётся defence-in-depth поверх rolling-счётчика."""
     cu, _ = _budget_file(tmp_path, monkeypatch)
     full = cu.DAILY_BUDGET["kolesa"]
-    fresh_day = {"kolesa": 0, "cdn": 0}          # наступил новый день
+    fresh_day = {"kolesa": 0, "cdn": 0}          # окно уже освободилось
     spent_this_run = {"kolesa": full, "cdn": 0}  # но прогон уже выбрал квоту
     assert not cu.budget_allows("kolesa", "enrich", 1000, fresh_day,
                                 spent_this_run)
@@ -1025,7 +1112,7 @@ def test_catch_up_until_done_next_action():
     assert next_action(30, 31, 0, False) == "stuck"
 
 
-# ─── catch_up: дневной бюджет запросов на хост (анти-бан) ────────────────────
+# ─── catch_up: rolling-бюджет запросов на хост (анти-бан) ────────────────────
 def test_catch_up_chunk_sizes_match_jobs():
     """CHUNK_MAX в catch_up — копия MAX_PER_RUN самих джобов (импорт джобов
     там избегаем ради их import-side-effects). Если в джобе поменяли лимит,
@@ -1084,9 +1171,9 @@ def test_status_recheck_and_listing_inference():
     assert not infer_active_from_listing(None, 5, True)     # не свежий в листинге
 
 
-def test_catch_up_budget_resets_next_day(tmp_path, monkeypatch):
-    """Счётчик бюджета сбрасывается с новыми сутками, битый файл = ноль (не
-    падаем), сегодняшняя запись читается как есть."""
+def test_catch_up_budget_legacy_recovery_and_corruption(tmp_path, monkeypatch):
+    """Древний расход вне окна не мешает; recovery setter работает; мусор стоп."""
+    import pytest
     from kz.ops import catch_up
     f = tmp_path / "budget.json"
     monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
@@ -1095,7 +1182,8 @@ def test_catch_up_budget_resets_next_day(tmp_path, monkeypatch):
     catch_up.save_budget_used({"kolesa": 150, "cdn": 300})
     assert catch_up.load_budget_used() == {"kolesa": 150, "cdn": 300}  # сегодня → как есть
     f.write_text("{ битый json", encoding="utf-8")
-    assert catch_up.load_budget_used() == {"kolesa": 0, "cdn": 0}   # не падаем
+    with pytest.raises(catch_up.BudgetStateError):
+        catch_up.load_budget_used()
 
 
 # ─── ML validation: дубли, время, калибровка и train/inference schema ───────
@@ -1382,10 +1470,8 @@ def test_label_cards_gallery_and_keyboard_present():
     assert 'TEMPLATE = r"""' in src
 
 
-def test_catch_up_budget_charges_to_calendar_day(tmp_path, monkeypatch):
-    """Расход списывается на текущие сутки, а не на день старта прогона.
-    Реальный случай 2026-07-30: --until-done пересёк полночь, и 400
-    вчерашних запросов записались сегодняшним числом, съев новую квоту."""
+def test_catch_up_budget_keeps_calendar_history_only_as_audit(tmp_path, monkeypatch):
+    """Rolling-сумма точная, а древняя calendar-запись на неё не влияет."""
     from kz.ops import catch_up
     f = tmp_path / "budget.json"
     monkeypatch.setattr(catch_up, "BUDGET_FILE", str(f))
@@ -1393,7 +1479,7 @@ def test_catch_up_budget_charges_to_calendar_day(tmp_path, monkeypatch):
     assert catch_up.charge_budget("kolesa", 20) == {"kolesa": 40, "cdn": 0}
     assert catch_up.charge_budget("cdn", 300)["cdn"] == 300
     assert catch_up.load_budget_used() == {"kolesa": 40, "cdn": 300}
-    # вчерашняя запись не влияет на сегодняшний расход
+    # Древняя audit-запись не влияет на rolling-расход.
     import json
     days = json.loads(f.read_text(encoding="utf-8"))["days"]
     days["2000-01-01"] = {"kolesa": 999, "cdn": 999}
@@ -1426,13 +1512,11 @@ def test_catch_up_budget_file_keeps_history_bounded(tmp_path, monkeypatch):
     assert len(kept) <= catch_up.BUDGET_KEEP_DAYS
 
 
-def test_catch_up_per_run_cap_blocks_midnight_burst():
-    """Сутки честно обнуляются в полночь, поэтому нужен второй потолок — на
-    сам запуск. Иначе прогон, начатый в 23:50, выдал бы двойную квоту
-    всплеском за двадцать минут, а банят именно за всплеск объёма."""
+def test_catch_up_per_run_cap_is_defence_in_depth():
+    """Один долгий процесс не получает больше полной rolling-квоты."""
     from kz.ops import catch_up
     B = catch_up.DAILY_BUDGET["kolesa"]
-    fresh_day = {"kolesa": 0, "cdn": 0}          # после полуночи расход суток 0
+    fresh_day = {"kolesa": 0, "cdn": 0}          # старые события вышли из окна
     spent_run = {"kolesa": B, "cdn": 0}          # но прогон уже выбрал квоту
     assert not catch_up.budget_allows("kolesa", "enrich", 10**6,
                                      fresh_day, spent_run)

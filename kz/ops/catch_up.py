@@ -23,15 +23,15 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
   затяжная «отвлёкся», каждые 15 запросов длинный перерыв 30-90с. Это
   politeness (запросов в час МЕНЬШЕ, чем было), а не маскировка бота.
 
-СУТОЧНЫЙ БЮДЖЕТ ЗАПРОСОВ НА ХОСТ (главный анти-бан-рычаг):
-  Бан ловится по ОБЪЁМУ запросов с одного IP за сутки, а не по паузе
+СКОЛЬЗЯЩИЙ БЮДЖЕТ ЗАПРОСОВ НА ХОСТ (главный анти-бан-рычаг):
+  Бан ловится по ОБЪЁМУ запросов с одного IP за короткое окно, а не по паузе
   между ними (паузы 4-8с уже внутри джобов). Поэтому поверх всего —
-  общий на хост дневной потолок числа запросов (DAILY_BUDGET). Он
+  общий на хост потолок числа запросов за последние 24 часа (DAILY_BUDGET). Он
   ОБЩИЙ для трёх kolesa-джобов (это один IP!), у CDN — отдельный.
-  Счётчик потраченного живёт в logs/.catch_up_budget.json и сбрасывается
-  с началом новых суток. Как только квота хоста выбрана — джобы этого
-  хоста встают до завтра (резюмируемо). Так НИ ОДИН запуск (даже
-  случайный ручной, даже --until-done) не пробьёт суточный объём.
+  Счётчик живёт в logs/.catch_up_budget.json. Полночь его НЕ обнуляет:
+  каждое списание отпадает ровно через 24 часа. Как только квота выбрана —
+  джобы встают до освобождения окна. Так НИ ОДИН запуск (даже случайный
+  ручной, даже --until-done) не пробьёт допустимый объём.
 
 Сентинелы (важно для подсчёта «пробелов»): avgPrice = -1 и бейдж = "-"
 означают «проверено, значения у объявления НЕТ» — это НЕ пробел, повторно
@@ -44,11 +44,11 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
 Запуск: python -m kz.ops.catch_up             (отчёт + вопрос, запускать ли)
         python -m kz.ops.catch_up --run        (одна порция на джоб, без вопроса)
         python -m kz.ops.catch_up --run --until-done
-                                        (использовать всю дневную квоту:
+                                        (использовать всю квоту rolling-окна:
                                          крутит порциями, пока не выбран
-                                         суточный бюджет хоста / не закрыты
+                                         бюджет хоста за 24 часа / не закрыты
                                          пробелы / не пришёл 429; резюмируемо
-                                         назавтра — идеально под ежедневный крон)
+                                         после освобождения окна)
         python -m kz.ops.catch_up --run --values
                                         (приоритетно ТОЛЬКО ценные-для-оправдания
                                          поля: enrich + backfill = avgPrice/бейдж/
@@ -62,7 +62,7 @@ catch_up.py — «умный догоняльщик»: сам смотрит, к
                                          объявления не обогащает; тоже с --until-done)
         python -m kz.ops.catch_up --run --backfill --budget 300
                                         (СКОЛЬКО СПАРСИТЬ: потолок запросов к
-                                         kolesa на эти сутки. Зоны риска печатаются
+                                         kolesa за 24 часа. Зоны риска печатаются
                                          при запуске без --run; коротко:
                                          ≤100 спокойно, ≤200 безопасно (дефолт),
                                          ≤270 риск, >270 высокий риск — на ~270
@@ -84,7 +84,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import date
+from datetime import datetime, time as dt_time, timedelta
 
 import fcntl
 
@@ -119,7 +119,7 @@ DAILY_BUDGET = {"kolesa": int(os.environ.get("KOLESA_BUDGET",
                 "cdn": int(os.environ.get("CDN_BUDGET", DEFAULT_CDN_BUDGET))}
 BUDGET_FILE  = "logs/.catch_up_budget.json"
 
-# ─── Зоны риска по числу запросов к kolesa за сутки с ОДНОГО IP ──────────────
+# ─── Зоны риска по числу запросов к kolesa за 24 часа с ОДНОГО IP ────────────
 # Границы — не из статей, а из собственного опыта (правило проекта: калибруй
 # на своих данных). Единственный жёсткий факт: 2026-07-23 домашний IP словил
 # временный бан на ~270 запросах за сутки. Всё, что ниже 200, гонялось
@@ -138,7 +138,7 @@ RISK_ZONES = [
 
 
 def risk_zone(n: int):
-    """(метка, пояснение) для суточного объёма n запросов к kolesa."""
+    """(метка, пояснение) для объёма n запросов к kolesa за 24 часа."""
     for limit, label, note in RISK_ZONES:
         if n <= limit:
             return label, note
@@ -174,7 +174,7 @@ def parse_budget(argv) -> int | None:
 
 def print_risk_help(current: int):
     """Табличка «сколько запросов = насколько рискованно» + как задать."""
-    print("\nСколько запросов к kolesa за сутки (--budget N):")
+    print("\nСколько запросов к kolesa за скользящие 24 часа (--budget N):")
     prev = 0
     for limit, label, note in RISK_ZONES:
         rng = f"{prev+1}–{limit}" if limit < 10**8 else f"{prev+1}+"
@@ -201,41 +201,154 @@ STATUS_STALE_DAYS   = 2     # пропал из листинга дольше �
 STATUS_RECHECK_DAYS = 7     # проверяли напрямую позже → не считаем пробелом
 
 
-# Расход хранится ПО КАЛЕНДАРНЫМ ДНЯМ: {"days": {"2026-07-29": {...}, ...}}.
-# Раньше в файле был один день, и прогон --until-done, пересёкший полночь,
-# записывал вчерашние запросы датой сегодня — сегодняшняя квота оказывалась
-# съеденной ещё до начала работы (реальный случай 2026-07-30, 400 запросов).
-BUDGET_KEEP_DAYS = 7        # история за неделю, чтобы файл не рос бесконечно
+# `events` — источник истины для скользящего окна 24 часа. `days` остаётся
+# человекочитаемой календарной историей для аудита. До schema_version=2 файл
+# хранил только `days`; миграция консервативно переносит расход сегодня и
+# вчера, чтобы обновление кода само не подарило вторую квоту.
+BUDGET_SCHEMA_VERSION = 2
+BUDGET_WINDOW_HOURS = 24
+BUDGET_EVENT_KEEP_HOURS = 48
+BUDGET_KEEP_DAYS = 7
+
+
+class BudgetStateError(RuntimeError):
+    """Budget-файл существует, но его нельзя безопасно интерпретировать."""
+
+
+def _now() -> datetime:
+    """Текущее локальное время с timezone; вынесено для точных тестов."""
+    return datetime.now().astimezone()
+
+
+def _read_state() -> dict:
+    """Нормализованный бюджет; читает оба прежних формата без потери квоты."""
+    try:
+        d = json.loads(_p.Path(BUDGET_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"schema_version": BUDGET_SCHEMA_VERSION,
+                "days": {}, "events": []}
+    except (OSError, ValueError) as e:
+        raise BudgetStateError(
+            f"budget-файл {BUDGET_FILE} повреждён/не читается; "
+            "сеть заблокирована, чтобы не обнулить квоту: {e}"
+        ) from e
+    if not isinstance(d, dict):
+        raise BudgetStateError(
+            f"budget-файл {BUDGET_FILE} должен содержать JSON-объект; "
+            "сеть заблокирована"
+        )
+    if isinstance(d.get("days"), dict):
+        days = d["days"]
+    elif d.get("date"):                    # формат до 2026-07-30
+        days = {d["date"]: {"kolesa": int(d.get("kolesa", 0)),
+                             "cdn": int(d.get("cdn", 0))}}
+    else:
+        days = {}
+    events = d.get("events") if isinstance(d.get("events"), list) else []
+    return {"schema_version": int(d.get("schema_version", 1)),
+            "days": days, "events": events}
 
 
 def _read_days() -> dict:
-    """Расход по дням из файла; старый однодневный формат читается тоже."""
+    """Совместимый helper: календарная история расхода для аудита/тестов."""
+    return _read_state()["days"]
+
+
+def _parse_event_time(raw, fallback_tz) -> datetime | None:
     try:
-        d = json.loads(_p.Path(BUDGET_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if isinstance(d.get("days"), dict):
-        return d["days"]
-    if d.get("date"):                      # формат до 2026-07-30
-        return {d["date"]: {"kolesa": int(d.get("kolesa", 0)),
-                            "cdn": int(d.get("cdn", 0))}}
-    return {}
+        value = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=fallback_tz)
 
 
-def _write_days(days: dict):
+def _migrate_legacy_state(state: dict, now: datetime) -> dict:
+    """Один раз переносит календарные суммы в безопасное rolling-окно.
+
+    Точного времени старых запросов нет. Сегодняшний расход считаем сделанным
+    сейчас, вчерашний — в 23:59:59 вчера. Это может немного передержать квоту,
+    зато миграция никогда не разрешит опасный двойной прогон.
+    """
+    if int(state.get("schema_version", 1)) >= BUDGET_SCHEMA_VERSION:
+        return state
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    migrated = []
+    for raw_day, used in state.get("days", {}).items():
+        try:
+            day = datetime.strptime(raw_day, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        if day == today:
+            at = now
+        elif day == yesterday:
+            at = datetime.combine(day, dt_time(23, 59, 59), tzinfo=now.tzinfo)
+        else:
+            continue
+        for host in ("kolesa", "cdn"):
+            cost = int((used or {}).get(host, 0))
+            if cost > 0:
+                migrated.append({"at": at.isoformat(), "host": host,
+                                 "cost": cost, "legacy": True})
+    state["events"] = migrated
+    state["schema_version"] = BUDGET_SCHEMA_VERSION
+    return state
+
+
+def _active_events(state: dict, now: datetime) -> list[dict]:
+    cutoff = now - timedelta(hours=BUDGET_WINDOW_HOURS)
+    active = []
+    for event in state.get("events", []):
+        at = _parse_event_time(event.get("at"), now.tzinfo)
+        try:
+            cost = int(event.get("cost", 0))
+        except (TypeError, ValueError):
+            continue
+        if at is None or cost <= 0 or event.get("host") not in {"kolesa", "cdn"}:
+            continue
+        if at > cutoff:  # ровно 24 часа назад уже вышло из окна
+            clean = {"at": at.isoformat(), "host": event["host"], "cost": cost}
+            if event.get("legacy"):
+                clean["legacy"] = True
+            active.append(clean)
+    return active
+
+
+def _rolling_used(state: dict, now: datetime) -> dict:
+    used = {"kolesa": 0, "cdn": 0}
+    for event in _active_events(state, now):
+        used[event["host"]] += event["cost"]
+    return used
+
+
+def _write_state(state: dict, now: datetime | None = None):
+    now = now or _now()
+    days = dict(state.get("days", {}))
     for old in sorted(days)[:-BUDGET_KEEP_DAYS]:
         days.pop(old)
+    event_cutoff = now - timedelta(hours=BUDGET_EVENT_KEEP_HOURS)
+    events = []
+    for event in state.get("events", []):
+        at = _parse_event_time(event.get("at"), now.tzinfo)
+        if at is not None and at > event_cutoff:
+            events.append(event)
     target = _p.Path(BUDGET_FILE)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump({"days": days}, out, sort_keys=True)
+            json.dump({"schema_version": BUDGET_SCHEMA_VERSION,
+                       "days": days, "events": events}, out, sort_keys=True)
             out.flush()
             os.fsync(out.fileno())
         os.replace(tmp_name, target)
     finally:
         _p.Path(tmp_name).unlink(missing_ok=True)
+
+
+def _write_days(days: dict):
+    """Совместимая запись календарной истории (rolling-событий ещё нет)."""
+    _write_state({"schema_version": 1, "days": days, "events": []})
 
 
 @contextmanager
@@ -257,38 +370,43 @@ def _budget_lock():
 
 
 def load_budget_used() -> dict:
-    """Сколько запросов на хост уже потрачено СЕГОДНЯ. Другой день или
-    битый/отсутствующий файл → нули (не падаем)."""
-    today = _read_days().get(date.today().isoformat(), {})
-    return {"kolesa": int(today.get("kolesa", 0)),
-            "cdn": int(today.get("cdn", 0))}
+    """Сколько запросов на хост потрачено за последние ровно 24 часа."""
+    with _budget_lock():
+        now = _now()
+        state = _read_state()
+        was_legacy = int(state.get("schema_version", 1)) < BUDGET_SCHEMA_VERSION
+        state = _migrate_legacy_state(state, now)
+        if was_legacy:
+            _write_state(state, now)
+        return _rolling_used(state, now)
 
 
 def save_budget_used(used: dict):
-    """Записать расход как сегодняшний (перезапись, не прибавление)."""
+    """Совместимый setter: заменить текущий rolling-расход (для recovery)."""
     with _budget_lock():
-        days = _read_days()
-        days[date.today().isoformat()] = {"kolesa": int(used["kolesa"]),
-                                          "cdn": int(used["cdn"])}
-        _write_days(days)
+        now = _now()
+        state = _migrate_legacy_state(_read_state(), now)
+        state["events"] = [
+            {"at": now.isoformat(), "host": host, "cost": int(used[host])}
+            for host in ("kolesa", "cdn") if int(used[host]) > 0
+        ]
+        state["days"][now.date().isoformat()] = {
+            "kolesa": int(used["kolesa"]), "cdn": int(used["cdn"])}
+        _write_state(state, now)
 
 
 def charge_budget(host: str, cost: int) -> dict:
-    """Списать cost запросов хоста на ТЕКУЩИЙ календарный день и вернуть
-    расход за сегодня.
-
-    Важно, что день берётся в момент списания, а не в момент старта прогона:
-    иначе долгий --until-done, начавшийся вечером, приписывал бы всё
-    сегодняшнему числу и после полуночи блокировал новый день.
-    """
+    """Списать cost запросов и вернуть расход за скользящие 24 часа."""
     with _budget_lock():
-        days = _read_days()
-        key = date.today().isoformat()
-        cur = days.setdefault(key, {"kolesa": 0, "cdn": 0})
+        now = _now()
+        state = _migrate_legacy_state(_read_state(), now)
+        key = now.date().isoformat()
+        cur = state["days"].setdefault(key, {"kolesa": 0, "cdn": 0})
         cur[host] = int(cur.get(host, 0)) + int(cost)
-        _write_days(days)
-        return {"kolesa": int(cur.get("kolesa", 0)),
-                "cdn": int(cur.get("cdn", 0))}
+        state["events"].append({"at": now.isoformat(), "host": host,
+                                "cost": int(cost)})
+        _write_state(state, now)
+        return _rolling_used(state, now)
 
 
 def reserve_budget(host: str, cost: int, limit: int) -> dict | None:
@@ -299,15 +417,19 @@ def reserve_budget(host: str, cost: int, limit: int) -> dict | None:
     уже мог дойти до сайта.
     """
     with _budget_lock():
-        days = _read_days()
-        key = date.today().isoformat()
-        cur = days.setdefault(key, {"kolesa": 0, "cdn": 0})
-        if int(cur.get(host, 0)) + int(cost) > int(limit):
+        now = _now()
+        state = _migrate_legacy_state(_read_state(), now)
+        used = _rolling_used(state, now)
+        if int(used.get(host, 0)) + int(cost) > int(limit):
             return None
+        key = now.date().isoformat()
+        cur = state["days"].setdefault(key, {"kolesa": 0, "cdn": 0})
         cur[host] = int(cur.get(host, 0)) + int(cost)
-        _write_days(days)
-        return {"kolesa": int(cur.get("kolesa", 0)),
-                "cdn": int(cur.get("cdn", 0))}
+        state["events"].append({"at": now.isoformat(), "host": host,
+                                "cost": int(cost)})
+        _write_state(state, now)
+        used[host] += int(cost)
+        return used
 
 
 def compute_gaps() -> dict:
@@ -437,11 +559,11 @@ def budget_allows(host: str, key: str, gap_before: int, used: dict,
     near-done джоб голодал бы у края квоты.
 
     Проверяются ДВА потолка, оба равны DAILY_BUDGET:
-      used      — расход за текущие календарные сутки;
+      used      — расход за последние скользящие 24 часа;
       run_spent — расход этого запуска.
-    Второй нужен из-за полуночи: расход суток честно обнуляется в 00:00, и
-    без него прогон, начатый в 23:50, мог бы выдать двойную квоту всплеском
-    за двадцать минут — а банят именно за всплеск объёма.
+    Второй — defence-in-depth: даже очень долгий процесс, из rolling-окна
+    которого постепенно выпадают старые события, не получит больше одной
+    полной квоты за один запуск.
     """
     cost = min(CHUNK_MAX[key], gap_before)
     if used[host] + cost > DAILY_BUDGET[host]:
@@ -451,21 +573,20 @@ def budget_allows(host: str, key: str, gap_before: int, used: dict,
 
 def run_one_chunk(name: str, script: str, key: str, host: str, used: dict,
                   run_spent: dict | None = None) -> str:
-    """Одна порция джоба с учётом дневного бюджета ХОСТА. Возвращает исход:
+    """Одна порция джоба с учётом rolling-бюджета ХОСТА. Возвращает исход:
       done         — пробелов нет;
-      budget       — не влезает в остаток суточной квоты хоста (стоп до завтра);
+      budget       — не влезает в остаток 24-часовой квоты хоста;
       rate_limited — новый 429 (сайт просит стоп всей хостовой цепочки);
       breaker      — джоб вышел с ошибкой (внутренний предохранитель);
       stuck        — порция не сдвинула пробел (остаток недозаполним);
       progress     — есть прогресс, можно крутить дальше.
-    `used` (host → потрачено сегодня) мутируется и сохраняется на диск."""
+    `used` (host → потрачено за 24 часа) мутируется и сохраняется на диск."""
     gap_before = compute_gaps()[key]
     if gap_before == 0:
         return "done"
-    # Локальный `used` мог относиться ко вчерашнему дню, если процесс пережил
-    # полночь между двумя порциями. Файл хранит дни отдельно — перечитываем
-    # его перед решением, а run_spent всё равно не даст ночному запуску
-    # получить вторую полную квоту.
+    # Между порциями старые события могли выйти из rolling-окна; перечитываем
+    # атомарный файл перед решением. run_spent всё равно не даст одному
+    # долгому процессу получить больше полной квоты.
     used.update(load_budget_used())
     if not budget_allows(host, key, gap_before, used, run_spent):
         return "budget"
@@ -493,7 +614,7 @@ def run_one_chunk(name: str, script: str, key: str, host: str, used: dict,
 
 def drain_host(jobs, host: str, used: dict, until_done: bool,
                run_spent: dict | None = None) -> bool:
-    """Гоняет джобы ОДНОГО хоста, деля общий дневной бюджет host.
+    """Гоняет джобы ОДНОГО хоста, деля общий rolling-бюджет host.
       until_done=False: один проход — по одной порции на джоб.
       until_done=True: round-robin порциями, пока есть прогресс и бюджет
         (равномерно двигает все фронты, а не добивает первый джоб в ноль,
@@ -516,15 +637,15 @@ def drain_host(jobs, host: str, used: dict, until_done: bool,
             if outcome == "progress":
                 progressed = True
                 continue
-            blocked.add(key)   # done | stuck | budget — до завтра
+            blocked.add(key)   # done | stuck | budget — до следующего запуска
             if outcome == "done":
                 print(f"✓ {name}: пробелов нет")
             elif outcome == "stuck":
                 print(f"⚠ {name}: порция не сдвинула пробел — остаток "
                       "недозаполним (404/нет данных), пропускаю")
             elif outcome == "budget":
-                print(f"⏸ {name}: дневная квота «{host}» почти выбрана "
-                      f"({used[host]}/{DAILY_BUDGET[host]}) — добью завтра")
+                print(f"⏸ {name}: квота «{host}» за 24 часа почти выбрана "
+                      f"({used[host]}/{DAILY_BUDGET[host]}) — жду освобождения окна")
         if not until_done or not progressed or len(blocked) == len(jobs):
             return False
 
@@ -542,12 +663,12 @@ def report(g: dict, title: str):
 
 
 def run_gapped_jobs(until_done: bool = False, kolesa_jobs=None, do_cdn: bool = True):
-    """Сетевые джобы под дневным бюджетом на хост.
+    """Сетевые джобы под скользящим 24-часовым бюджетом на хост.
 
     until_done=False (по умолчанию): один проход — по одной порции на джоб
       (в пределах бюджета) — вежливо, резюмируемо, за пару минут.
-    until_done=True: используем всю оставшуюся дневную квоту (round-robin
-      порциями), потом встаём до завтра.
+    until_done=True: используем всю оставшуюся квоту окна (round-robin
+      порциями), потом встаём до освобождения старых событий.
     kolesa_jobs: какой набор kolesa-джобов гнать (KOLESA / VALUE_JOBS /
       BACKFILL_JOBS — выбирается флагами в main). do_cdn: трогать ли фото.
     Хосты идут по очереди (kolesa → CDN), у каждого свой бюджет. 429/
@@ -569,7 +690,7 @@ def run_gapped_jobs(until_done: bool = False, kolesa_jobs=None, do_cdn: bool = T
         run(script)
 
     print(f"\n✔ catch_up завершён за {(time.time()-t0)/60:.1f} мин")
-    print(f"  бюджет за сегодня: kolesa {used['kolesa']}/{DAILY_BUDGET['kolesa']}, "
+    print(f"  бюджет за 24 часа: kolesa {used['kolesa']}/{DAILY_BUDGET['kolesa']}, "
           f"CDN {used['cdn']}/{DAILY_BUDGET['cdn']}")
     report(compute_gaps(), "ОСТАЛОСЬ ПОСЛЕ ПРОГОНА")
 
@@ -589,7 +710,7 @@ def main():
 
     used = load_budget_used()
     label, note = risk_zone(DAILY_BUDGET["kolesa"])
-    print(f"Дневной бюджет запросов (израсходовано сегодня): "
+    print(f"Скользящий бюджет запросов (израсходовано за 24 часа): "
           f"kolesa {used['kolesa']}/{DAILY_BUDGET['kolesa']} [{label}], "
           f"CDN {used['cdn']}/{DAILY_BUDGET['cdn']}")
     if label in ("риск", "высокий риск"):
@@ -613,13 +734,13 @@ def main():
               f"({g['backfill']} из {g['enriched_total']}), заполненные пропускаю.")
         print("enrich (новые), статусы и фото не трогаю.")
         doable = min(g["backfill"], max(0, DAILY_BUDGET["kolesa"] - used["kolesa"]))
-        print(f"Влезает в остаток бюджета сегодня: {doable} "
+        print(f"Влезает в остаток rolling-бюджета: {doable} "
               f"из {g['backfill']} (≈{eta_minutes(doable):.0f} мин).")
     elif values:
         print("\nРежим --values: обогащение + avgPrice/бейдж (enrich + backfill),")
         print("без статусов и фото — быстрая чистка подозрительных под разметку.")
     if until_done:
-        print("--until-done: вся оставшаяся дневная квота (round-robin; стоп при 429/бюджете).")
+        print("--until-done: вся оставшаяся 24-часовая квота (round-robin; стоп при 429/бюджете).")
     elif not (values or backfill_only):
         print("\nОдин проход по всем джобам в пределах бюджета. Фокус: --values / --backfill.")
 

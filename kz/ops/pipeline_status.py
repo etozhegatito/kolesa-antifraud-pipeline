@@ -7,7 +7,7 @@ pipeline_status.py — «пульт»: сколько чего собрано, �
 Отвечает на вопросы:
   - сколько объявлений ждут обогащения (и сколько из них подозрительных);
   - сколько фото ждут хэширования;
-  - при текущих дневных бюджетах — за сколько дней рассосётся бэклог;
+  - при текущих 24-часовых бюджетах — за сколько дней рассосётся бэклог;
   - покрытие текстом (полный комментарий / огрызок листинга / пусто);
   - статусы жизненного цикла (active/archived/deleted/не проверялось);
   - сколько ручных вердиктов уже размечено.
@@ -30,6 +30,7 @@ if _p.Path(__file__).name != _expected:
         f"{_p.Path(__file__).name}. Файлы перепутаны при копировании!")
 
 
+import json
 import math
 import sys
 import time
@@ -44,13 +45,14 @@ from kz.core.db import get_engine
 # чтобы пульт, catch_up и сам джоб не разошлись в определении бэклога.
 from kz.ops.catch_up import STATUS_STALE_DAYS, STATUS_RECHECK_DAYS, DAILY_BUDGET
 
-# ETA считаем по СУТОЧНОМУ бюджету хоста (потолок при catch_up --until-done),
+# ETA считаем по 24-ЧАСОВОМУ бюджету хоста (потолок при catch_up --until-done),
 # а не по размеру одной порции — берём из catch_up, чтобы не разъезжалось при
 # смене лимитов. Это оценка «при полном дневном доборе на хост».
 ENRICH_PER_DAY = DAILY_BUDGET["kolesa"]
 PHOTOS_PER_DAY = DAILY_BUDGET["cdn"]
 
 LABELS_CSV = "data/manual_labels.csv"
+PARSER_STATUS_JSON = "logs/parser_last_run.json"
 
 LINE = "─" * 64
 
@@ -100,14 +102,22 @@ def main():
                          dtype={"ad_id": str})
 
     total = len(clean)
-    done_ids = set(enriched["ad_id"])
+    clean_ids = set(clean["ad_id"])
+    matched_enriched = enriched[enriched["ad_id"].isin(clean_ids)].copy()
+    matched_ids = set(matched_enriched["ad_id"])
+    usable_enriched = matched_enriched[matched_enriched["http_status"] == 200]
+    usable_ids = set(usable_enriched["ad_id"])
+    dead_enriched = matched_enriched[matched_enriched["http_status"] != 200]
+    orphan_enriched = enriched[~enriched["ad_id"].isin(clean_ids)]
 
     # ── Обогащение страниц ───────────────────────────────────────────────
-    pending_mask = ~clean["ad_id"].isin(done_ids)
+    # 404/архив уже проверен и повторно сеть не тратим, но в полезное покрытие
+    # его не записываем. Поэтому backlog и прогресс имеют разные знаменатели.
+    pending_mask = ~clean["ad_id"].isin(matched_ids)
     pending = int(pending_mask.sum())
     pending_susp = int((pending_mask & (clean["is_suspicious"] == 1)).sum())
-    enr_ok = int((enriched["http_status"] == 200).sum())
-    enr_fail = len(enriched) - enr_ok
+    enr_ok = len(usable_ids)
+    enr_fail = len(dead_enriched)
 
     print(LINE)
     print(f"ОБЪЯВЛЕНИЙ ВСЕГО: {total}   подозрительных: "
@@ -115,7 +125,9 @@ def main():
     print(LINE)
 
     print("\n► Обогащение страниц (enrich.py)")
-    print(f"  {bar(len(enriched), total)}   {len(enriched)}/{total}")
+    print(f"  полезно: {bar(enr_ok, total)}   {enr_ok}/{total}")
+    print(f"  строк в enriched: {len(enriched)}; совпало с raw/clean: "
+          f"{len(matched_enriched)}")
     print(f"  осталось: {pending}  → {eta_days(pending, ENRICH_PER_DAY)}")
     if pending_susp:
         print(f"  ⚠ среди ожидающих ПОДОЗРИТЕЛЬНЫХ: {pending_susp} "
@@ -124,6 +136,29 @@ def main():
         print("  ✓ все подозрительные уже обогащены")
     if enr_fail:
         print(f"  страниц, умерших до обогащения (404/архив и т.п.): {enr_fail}")
+    if len(orphan_enriched):
+        print(f"  ⚠ orphan-строк без объявления в raw/clean: {len(orphan_enriched)} "
+              "(не входят в покрытие)")
+
+    # ── Здоровье последнего листингового прогона ────────────────────────
+    print("\n► Последний запуск parser.py")
+    try:
+        parser_run = json.loads(Path(PARSER_STATUS_JSON).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print("  структурного статуса пока нет (появится после следующего запуска)")
+    else:
+        run_status = parser_run.get("status", "unknown")
+        print(f"  статус: {run_status}; "
+              f"начало: {parser_run.get('started_at', '?')}; "
+              f"конец: {parser_run.get('finished_at') or 'ещё идёт'}")
+        truncated = parser_run.get("freshness_truncated_segments") or []
+        if truncated:
+            print("  ⚠ лимит страниц сработал, пока unseen объявления ещё шли: "
+                  + ", ".join(truncated))
+        elif run_status == "success":
+            print("  ✓ на границе лимита unseen-объявлений не зафиксировано")
+        elif parser_run.get("message"):
+            print(f"  ⚠ запуск не завершён успешно: {parser_run['message']}")
 
     # ── Фото-хэши ────────────────────────────────────────────────────────
     # Заглушки «нет фото» (protocol-relative //...) не хэшируются намеренно —
@@ -171,7 +206,7 @@ def main():
     st_pending = int(((~terminal) & (days_gone >= STATUS_STALE_DAYS)
                       & (~recently_checked)).sum())
     print(f"  ждут проверки статуса: {st_pending}  → "
-          f"{eta_days(st_pending, DAILY_BUDGET['kolesa'])} (потолок kolesa/сутки)")
+          f"{eta_days(st_pending, DAILY_BUDGET['kolesa'])} (потолок kolesa/24ч)")
 
     # ── Ручная разметка ──────────────────────────────────────────────────
     print("\n► Ручная разметка (data/manual_labels.csv)")
@@ -229,7 +264,7 @@ def maybe_run_enrichment(pending: int, ph_pending: int):
     print(f"\nВ очереди: {pending} страниц (порция ~120) "
           f"и {ph_pending} фото (порция ~300).")
     print("Это СЕТЕВЫЕ запросы к kolesa.kz — не гоняй много раз подряд,")
-    print("джобы резюмируемые: прерваться и продолжить завтра безопасно.")
+    print("джобы резюмируемые: прерваться и продолжить после освобождения квоты безопасно.")
     ans = input("Запустить джобы обогащения сейчас? [y/N] ").strip().lower()
     if ans in ("y", "yes", "д", "да"):
         run_enrichment_jobs()

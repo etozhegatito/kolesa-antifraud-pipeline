@@ -30,11 +30,13 @@ if _p.Path(__file__).name != _expected:
 
 import asyncio
 import csv
+import json
 import logging
 import os
 import random
 import re
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -48,6 +50,7 @@ from kz.ops import catch_up as request_budget
 OUTPUT_CSV    = "data/raw/raw_data.csv"    # «паспорт» объявления: первая встреча
 SIGHTINGS_CSV = "data/raw/sightings.csv"   # журнал наблюдений: каждая встреча каждый день
 LOG_FILE      = "logs/parser.log"
+RUN_STATUS_FILE = "logs/parser_last_run.json"  # структурный итог последнего запуска
 STATE_FILE = "browser_state.json"   # cookies между запусками → выглядим как
                                     # постоянный посетитель, а не новый бот
 
@@ -91,12 +94,21 @@ DELAY_MIN, DELAY_MAX   = 3.0, 7.0    # пауза между страницам�
 COFFEE_BREAK_EVERY     = 5           # каждые N страниц — длинная пауза
 COFFEE_BREAK_RANGE     = (20, 45)    # длительность длинной паузы, сек
 MAX_CONSECUTIVE_FAILS  = 3           # предохранитель: 3 сбоя подряд → стоп
+# На первых трёх страницах каждого широкого ценового сегмента Алматы всегда
+# заметно больше пяти карточек. Меньше — это не «данных нет», а вероятный
+# дрейф HTML/селекторов. Падаем громко, чтобы пустой прогон не считался успехом.
+LISTING_HEALTH_FIRST_PAGES = 3
+LISTING_HEALTH_MIN_RAW_CARDS = 5
 HEADLESS = True
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 class DailyBudgetExhausted(RuntimeError):
-    """Общий суточный потолок kolesa исчерпан: сетевой шаг надо остановить."""
+    """Общий rolling-потолок kolesa исчерпан: сетевой шаг надо остановить."""
+
+
+class ListingSchemaError(RuntimeError):
+    """HTML листинга больше не соответствует ожидаемой схеме парсера."""
 
 
 _run_kolesa_requests = 0
@@ -110,8 +122,8 @@ def reserve_kolesa_request() -> dict:
     подходили к объёму, на котором IP уже блокировали. Списываем ДО page.goto:
     таймаут или 429 тоже являются нагрузкой и не должны возвращать квоту.
 
-    Второй предел — запросы текущего запуска. Он не даёт прогону, начатому до
-    полуночи, получить ещё целую квоту после календарного сброса.
+    Второй предел — запросы текущего запуска (defence-in-depth поверх
+    скользящего 24-часового счётчика).
     """
     global _run_kolesa_requests
     limit = request_budget.DAILY_BUDGET["kolesa"]
@@ -124,8 +136,8 @@ def reserve_kolesa_request() -> dict:
     if current is None:
         used = request_budget.load_budget_used()
         raise DailyBudgetExhausted(
-            f"суточный бюджет kolesa исчерпан: {used['kolesa']}/{limit}; "
-            "листинг продолжится в следующий запуск"
+            f"бюджет kolesa за 24 часа исчерпан: {used['kolesa']}/{limit}; "
+            "листинг продолжится после освобождения окна"
         )
     _run_kolesa_requests += 1
     return current
@@ -582,6 +594,8 @@ async def get_html(page, url: str, retries: int = 3) -> str | None:
             return await page.content()
         except DailyBudgetExhausted:
             raise
+        except request_budget.BudgetStateError:
+            raise  # fail closed: битый счётчик нельзя маскировать ретраями
         except PWTimeout:
             log.warning(f"Таймаут [{attempt}/{retries}]: {url}")
         except Exception as e:
@@ -612,6 +626,70 @@ def looks_blocked(html: str) -> bool:
     return any(m in html for m in markers)
 
 
+def validate_listing_page(html: str, cards: list[dict], page_num: int,
+                          category: str) -> int:
+    """Fail-fast проверка контракта HTML → карточки.
+
+    Раньше смена CSS-класса давала `cards=[]`, после чего парсер писал
+    «конец сегмента» и завершался с кодом 0. Теперь первые страницы широких
+    сегментов обязаны содержать карточки, а сильная потеря при разборе
+    считается поломкой схемы. Возвращаем raw-count для run status.
+    """
+    raw_count = len(BeautifulSoup(html, "html.parser").select(".js__a-card"))
+    if page_num <= LISTING_HEALTH_FIRST_PAGES and \
+            raw_count < LISTING_HEALTH_MIN_RAW_CARDS:
+        raise ListingSchemaError(
+            f"[{category}] стр. {page_num}: найдено только {raw_count} raw-карточек; "
+            "вероятно, Kolesa изменила HTML/селекторы"
+        )
+    min_parsed = max(1, raw_count // 2)
+    if raw_count >= LISTING_HEALTH_MIN_RAW_CARDS and len(cards) < min_parsed:
+        raise ListingSchemaError(
+            f"[{category}] стр. {page_num}: разобрано {len(cards)}/{raw_count}; "
+            "поля карточки или селекторы изменились"
+        )
+    return raw_count
+
+
+def page_limit_has_unseen(page_num: int, unseen: int, card_count: int,
+                          start_page: int, max_pages: int) -> bool:
+    """Истина, если остановились по лимиту, пока новые для датасета ещё идут."""
+    return (start_page == 1 and page_num == max_pages
+            and card_count > 0 and unseen > 0)
+
+
+def write_run_status(report: dict):
+    """Атомарный машинно-читаемый итог парсера для мониторинга/диагностики."""
+    target = Path(RUN_STATUS_FILE)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(report, out, ensure_ascii=False, indent=2, sort_keys=True)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp_name, target)
+    finally:
+        Path(tmp_name).unlink(missing_ok=True)
+
+
+def mark_unhandled_failure(error: Exception):
+    """Не оставлять `running`, если CLI упал по непредусмотренной причине."""
+    try:
+        report = json.loads(Path(RUN_STATUS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        report = {"schema_version": 1, "started_at": None,
+                  "segments": {}, "totals": {}}
+    if report.get("status") != "running":
+        return
+    report.update({
+        "status": "failed",
+        "message": f"{type(error).__name__}: {error}",
+        "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    })
+    write_run_status(report)
+
+
 async def run():
     init_csv(OUTPUT_CSV)
     init_sightings(SIGHTINGS_CSV)
@@ -624,6 +702,38 @@ async def run():
     total_sightings = 0
     consecutive_fails = 0
     pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded = [], [], [], []
+    run_report = {
+        "schema_version": 1,
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "finished_at": None,
+        "status": "running",
+        "message": None,
+        "config": {"start_page": START_PAGE,
+                   "max_pages_per_category": MAX_PAGES_PER_CATEGORY,
+                   "categories": [name for name, _ in CATEGORIES]},
+        "segments": {},
+        "freshness_truncated_segments": [],
+        "totals": {},
+    }
+
+    def save_status(status: str, message: str | None = None):
+        run_report["status"] = status
+        run_report["message"] = message
+        run_report["totals"] = {
+            "new_ads": total_saved, "upgraded_passports": total_upgraded,
+            "sightings": total_sightings,
+            "kolesa_requests_reserved": _run_kolesa_requests,
+        }
+        run_report["freshness_truncated_segments"] = sorted(
+            name for name, state in run_report["segments"].items()
+            if state.get("page_limit_has_unseen")
+        )
+        if status != "running":
+            run_report["finished_at"] = datetime.now().astimezone().isoformat(
+                timespec="seconds")
+        write_run_status(run_report)
+
+    save_status("running")
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -656,6 +766,12 @@ async def run():
             await human_pause(page)
         except DailyBudgetExhausted as e:
             log.warning(f"Стоп до сети: {e}")
+            save_status("budget_exhausted", str(e))
+            await browser.close()
+            return
+        except request_budget.BudgetStateError as e:
+            log.error(f"Стоп до сети: {e}")
+            save_status("budget_error", str(e))
             await browser.close()
             return
         except Exception as e:
@@ -683,6 +799,17 @@ async def run():
                         rewrite_passports(OUTPUT_CSV, passports)
                     flush_postgres(pg_new_ads, pg_new_photos, pg_sightings,
                                    pg_upgraded)
+                    save_status("budget_exhausted", str(e))
+                    await context.storage_state(path=STATE_FILE)
+                    await browser.close()
+                    return
+                except request_budget.BudgetStateError as e:
+                    log.error(f"Стоп: {e}")
+                    if total_upgraded:
+                        rewrite_passports(OUTPUT_CSV, passports)
+                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings,
+                                   pg_upgraded)
+                    save_status("budget_error", str(e))
                     await context.storage_state(path=STATE_FILE)
                     await browser.close()
                     return
@@ -699,6 +826,7 @@ async def run():
                         if total_upgraded:
                             rewrite_passports(OUTPUT_CSV, passports)
                         flush_postgres(pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded)
+                        save_status("blocked", "три сетевых сбоя/блокировки подряд")
                         await context.storage_state(path=STATE_FILE)
                         await browser.close()
                         sys.exit(1)
@@ -707,7 +835,26 @@ async def run():
                 consecutive_fails = 0
 
                 cards = parse_cards(html, cat_name)
+                try:
+                    raw_card_count = validate_listing_page(
+                        html, cards, page_num, cat_name)
+                except ListingSchemaError as e:
+                    log.error(f"SCHEMA_ERROR {e}")
+                    if total_upgraded:
+                        rewrite_passports(OUTPUT_CSV, passports)
+                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings,
+                                   pg_upgraded)
+                    save_status("schema_error", str(e))
+                    await context.storage_state(path=STATE_FILE)
+                    await browser.close()
+                    sys.exit(1)
                 if not cards:
+                    run_report["segments"][cat_name] = {
+                        "last_page": page_num, "raw_cards": raw_card_count,
+                        "parsed_cards": 0, "unseen_ads": 0,
+                        "unseen_share": 0.0, "page_limit_has_unseen": False,
+                    }
+                    save_status("running")
                     log.info(f"[{cat_name}] карточек нет — конец сегмента")
                     break
 
@@ -749,6 +896,24 @@ async def run():
                          f"наблюдений сегодня: {total_sightings}, "
                          f"всего объявлений: {total_saved}")
 
+                boundary_open = page_limit_has_unseen(
+                    page_num, new, len(cards), START_PAGE,
+                    MAX_PAGES_PER_CATEGORY)
+                run_report["segments"][cat_name] = {
+                    "last_page": page_num, "raw_cards": raw_card_count,
+                    "parsed_cards": len(cards), "unseen_ads": new,
+                    "unseen_share": round(new / len(cards), 4),
+                    "page_limit_has_unseen": boundary_open,
+                }
+                save_status("running")
+                if boundary_open:
+                    log.warning(
+                        "FRESHNESS_TRUNCATED category=%s page=%d unseen=%d "
+                        "cards=%d unseen_share=%.1f%%",
+                        cat_name, page_num, new, len(cards),
+                        100 * new / len(cards),
+                    )
+
                 pages_done += 1
                 if pages_done % COFFEE_BREAK_EVERY == 0:
                     brk = random.uniform(*COFFEE_BREAK_RANGE)
@@ -765,10 +930,16 @@ async def run():
         log.info(f"Дозаполнено паспортов: {total_upgraded}")
     flush_postgres(pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded)
 
+    save_status("success")
+
     log.info(f"\n{'=' * 50}\nГотово! Новых: {total_saved}, "
              f"дозаполнено: {total_upgraded}, "
              f"наблюдений: {total_sightings} → {OUTPUT_CSV}")
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except Exception as error:
+        mark_unhandled_failure(error)
+        raise
