@@ -90,6 +90,13 @@ MAX_PAGES_PER_CATEGORY = int(os.getenv("KOLESA_MAX_PAGES", "3"))
 # (свежее и так ловится первыми страницами), но пропуск начала означает, что
 # новые объявления этого дня в такой прогон не попадут.
 START_PAGE = int(os.getenv("KOLESA_START_PAGE", "1"))
+# Микро-прогон для проверки живого HTML без полного сбора. 0 = без лимита.
+# Лимит относится к РАЗОБРАННЫМ карточкам, а не только к новым объявлениям:
+# `KOLESA_MAX_CARDS=10` гарантирует максимум десять обработанных карточек и
+# обычно ровно два top-level запроса (прогрев + первая страница).
+MAX_CARDS_PER_RUN = int(os.getenv("KOLESA_MAX_CARDS", "0"))
+if MAX_CARDS_PER_RUN < 0:
+    raise SystemExit("KOLESA_MAX_CARDS должно быть >= 0")
 DELAY_MIN, DELAY_MAX   = 3.0, 7.0    # пауза между страницами, сек
 COFFEE_BREAK_EVERY     = 5           # каждые N страниц — длинная пауза
 COFFEE_BREAK_RANGE     = (20, 45)    # длительность длинной паузы, сек
@@ -658,6 +665,16 @@ def page_limit_has_unseen(page_num: int, unseen: int, card_count: int,
             and card_count > 0 and unseen > 0)
 
 
+def cap_cards_for_run(cards: list[dict], already_processed: int,
+                      limit: int) -> tuple[list[dict], bool]:
+    """Обрезать страницу до остатка микро-лимита; вернуть (карточки, стоп)."""
+    if limit <= 0:
+        return cards, False
+    remaining = max(0, limit - already_processed)
+    selected = cards[:remaining]
+    return selected, already_processed + len(selected) >= limit
+
+
 def write_run_status(report: dict):
     """Атомарный машинно-читаемый итог парсера для мониторинга/диагностики."""
     target = Path(RUN_STATUS_FILE)
@@ -700,6 +717,8 @@ async def run():
     total_saved = 0
     total_upgraded = 0
     total_sightings = 0
+    total_cards_processed = 0
+    card_limit_reached = False
     consecutive_fails = 0
     pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded = [], [], [], []
     run_report = {
@@ -710,6 +729,7 @@ async def run():
         "message": None,
         "config": {"start_page": START_PAGE,
                    "max_pages_per_category": MAX_PAGES_PER_CATEGORY,
+                   "max_cards_per_run": MAX_CARDS_PER_RUN,
                    "categories": [name for name, _ in CATEGORIES]},
         "segments": {},
         "freshness_truncated_segments": [],
@@ -722,8 +742,10 @@ async def run():
         run_report["totals"] = {
             "new_ads": total_saved, "upgraded_passports": total_upgraded,
             "sightings": total_sightings,
+            "cards_processed": total_cards_processed,
             "kolesa_requests_reserved": _run_kolesa_requests,
         }
+        run_report["card_limit_reached"] = card_limit_reached
         run_report["freshness_truncated_segments"] = sorted(
             name for name, state in run_report["segments"].items()
             if state.get("page_limit_has_unseen")
@@ -858,8 +880,11 @@ async def run():
                     log.info(f"[{cat_name}] карточек нет — конец сегмента")
                     break
 
+                run_cards, stop_after_page = cap_cards_for_run(
+                    cards, total_cards_processed, MAX_CARDS_PER_RUN)
+                total_cards_processed += len(run_cards)
                 new = 0
-                for row in cards:
+                for row in run_cards:
                     photo_urls = row.pop("_photo_urls", [])
 
                     # 1) Журнал наблюдений — пишем ВСЕГДА: из повторов
@@ -893,6 +918,7 @@ async def run():
                     total_saved += 1
                     new += 1
                 log.info(f"  карточек: {len(cards)}, новых: {new}, "
+                         f"обработано в этом запуске: {total_cards_processed}, "
                          f"наблюдений сегодня: {total_sightings}, "
                          f"всего объявлений: {total_saved}")
 
@@ -902,6 +928,7 @@ async def run():
                 run_report["segments"][cat_name] = {
                     "last_page": page_num, "raw_cards": raw_card_count,
                     "parsed_cards": len(cards), "unseen_ads": new,
+                    "processed_cards": len(run_cards),
                     "unseen_share": round(new / len(cards), 4),
                     "page_limit_has_unseen": boundary_open,
                 }
@@ -914,6 +941,12 @@ async def run():
                         100 * new / len(cards),
                     )
 
+                if stop_after_page:
+                    card_limit_reached = True
+                    save_status("running")
+                    log.info("MICRO_LIMIT_REACHED cards=%d", total_cards_processed)
+                    break
+
                 pages_done += 1
                 if pages_done % COFFEE_BREAK_EVERY == 0:
                     brk = random.uniform(*COFFEE_BREAK_RANGE)
@@ -921,6 +954,9 @@ async def run():
                     await asyncio.sleep(brk)
                 else:
                     await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+
+            if card_limit_reached:
+                break
 
         await context.storage_state(path=STATE_FILE)
         await browser.close()
@@ -934,7 +970,8 @@ async def run():
 
     log.info(f"\n{'=' * 50}\nГотово! Новых: {total_saved}, "
              f"дозаполнено: {total_upgraded}, "
-             f"наблюдений: {total_sightings} → {OUTPUT_CSV}")
+             f"наблюдений: {total_sightings}, "
+             f"карточек обработано: {total_cards_processed} → {OUTPUT_CSV}")
 
 
 if __name__ == "__main__":

@@ -791,6 +791,17 @@ def test_parser_reports_open_freshness_boundary():
     assert not page_limit_has_unseen(30, 9, 23, 26, 30)  # deep backfill ≠ fresh
 
 
+def test_parser_micro_limit_caps_exactly_ten_cards():
+    """Тестовый live-прогон не должен случайно обработать всю страницу."""
+    from kz.collect.parser import cap_cards_for_run
+
+    cards = [{"ad_id": str(i)} for i in range(23)]
+    selected, stop = cap_cards_for_run(cards, already_processed=0, limit=10)
+    assert [row["ad_id"] for row in selected] == [str(i) for i in range(10)]
+    assert stop
+    assert cap_cards_for_run(cards, 0, 0) == (cards, False)  # обычный режим
+
+
 def test_parser_does_not_retry_a_corrupt_budget(monkeypatch):
     """Fail-closed budget error не должен превращаться в три псевдосетевых retry."""
     import asyncio
