@@ -1,6 +1,5 @@
-# Единый машинно-читаемый контракт проекта и конфигурация ruff.
-# requirements*.txt фиксируют библиотеки, а requires-python не даёт
-# установить их на несовместимый интерпретатор.
+# Machine-readable project contract and Ruff configuration. requirements*.txt
+# pins libraries; requires-python prevents installation on an incompatible VM.
 
 [project]
 name = "kz-auto-market-intelligence"
@@ -9,37 +8,29 @@ description = "Automotive market intelligence, price estimation and anomaly revi
 requires-python = ">=3.13,<3.14"
 
 [tool.ruff]
-target-version = "py313"        # та же, что в CI и в локальном .venv
+target-version = "py313"        # Matches CI and the local training environment.
 line-length = 100
 exclude = [".venv", "__pycache__", "docs"]
 
 [tool.ruff.lint]
-# Осознанно узкий набор: правила, которые ловят ОШИБКИ, а не оформление.
+# Deliberately narrow: rules that catch defects rather than formatting.
 #
-#   F   pyflakes — неопределённые имена, неиспользуемые импорты, f-строки
-#       без подстановок. Именно это трижды за одну сессию всплывало у нас
-#       уже во время прогона тестов, хотя ловится за секунду.
-#   E9  синтаксические и runtime-ошибки разбора.
-#   B   flake8-bugbear — настоящие ловушки: изменяемый аргумент по умолчанию,
-#       переменная цикла, захваченная замыканием, except без повторного
-#       возбуждения.
+#   F   pyflakes: undefined names, unused imports, and empty f-strings.
+#   E9  syntax and parser/runtime failures.
+#   B   flake8-bugbear: mutable defaults, captured loop variables, and unsafe
+#       exception handling.
 #
-# Стилевые правила (длина строк, порядок импортов, кавычки) намеренно НЕ
-# включены: они дали бы 189 замечаний и утопили бы полезные в шуме. Здесь
-# линтер — предохранитель, а не редактор.
+# Style-only rules are intentionally disabled. Ruff is a defect guard here,
+# not a formatting policy.
 select = ["F", "E9", "B"]
 
-# B905 (zip без strict=) включён ТОЛЬКО для тестов, и это осознанно.
-# В тесте молча укоротившийся zip — это утечка строгости: сравнение
-# «до и после» перестаёт замечать пропавшую строку, и тест не может упасть.
-# В остальном коде десять таких мест зипуют заведомо равные колонки одного
-# DataFrame; проставлять там strict= сейчас значит трогать рабочую логику
-# ради формальности. Долг записан, не спрятан.
+# B905 (zip without strict=) is enabled only for tests. A silently shortened
+# comparison can hide a missing row. Production uses remain documented debt
+# where same-length DataFrame columns are already guaranteed.
 ignore = ["B905"]
 
 [tool.ruff.lint.per-file-ignores]
-# Тесты намеренно импортируют внутри функций — так виднее, что именно
-# проверяется, и модуль не тянется при сборе тестов.
+# Tests intentionally import inside functions to keep each dependency local.
 "tests/*" = ["B011"]
-# в тестах strict= обязателен — см. комментарий выше
+# Tests must use strict=; see the rationale above.
 "tests/test_pipeline.py" = ["B011"]

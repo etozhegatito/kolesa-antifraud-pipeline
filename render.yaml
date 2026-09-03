@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: kz-auto-market-intelligence
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    numInstances: 1
+    envVars:
+      - key: KZ_PUBLIC_DEMO
+        value: "1"
+      - key: WEB_CONCURRENCY
+        value: "1"

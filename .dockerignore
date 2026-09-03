@@ -1,9 +1,8 @@
-# Контекст сборки отправляется демону Docker целиком, поэтому всё лишнее
-# здесь — это лишние секунды и мегабайты на каждой сборке. В data/photos
-# лежит около 400 МБ картинок, в .venv — ещё больше.
+# Docker sends the entire build context to the daemon. Excluding the local
+# environment, photos, and source data keeps every build smaller and safer.
 #
-# Что нужно образу, перечислено в Dockerfile через COPY: kz/, зависимости
-# и три файла routed-модели. Всё остальное можно смело исключать.
+# Dockerfile lists the runtime inputs explicitly: kz/, web dependencies, and
+# the three routed-model files under deploy/models/.
 
 .venv/
 .git/
@@ -12,17 +11,12 @@ __pycache__/
 *.pyc
 *.pyo
 
-# данные и логи: в образе им делать нечего
-data/*
-!data/models/
-data/models/*
-!data/models/price_model.cbm
-!data/models/price_cheap_specialist.cbm
-!data/models/price_model.metadata.json
+# Source data and operational logs never belong in the public image.
+data/
 logs/
 debug/
 
-# инструменты разработки и портфолио — не рантайм
+# Development and portfolio material is not required at runtime.
 tests/
 docs/
 airflow/

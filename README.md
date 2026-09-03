@@ -1,290 +1,353 @@
 # KZ Auto Market Intelligence
 
-**Оценка цены · мониторинг рынка · review аномалий · visual condition**
+**English** | [Русский](README_RU.md)
 
-Конвейер данных по объявлениям kolesa.kz (Алматы): собирает историю
-объявлений, превращает сырые страницы в проверяемую таблицу, отделяет
-рыночные аномалии от обычных объявлений и оценивает справедливую стоимость
-машины.
+An end-to-end data and machine-learning system for the Almaty used-car
+market: collection, data quality, duplicate-safe validation, price estimation,
+market-anomaly review, and experimental visual-condition analysis.
 
-> Продавец описывает автомобиль → система называет диапазон рыночной цены,
-> объясняет, из чего он сложился, и предупреждает, что в объявлении выглядит
-> подозрительно.
+> Enter a car's make, model, year, mileage, engine, transmission, and body
+> type. The service returns a fair listing-price estimate, a calibrated range,
+> the main factors behind the estimate, and input-quality warnings.
 
-Risk screening здесь не обвиняет продавца, а очищает обучающую выборку: если в данные
-попадут объявления-приманки по миллиону тенге, модель решит, что это
-нормальная цена, и начнёт занижать оценку честным продавцам.
+[**Open the live demo**](https://kz-auto-market-intelligence.onrender.com)
+· [Model card](docs/MODEL_CARD.md)
+· [Verified findings](docs/FINDINGS.md)
 
----
+## The project in 30 seconds
 
-## Цифры
-
-Данные и модель обновлены 2 сентября 2026.
-
-```
-данные      12 485 объявлений, 15 920 наблюдений цен
-            1 473 полезно обогащены (1 528 строк: 23 недоступны, 32 orphan)
-            60 310 URL фотографий, 5 004 из них хэшированы
-модель      routed MAPE 21,44%  |  медианная APE 13,92%  |  R²(log) 0,935
-            out-of-time MAPE 23,36%
-            одна общая модель 21,58%; простой baseline — 30,73%
-            routed−base: grouped ДИ [−0,28; −0,01], OOT [−0,63; +0,21] п.п.
-разброс     bootstrap SD 0,25 п.п.; 95% ДИ общей MAPE [20,95%; 21,93%]
-аномалии    179 кандидатов (1,4%), 111 ручных вердиктов
-            в 65 случайных контролях фрода нет → верхняя граница 4,6% (95%)
-разметка    782 кадра; все 47 legacy damaged помещены в needs_review
-            (у 38 комментарии явно указывают на definition drift)
-фото-CV     прошлые метрики отозваны до исправления definition drift; в цену не включён
-код         17 600+ строк, 255 офлайн-тестов + 6 с test-БД, CI на GitHub Actions
-```
-
-Средняя ошибка и типичная — разные вещи: **половина машин оценивается точнее
-13,9%**, а среднее задирает хвост промахов в дешёвом сегменте.
-
-```
-до 5 млн ₸    MAPE 29,16%   41% выборки и 56% всей ошибки
-5–10 млн      MAPE 15,49%
-10–20 млн     MAPE 15,27%
-20 млн+       MAPE 17,94%
-```
-
-Возраст сам по себе не делит задачу на «простую/сложную»: 0–5 лет — 16,97%,
-6–10 — 15,57%, 11–20 — 18,36%, и только 21+ резко поднимается до 29,71%.
-Главное пересечение — **21+ лет и дешевле 5 млн**: 3 480 машин (28% строк)
-создают 41,2% всей ошибки. Поэтому практический приоритет — признаки
-состояния старых дешёвых машин, а не фильтр «всё старше пяти лет».
-
-Цель проекта — **MAPE 18%**, и путь к ней проходит не через объём данных.
-Несколько крупных замеров (4,8 тыс. → 12,1 тыс. train-строк) сдвинули метрику лишь
-с 22,7% до 21,4%, а последние три — почти никуда. На текущем срезе отдельный
-специалист для базовых прогнозов ниже 5 млн даёт 21,44% против 21,58% у общей
-модели. На grouped CV его небольшой выигрыш теперь значим, но на out-of-time
-интервал накрывает ноль: эффект маршрутизации зависит от временного среза.
-Подгонка кривой одной общей модели упирается в асимптоту около 20%.
-
-Всё дело в дешёвом сегменте: при неизменном качестве остальных сегментов
-его MAPE надо снизить с 29,2% примерно до **20,7%**, чтобы общий стал 18%.
-Текущими табличными признаками это не берётся: там цену определяет состояние
-машины, которого в листинге нет. Отсюда обогащение страниц и отдельная
-проверка повреждений по фотографиям.
-
-Отдельно стоит смотреть на последнюю строку: **baseline догоняет**. Простая
-медиана по «марка + модель + год» почти сравнялась с общей моделью по
-медианной ошибке (14,29% против 13,99%). Специалист даёт 13,92%.
-Чем плотнее данные, тем сильнее baseline. Подробно — в
-[FINDINGS.md](docs/FINDINGS.md).
-
----
-
-## Быстрый старт
-
-```bash
-git clone https://github.com/etozhegatito/kz-auto-market-intelligence
-cd kz-auto-market-intelligence
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env          # пароль к Postgres придумайте свой
-docker compose up -d          # схема применяется автоматически
-python -m pytest tests/ -q    # 255 passed, 6 skipped без test-БД
-```
-
-Дальше — пять команд, больше помнить нечего:
-
-```bash
-python -m kz.ops.run_all --collect       # собрать данные (единственный путь в сеть)
-python -m kz.web                         # оценка + обе разметки на 127.0.0.1:8000
-python -m kz.ops.run_all --ml            # пересчитать всё после разметки
-python -m kz.ml.mape_stability           # разброс MAPE + возраст × цена
-python -m kz.ml.photo_dataset            # COCO-export ручных damage-рамок
-```
-
-Веб-интерфейс — единая точка входа: оценка машины (`/estimate`), вердикт по
-объявлению целиком (`/label`) и разметка отдельных фотографий (`/damage`).
-Счётчики у последних двух страниц намеренно разные: в первой единица —
-объявление, во второй — кадр, а у одной машины кадров несколько.
-
-Обычный день: небольшой сбор свежих первых страниц →
-обогащение в рамках той же общей квоты → разметка → пересчёт →
-просмотр `data/eda/ml_report.html`. Нельзя запускать parser и enrich
-параллельно: они обращаются к одному хосту. Единственный
-координированный сетевой вход — `run_all --collect`.
-По умолчанию parser берёт только первые 3 страницы каждого ценового
-сегмента: глубокие страницы не показали измеримой пользы для MAPE.
-
-Защита сбора работает на трёх уровнях. Parser и per-ad джобы атомарно делят
-один **скользящий лимит за 24 часа** — полночь больше не обнуляет квоту.
-Первые страницы проходят fail-fast проверку HTML-контракта: если Kolesa
-сменит селекторы, пустой результат станет ошибкой, а не ложным «успехом».
-Итог каждого листингового запуска записывается в
-`logs/parser_last_run.json`; `pipeline_status` показывает его статус и
-предупреждает, если лимит страниц сработал, пока unseen-объявления ещё шли.
-
-Подробнее — [SETUP.md](docs/SETUP.md).
-
----
-
-## Что внутри
-
-```
-kolesa.kz
-   │  parser          карточки из списка объявлений
-   ▼
-raw_ads               СЫРЬЁ. Никогда не меняется, только дополняется
-   │  enrich          полный текст, бейдж состояния, факт «Истории авто»
-   │  check_status    жив ли ещё объявление
-   │  photo_dedup     отпечатки фотографий (pHash)
-   ▼
-enriched, ad_status, photo_hashes
-   │  clean           ПЕРЕСОБИРАЕТСЯ ЗАНОВО каждый прогон
-   ▼
-clean_data            таблица, готовая к обучению
-   │  train_price_model → общая модель + специалист <5M → отчёты
-   ▼
-модель цены, калиброванный ценовой пол, дашборды
-
-фотографии
-   │  photo_fetch     скачивание, отдельный бюджет запросов к CDN
-   │  photo_clip      векторы CLIP, оси «ржавая», «грязная», «нет кузова»
-   ▼
-разметка повреждений рамками (/damage)
-   ├─► photo_dataset → отдельные train/audit COCO-файлы для detector
-   └─► photo_damage  → grouped OOF по ad_id + точным pHash-дублям
-```
-
-**Главный принцип: сырьё неизменяемо, выводы пересобираются.** Поправил
-правило детектора — оно применилось задним числом ко всем объявлениям,
-перекачивать ничего не нужно.
-
----
-
-## Документация
-
-| документ | о чём |
+| Question | Answer |
 |---|---|
-| [OVERVIEW.md](docs/OVERVIEW.md) | задача целиком, что уже работает и что цель, ограничения и план |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | путь объявления через систему, схема таблиц, структура репозитория, Airflow |
-| [ANTIFRAUD.md](docs/ANTIFRAUD.md) | рыночные аномалии, z-score, объяснимая низкая цена и ручной review |
-| [MODELLING.md](docs/MODELLING.md) | обучение модели, grouped CV, out-of-time, как проверяется качество |
-| [FINDINGS.md](docs/FINDINGS.md) | **что проверено и не сработало** — 25 разборов, включая честный аудит CV и отрицательные результаты по фотографиям |
-| [MODEL_CARD.md](docs/MODEL_CARD.md) | паспорт текущего артефакта модели |
-| [SETUP.md](docs/SETUP.md) | установка, сценарии работы, все команды, типичные ошибки |
-| [DEPLOY.md](docs/DEPLOY.md) | контейнер, публичный режим, выкладка наружу |
-| [GUIDE.md](docs/GUIDE.md) | разбор метрик простым языком, чтобы вернуться к проекту через месяц |
-| [GLOSSARY.md](docs/GLOSSARY.md) | словарь терминов |
+| What problem does it solve? | Estimates a fair *listing* price for a used car in Almaty and sends unusually low listings to human review. |
+| What is deployed? | A read-only estimator backed by two trained CatBoost models. It does not need the source database for inference. |
+| How much data? | 12,639 collected listings; 12,455 rows used by the current model. |
+| Main result | **21.36% grouped out-of-fold MAPE**, 13.81% median APE, 23.24% out-of-time MAPE. |
+| Where is the remaining error? | Cars below ₸5M: 29.01% MAPE and 55.5% of total percentage error. Cars at ₸5M+: 16.07% MAPE. |
+| Is computer vision in production? | No. Earlier supervised CV results were withdrawn after label-definition drift was found. The live price estimate does not claim to inspect photos. |
+| Engineering quality | 255 offline tests plus 6 PostgreSQL integration tests, Ruff, Docker health smoke, and GitHub Actions. |
 
----
+The free demo can sleep after inactivity. Its first request may therefore take
+about a minute; later requests are fast.
 
-## Что здесь стоит посмотреть
+## Why this project exists
 
-Пять вещей, ради которых проект и делался.
+A marketplace price is not determined only by make, model, and year. Mileage,
+engine, transmission, body type, vehicle condition, seller description, and
+photos can all matter. Marketplace data is also noisy: the same vehicle may be
+relisted, prices can change, and exceptionally cheap ads may be damaged cars,
+incomplete listings, bait prices, or genuine bargains.
 
-**Grouped CV против утечки дублей.** В базе есть перезаливы — одна машина
-выложена дважды. При обычном случайном разбиении один дубль попадёт в
-обучение, второй в проверку, модель вспомнит ответ, и метрика окажется
-завышенной. Дубли считаются одной группой и не разрываются между фолдами.
-Цена в ключ группы не входит: смена цены не делает машину новым объектом.
-См. `duplicate_groups()` в [kz/ml/train_price_model.py](kz/ml/train_price_model.py).
+This project turns that source into an auditable pipeline:
 
-**Калибровка порога по OOF.** Квантильная модель обучается на нижние 10%,
-но номинальная alpha не гарантирует, что на новых данных ровно 10% окажутся
-ниже пола. Поправка считается по out-of-fold остаткам и сохраняется вместе
-с артефактом. См. [kz/ml/residual_detector.py](kz/ml/residual_detector.py).
+1. collect listing snapshots without overwriting the original evidence;
+2. enrich a controlled subset with fields from the full listing page;
+3. rebuild a clean analytical table from immutable raw data;
+4. group relisted vehicles so copies cannot leak across train and validation;
+5. train and compare a general model and a cheap-car specialist;
+6. calibrate price intervals and low-price review thresholds on out-of-fold residuals;
+7. keep uncertain anomaly and photo decisions in human-review queues;
+8. publish only the read-only estimator, never collection or labeling tools.
 
-**Проверка «а не выучила ли модель что-то другое».** Исторический замер на
-38 считавшихся положительными объявлениях давал OOF AUC 0,739 для
-возраста+цены, 0,633 для zero-shot CLIP и 0,658 для полного CLIP-вектора.
-После аудита definition drift эти supervised-цифры **отозваны**: все 47
-legacy `damaged`-кадров временно исключены из CV до визуальной перепроверки,
-потому что 38 из них по комментариям похожи на косметику. CV никогда не включался в
-модель цены, поэтому основной результат не затронут.
+The system estimates the **first observed listing price**, not the final sale
+price. That distinction is part of the model contract and is stored in its
+metadata.
 
-ROC-AUC здесь не единственная метрика: при редком классе код также считает
-PR-AUC. Исторически для CLIP-вектора это было 0,392 против 0,519 у
-age+price; эти числа тоже ждут пересчёта после исправления меток. CV-группы
-объединяют не только кадры одного `ad_id`, но и разные объявления с точно
-одинаковым perceptual hash: переопубликовать машину под новым номером не
-означает создать независимый test-пример.
+## Try the demo
 
-Приём, который это ловит, стоит дёшево: обучить на признаках, до которых
-модели нет дела, и посмотреть, не выйдет ли столько же. Если простая
-таблица догоняет — сложная модель, скорее всего, выучила её же. Разбор в
-[FINDINGS.md §19-20 и §28](docs/FINDINGS.md).
+Open the [live estimator](https://kz-auto-market-intelligence.onrender.com)
+and choose **Price estimate**. A realistic example is:
 
-**Отрицательные результаты, записанные и не спрятанные.** Двадцать
-разборов в [FINDINGS.md](docs/FINDINGS.md) вместе с причинами: что
-проверено, что не сработало и какой вывод пришлось отозвать. Там же
-поправка к собственному выводу, сделанная в тот же день, когда
-обнаружилось, что замер шёл на подвыборке.
+```text
+Make: Toyota
+Model: Camry
+Year: 2019
+Mileage: 90,000 km
+Engine: 2.5 L petrol
+Transmission: automatic
+Body: sedan
+Condition: used
+```
 
-**Активное обучение на своих метках.** Доля повреждённых кадров около
-процента, случайная выборка дала бы три положительных примера на три
-сотни. Очередь разметки стратифицирована и ранжируется слабым
-классификатором, обученным на уже проставленных метках: верхние 25 кадров
-содержат 40% положительных против 6,9% в случайной очереди.
+The response contains:
 
-Отбор идёт **по объявлениям, а не по кадрам** — grouped CV считает
-независимыми объявления, и пять снимков одной машины дают одну точку.
-Кадры, где кузова не видно (салон, подкапотное, колесо), откладываются в
-конец, а не выбрасываются: порог откалиброван, но ошибка фильтра не
-должна молча уносить редкие положительные примеры.
+- a point estimate in Kazakhstani tenge;
+- a calibrated lower and upper range;
+- the model route that answered;
+- plain-language factors that moved the estimate;
+- warnings for missing or unusual input values.
 
-Active learning не используется как test: 20% новых объявлений стабильно
-выделяются по хэшу `ad_id` в случайный `audit`-срез до ранжирования. Журнал
-новых меток хранит `selection_source`, `dataset_split`, `annotator` и версию
-схемы. Старые 782 метки остаются legacy-train — задним числом объявлять их
-независимым holdout было бы самообманом. Bounding boxes экспортируются в
-COCO без изменения исходных изображений. На одном кадре можно отметить
-несколько отдельных повреждений: в журнале это остаётся одной меткой кадра,
-а COCO получает отдельную annotation для каждой рамки. Старые одиночные
-`x1…y2` читаются без миграции данных.
+The public mode intentionally disables `/label` and `/damage`. Those pages
+write human ground truth and must not be exposed to anonymous users. With no
+PostgreSQL database, comparable-listing decoration is omitted, but the model
+estimate still works.
 
-Плюс: анализ выживаемости с правым цензурированием
-([survival.py](kz/ml/survival.py)), мониторинг дрейфа через PSI
-([monitoring.py](kz/ml/monitoring.py)), поиск слов о повреждениях с окном
-отрицаний ([damage.py](kz/transform/damage.py)) — «нету никаких гнилей» не
-должно считаться повреждением.
+Check the deployed artifact directly:
 
----
+```bash
+curl -s https://kz-auto-market-intelligence.onrender.com/api/health
+```
 
-## Чего проект не делает
+The response includes the training timestamp, number of training rows, current
+validation MAPE, and whether public-demo safeguards are active.
 
-- не решает автоматически, что продавец мошенник;
-- не собирает телефоны и другие персональные данные;
-- не сохраняет сам VIN: `has_vin` — только явно подтверждённый факт;
-  метка VIN-backed сервиса «История авто» означает «да», а отсутствие
-  метки остаётся неизвестностью, не превращаясь в ложное «VIN нет»;
-- не определяет техническое состояние машины без диагностики;
-- текущая форма `/estimate` принимает табличные поля, но ещё не загружает
-  фотографии и полный текст продавца; CV пока остаётся честным offline-
-  экспериментом, не частью ценового ответа;
-- не гарантирует продажу по предсказанной цене — модель предсказывает
-  **цену публикации**, а не сумму сделки;
-- не использует оценку `kolesa_avg_price` как признак (утечка цели).
+## Current measured results
 
----
+These numbers come from the model trained on 3 September 2026. They are based
+on saved out-of-fold predictions, not predictions on training rows.
 
-## Важное про данные и сбор
+| Validation view | MAPE | Median APE | Notes |
+|---|---:|---:|---|
+| Grouped OOF, routed model | **21.36%** | **13.81%** | Primary model-selection estimate |
+| Grouped OOF, general model only | 21.38% | 13.94% | Routing changes little on this snapshot |
+| Grouped OOF, simple baseline | 30.70% | 14.21% | Median by make + model + year |
+| Out-of-time, routed model | **23.24%** | 14.82% | Later listings held out by time |
+| Out-of-time, baseline | 35.01% | 15.25% | Same temporal holdout |
 
-Публичный репозиторий содержит **код, тесты и схему базы**, но намеренно не
-содержит: исходных объявлений, фотографий, ручных вердиктов и меток
-повреждений, пароля от Postgres, обученных моделей и сгенерированных
-отчётов. После клонирования
-можно запустить тесты, но не получить готовую оценку — сначала нужны
-собственные или иным образом законно полученные данные.
+The routed model's grouped MAPE has a 95% grouped-bootstrap interval of
+**20.87%–21.87%**. Its improvement over the general model is only -0.03
+percentage points, and the paired confidence interval crosses zero. The
+specialist remains a researched production route, but the current snapshot
+does not justify claiming a meaningful overall win.
 
-Сетевые сборщики — исследовательская часть проекта.
-[Пользовательское соглашение Kolesa.kz](https://kolesa.kz/content/agreement/)
-запрещает автоматический доступ и извлечение материалов без письменного
-разрешения. Ограничение частоты запросов снижает нагрузку, но не заменяет
-разрешение. **Не используйте смену IP, VPN или мобильный интернет для обхода
-блокировки.**
+### Error by price
 
----
+| Actual listing price | Rows | MAPE | Share of total percentage error |
+|---|---:|---:|---:|
+| Below ₸5M | 5,089 | **29.01%** | **55.5%** |
+| ₸5M and above | 7,366 | **16.07%** | 44.5% |
 
-## Одним предложением
+The 18% overall MAPE target is a research gate, not a promise. If the stronger
+segment remains unchanged, the below-₸5M segment must improve to roughly
+20.5%. Repeated experiments show that collecting more listing cards alone is
+not enough; the missing signal is likely the physical condition of older,
+inexpensive cars.
 
-Конвейер, который каждый день собирает объявления, пересобирает из
-неизменяемого сырья проверяемую таблицу, обучает на ней оценку справедливой
-цены с защитой от утечки дублей, калибрует порог «подозрительно дёшево» по
-out-of-fold остаткам — и честно записывает, что из проверенного не
-сработало, включая собственные выводы, которые пришлось отозвать.
+### Error by age
+
+| Vehicle age | Rows | MAPE |
+|---|---:|---:|
+| 0–5 years | 3,350 | 16.72% |
+| 6–10 years | 1,581 | 15.74% |
+| 11–20 years | 3,353 | 18.37% |
+| 21+ years | 4,171 | **29.62%** |
+
+The sharpest intersection is **21+ years and below ₸5M**: 3,518 rows, 31.05%
+MAPE, and 41.1% of all percentage error. The roadmap therefore prioritizes
+condition evidence instead of treating every car older than five years as a
+single difficult class.
+
+## How the system works
+
+```text
+kolesa.kz listing pages
+        │ parser: vehicle fields, observations, photo URLs
+        ▼
+raw_ads + sightings                 immutable evidence
+        │
+        ├── enrich: description, condition badge, options, VIN-backed flag
+        ├── check_status: active / archived / deleted
+        ├── photo_dedup: perceptual hashes
+        └── photo_fetch: controlled image downloads
+        ▼
+enriched + status + photo metadata
+        │ clean: deterministic rebuild
+        ▼
+clean_data
+        │
+        ├── duplicate/relist grouping
+        ├── grouped and temporal validation
+        ├── general CatBoost model
+        ├── specialist for predicted prices below ₸5M
+        └── interval and anomaly calibration
+        ▼
+price artifacts + reports + review queues
+```
+
+The governing rule is: **raw evidence is append-only; conclusions are
+recomputed**. If a cleaning or anomaly rule changes, the complete clean layer
+is rebuilt from the original observations. This makes corrections
+reproducible and prevents past conclusions from mutating their source.
+
+## Modelling logic
+
+### Target and features
+
+The model learns `log(first observed listing price in KZT)`. The logarithm
+reduces the dominance of very expensive vehicles and turns many multiplicative
+price relationships into easier additive relationships. Predictions are
+transformed back to tenge for the user.
+
+The deployed models use 13 features:
+
+- numeric: vehicle age, mileage, engine volume, and photo count;
+- flags: mileage missing, VIP listing, and monthly-price display;
+- categorical: make, model, engine type, transmission, body type, condition.
+
+Marketplace-provided average price and listing category are excluded because
+they leak target-derived information. Description, options, and image features
+are excluded until their coverage and train/serve consistency are sufficient.
+
+### Duplicate-safe validation
+
+A vehicle can be deleted and relisted under a new ad ID. A random split could
+put one copy in training and another in validation, letting the model remember
+the answer. The project detects relist groups without using price in the group
+key and keeps every complete group in one fold.
+
+The primary metric is grouped out-of-fold MAPE:
+
+```text
+APE_i = |actual_i - prediction_i| / actual_i
+MAPE  = mean(APE_i) × 100%
+```
+
+Median APE is reported because MAPE is pulled upward by a small tail of large
+relative errors. Out-of-time validation then asks a separate question: how the
+model behaves on listings that appeared later.
+
+### Routed inference and calibrated ranges
+
+The general model predicts every row first. If its prediction is below ₸5M,
+the request is routed to a specialist trained on the wider actual-price band
+below ₸8M. Routing uses only information available at inference time; using
+the unknown actual price would be target leakage.
+
+The price range and suspiciously-low threshold are calibrated on held-out OOF
+residuals. The anomaly layer creates a review queue; it does not declare that a
+seller is fraudulent. A visibly damaged car at an honest low price is a
+legitimate listing, not fraud.
+
+## Computer vision status
+
+Computer vision is **experimental and not deployed**. The repository contains
+image download, perceptual-duplicate grouping, CLIP features, tiled crops,
+bounding-box labeling, COCO export, grouped CV, and ROC-AUC/PR-AUC evaluation.
+However, a label-definition audit found that the historical `damaged` class
+mixed impact/dent damage with rust, scratches, dirt, and paint defects.
+
+All 47 legacy `damaged` frames were placed in `needs_review` without deleting
+or automatically relabeling user work. Earlier supervised CV metrics were
+withdrawn, and pending rows are excluded from training. This does not affect
+the price model because CV never passed its gate and was never connected to
+price inference.
+
+The next valid CV milestone is:
+
+1. finish visual review under one written label policy;
+2. collect 150–200 independent positive ads, not merely frames;
+3. preserve a random audit split before active-learning ranking;
+4. group by ad and exact-photo duplicate components;
+5. beat the age+price baseline with a positive lower bound for paired bootstrap delta AUC;
+6. only then test whether a condition score improves price MAPE.
+
+## Repository map
+
+```text
+kz/core/       configuration, database, pacing, freshness
+kz/collect/    collection, enrichment, status, photo download/dedup
+kz/transform/  clean-table rebuild, damage text parsing, data quality
+kz/ml/         price, intervals, anomaly residuals, monitoring, CV research
+kz/report/     reports and human-review queues
+kz/ops/        full pipeline, catch-up scheduler, operational status
+kz/web/        FastAPI application and read-only public estimator
+airflow/       collection and offline DAGs
+tests/         offline regression and PostgreSQL integration suites
+deploy/models/ production demo artifacts only; no source marketplace rows
+docs/          architecture, findings, setup, model card, and deployment
+```
+
+## Run locally
+
+```bash
+git clone https://github.com/etozhegatito/kz-auto-market-intelligence.git
+cd kz-auto-market-intelligence
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # choose your own PostgreSQL password
+docker compose up -d          # applies the schema automatically
+python -m pytest tests/ -q
+ruff check kz/ tests/ airflow/
+python -m kz.web
+```
+
+Open `http://127.0.0.1:8000`. The local app contains the estimator plus the
+protected labeling workflows. The public deployment exposes only estimation.
+
+The usual workflow is:
+
+```bash
+python -m kz.ops.run_all --collect   # the only coordinated network path
+python -m kz.ops.run_all --ml        # deterministic offline rebuild and train
+python -m kz.ops.pipeline_status     # freshness, backlogs, last-run status
+```
+
+Collection uses a shared rolling 24-hour request budget, pacing, a 429 circuit
+breaker, atomic reservation, and an HTML-schema health gate. Polite pacing
+does not replace permission. Do not use VPNs, proxies, mobile tethering, or IP
+rotation to bypass access restrictions.
+
+## Run the public container
+
+Only trained artifacts required for inference are included. Raw listings and
+photos are not.
+
+```bash
+docker build -t kz-auto-market-intelligence .
+docker run --rm -p 8000:8000 \
+  -e KZ_PUBLIC_DEMO=1 \
+  kz-auto-market-intelligence
+curl -s http://127.0.0.1:8000/api/health
+```
+
+The image runs as a non-root user and one Uvicorn worker so it remains within
+the 512 MB free-instance limit. `render.yaml` defines the free service and its
+model-loading health check.
+
+## Reproducibility and safety
+
+- Dependency versions and Python 3.13 are pinned.
+- Each model records its data fingerprint, code hash, Git commit, training
+  size, metrics, and target policy.
+- Raw ads are append-only; derived tables are rebuilt.
+- Tests refuse to use a database whose name does not contain `test`.
+- CI runs offline tests, PostgreSQL tests, Ruff, coverage, and a real Docker
+  model-load health smoke.
+- Public mode disables every endpoint that can mutate human labels.
+- No phone numbers are collected, and the VIN itself is never stored.
+- Raw listings, descriptions, photos, labels, credentials, reports, and the
+  private textbook are not published.
+
+The `.cbm` files contain trained tree weights. They are derivative inference
+artifacts, not a browsable copy of the source listings.
+
+## Documentation
+
+This README is the complete English entry point. Deeper engineering notes are
+currently maintained in Russian:
+
+| Document | Purpose |
+|---|---|
+| [Overview](docs/OVERVIEW.md) | Scope, current state, constraints, roadmap |
+| [Architecture](docs/ARCHITECTURE.md) | Data flow, storage, repository layout, Airflow |
+| [Modelling](docs/MODELLING.md) | Features, grouped CV, temporal validation, metrics |
+| [Verified findings](docs/FINDINGS.md) | Positive and negative experiments, including withdrawn claims |
+| [Model card](docs/MODEL_CARD.md) | Contract and measured behavior of the current artifact |
+| [Anomaly review](docs/ANTIFRAUD.md) | Rules, residuals, ground truth, terminology |
+| [Setup](docs/SETUP.md) | Installation, commands, troubleshooting |
+| [Deployment](docs/DEPLOY.md) | Public-mode boundary and Render deployment |
+| [Glossary](docs/GLOSSARY.md) | Project terminology |
+
+## What the project does not claim
+
+- It does not predict the final transaction price.
+- It does not diagnose a vehicle's mechanical condition.
+- It does not automatically accuse a seller of fraud.
+- It does not currently use seller text or uploaded photos in the live price answer.
+- It does not guarantee that a vehicle will sell inside the predicted range.
+- It does not claim that the 18% MAPE target has been reached.
+
+## Author
+
+Built and maintained by **Sanzhar Bakirbayev** as a production-minded data
+science and data-engineering portfolio project.

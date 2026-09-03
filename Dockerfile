@@ -1,19 +1,16 @@
-# Контейнер веб-сервиса оценки цены (kz/web).
+# Price-estimation web service container (kz/web).
 #
-# Что внутри и чего намеренно нет:
-#   есть  — код kz/, обученный артефакт модели, зависимости из
-#           requirements-web.txt;
-#   нет   — собранных объявлений. Данные kolesa.kz не наши, чтобы
-#           перевыкладывать их наружу. Модель — производная (веса дерева),
-#           по ней объявление не восстановить, и её везём.
+# Included: kz/ code, trained model artifacts, and requirements-web.txt.
+# Excluded: collected listings, seller text, images, and manual labels.
+# The model is a derivative tree-weight artifact and cannot be browsed as a
+# copy of the source listings.
 #
-# Сборка:  docker build -t kz-auto-market-intelligence .
-# Запуск:  docker run -p 8000:8000 -e KZ_PUBLIC_DEMO=1 kz-auto-market-intelligence
+# Build: docker build -t kz-auto-market-intelligence .
+# Run:   docker run -p 8000:8000 -e KZ_PUBLIC_DEMO=1 kz-auto-market-intelligence
 
 FROM python:3.13-slim
 
-# PYTHONUNBUFFERED — чтобы логи шли в docker logs сразу, а не когда
-# наполнится буфер: без него падение при старте выглядит как молчание.
+# Stream logs immediately so startup failures do not look like a silent hang.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -21,38 +18,32 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Зависимости отдельным слоем ДО кода: правка кода не должна заставлять
-# заново скачивать catboost и pandas. Docker кэширует слои по порядку,
-# и пересобирается всё, начиная с первого изменившегося.
+# Install dependencies before copying source so source-only changes reuse the
+# expensive CatBoost/pandas layer.
 COPY requirements-web.txt .
 RUN pip install --no-cache-dir -r requirements-web.txt
 
 COPY kz/ ./kz/
-# Production-артефакты в .gitignore и попадают в образ только из локальной
-# сборки. CI вместо них создаёт явно непродуктовый smoke-артефакт: он проверяет
-# контракт запуска, но не публикует настоящую модель и её fingerprint.
-# MODEL_DIR переопределяется только в CI: там создаётся маленький
-# синтетический артефакт, чтобы проверить сборку и /api/health, не публикуя
-# настоящую модель. Обычная локальная сборка по-прежнему берёт data/models.
-ARG MODEL_DIR=data/models
+# The public repository contains only the three derivative artifacts required
+# for inference. CI overrides MODEL_DIR with an explicitly synthetic smoke
+# artifact; it validates startup and /api/health without pretending that the
+# smoke model is a production model.
+ARG MODEL_DIR=deploy/models
 COPY ${MODEL_DIR}/price_model.cbm \
      ${MODEL_DIR}/price_cheap_specialist.cbm \
      ${MODEL_DIR}/price_model.metadata.json ./data/models/
 
-# Не root: если в сервисе найдут дыру, чужой код не должен получить
-# полноправного пользователя внутри контейнера.
+# Run without root privileges to reduce the impact of a service compromise.
 RUN useradd --create-home --uid 10001 app && chown -R app:app /app
 USER app
 
 EXPOSE 8000
 
-# Проверка живости для оркестратора: /api/health грузит артефакт модели,
-# то есть отвечает «ок» только когда сервис реально умеет считать, а не
-# просто когда процесс запустился.
+# The health endpoint loads the model, so healthy means inference is available,
+# not merely that the process has started.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request,os,sys; \
 sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"PORT\"]}/api/health', timeout=4).status==200 else 1)"
 
-# sh -c нужен, чтобы $PORT подставился: хостинги (fly.io, Render) задают порт
-# переменной окружения, а не фиксируют 8000.
+# Hosting platforms provide the listening port through $PORT.
 CMD ["sh", "-c", "uvicorn kz.web.app:app --host 0.0.0.0 --port ${PORT}"]

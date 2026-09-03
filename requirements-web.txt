@@ -1,25 +1,23 @@
-# Зависимости ТОЛЬКО веб-сервиса оценки (kz/web).
+# Dependencies for the price-estimation web service only (kz/web).
 #
-# Отдельный файл от requirements.txt намеренно: сбору данных нужен playwright
-# (браузер целиком, около 300 МБ), а сервису он не нужен ни на грамм. Ставить
-# его в контейнер значило бы возить браузер по сети при каждом деплое ради
-# кода, который в контейнере никогда не выполнится.
+# Collection requires Playwright and a complete browser; inference does not.
+# Keeping a separate file avoids downloading hundreds of unused megabytes for
+# every web deployment.
 #
-# Обновляя список признаков или модель, сверяйтесь с requirements.txt: версии
-# должны совпадать, иначе артефакт, обученный локально, может не загрузиться
-# в контейнере.
+# Keep these versions aligned with requirements.txt. A model trained against a
+# different runtime stack might not load correctly in the container.
 
 fastapi==0.141.1
 uvicorn[standard]==0.52.1
 
-# модель и препроцессинг
+# Model and preprocessing
 catboost==1.2.10
 pandas==2.3.3
 numpy==2.5.1
 scikit-learn==1.9.0
 
-# база нужна только для «похожих машин»; без неё сервис работает,
-# см. kz/web/service.py:query
+# The database only decorates results with comparable cars. Core inference
+# remains available without it; see kz/web/service.py:query.
 SQLAlchemy==2.0.51
 psycopg2-binary==2.9.12
 python-dotenv==1.2.2

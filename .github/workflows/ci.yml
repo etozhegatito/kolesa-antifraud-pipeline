@@ -5,8 +5,8 @@ on:
   pull_request:
 
 jobs:
-  # Раньше назывался offline-tests и это было правдой: база не поднималась,
-  # и весь SQL проекта в CI не исполнялся ни разу.
+  # This job once ran without a database, so the project's SQL was never
+  # exercised in CI. PostgreSQL is now part of the contract.
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -17,12 +17,9 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
 
-    # Настоящий Postgres, потому что без него ни один запрос проекта не
-    # исполнялся в CI ни разу: сломанный JOIN или разъехавшаяся с кодом схема
-    # обнаруживались только на машине разработчика. Имя базы «test» — не
-    # косметика: тесты отказываются работать с базой, в имени которой этого
-    # слова нет, чтобы прогон не затёр собранные данные (см.
-    # tests/test_integration_db.py).
+    # A real PostgreSQL service catches broken joins and schema/code drift.
+    # The database name must contain "test": integration tests refuse to touch
+    # any other database so they cannot overwrite collected data.
     services:
       postgres:
         image: postgres:15-alpine
@@ -42,11 +39,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          # Та же версия, что в локальном .venv, и это обязательное условие,
-          # а не совпадение. Версии в requirements.txt зафиксированы ТОЧНО,
-          # чтобы метрики были повторяемы, — а точный пин привязан к версии
-          # Python: numpy 2.5 не существует для 3.11, и CI падал на установке,
-          # пока здесь стояло 3.11 против локальных 3.13.
+          # Match the local training environment. Exact dependency pins are
+          # Python-version-specific and protect metric reproducibility.
           python-version: "3.13"
           cache: pip
       - name: Install dependencies
@@ -57,41 +51,32 @@ jobs:
       - name: Compile production modules
         run: python -m compileall -q -x '^\./\.venv/' .
 
-      # Ловит то, что иначе всплывает только при запуске: неопределённые
-      # имена, забытые импорты, изменяемый аргумент по умолчанию. За одну
-      # сессию мы трижды писали тест с неопределённым именем и узнавали об
-      # этом от pytest — линтер сообщает за секунду.
+      # Catch undefined names, missing imports, and unsafe defaults early.
       - name: Lint
         run: ruff check kz/ tests/ airflow/
-      # Порог, а не цель. Смысл не в том, чтобы догнать до 90%, а в том,
-      # чтобы новый код приходил с тестами и покрытие не сползало вниз.
+      # This is a regression floor, not a vanity coverage target.
       - name: Run regression suite with coverage
         run: |
           coverage run --source=kz -m pytest tests/ -q
           coverage report --skip-covered --sort=cover
           coverage report --fail-under=39
 
-      # Интеграционные тесты умеют пропускаться, когда базы нет — это нужно
-      # локально. Здесь база есть, и пропуск означал бы, что мы подняли
-      # сервис Postgres и ничего им не проверили. Сами тесты падают при
-      # CI=true, но эта переменная задаётся окружением, а не нами, поэтому
-      # проверяем результат ещё и снаружи.
+      # Integration tests may skip locally when PostgreSQL is absent. In CI,
+      # any skip means the database contract was not tested and must fail.
       - name: Database tests must run, not skip
         run: |
           out=$(python -m pytest tests/test_integration_db.py -q 2>&1 | tail -1)
           echo "$out"
           case "$out" in
             *skipped*|*"no tests ran"*)
-              echo "Тесты с базой не выполнились — Postgres не подхватился"
+              echo "Database tests did not run; PostgreSQL was not detected"
               exit 1 ;;
           esac
-      # Тесты не должны зависеть от data/: каталог в .gitignore, в чистом
-      # клоне его нет. Раньше один тест читал data/manual_labels.csv и падал
-      # только в CI — проверяем это явно, а не надеемся, что не повторится.
+      # Tests must not read gitignored source data that a clean clone lacks.
       - name: Suite must not read gitignored data
         run: |
           if grep -rnE '(Path|open|read_csv|read_text|copy|copyfile)\(\s*"data/' tests/; then
-            echo "Тест ЧИТАЕТ файл из data/ — в чистом клоне его нет"; exit 1
+            echo "A test reads data/ even though a clean clone does not contain it"; exit 1
           fi
 
   web-container:

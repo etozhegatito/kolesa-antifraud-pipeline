@@ -4,40 +4,37 @@ __pycache__/
 .env
 .DS_Store
 .pytest_cache/
-# CatBoost пишет сюда логи обучения (train_price_model.py) — артефакт, не код
+# CatBoost training logs are generated artifacts, not source code.
 catboost_info/
 browser_state.json
 cache/
 
-# runtime-данные — не код; структура папок сохранена через .gitkeep
+# Runtime data is not source code; .gitkeep preserves the directory layout.
 data/**/*.csv
 data/**/*.png
 data/**/*.bak
 logs/*.log
-# runtime-состояние (напр. .catch_up_budget.json — суточный счётчик бюджета)
+# Runtime state, including the rolling request-budget journal.
 logs/*.json
 logs/*.lock
 
-# debug-дампы страниц kolesa — не код, раздувают репо и языковую
-# статистику GitHub (532КБ HTML). Регенерируются debug/debug_selectors.py.
+# Marketplace HTML debug dumps are large, generated, and not source code.
 debug/*.html
 
-# сгенерированные HTML-отчёты (ml_report.py) — артефакт
+# Generated reports are local artifacts.
 data/**/*.html
-# COCO-export содержит производную ручной фото-разметки и локальные пути;
-# это пересобираемый приватный артефакт, а не публичный код.
+# COCO exports contain derived manual labels and local paths; keep them private.
 data/eda/*.coco.json
-# локальный bootstrap-аудит содержит производные метрики текущих данных
+# The bootstrap audit contains metrics derived from the current private data.
 data/eda/mape_stability.json
-# обученные модели и их metadata содержат fingerprint локального датасета;
-# воспроизводятся командами train_price_model.py / residual_detector.py
+# Local training artifacts remain ignored. The explicitly reviewed copies under
+# deploy/models/ are the only models published for the read-only demo.
 data/models/*.cbm
 data/models/*.json
-# признаки из фотографий: производные от чужого контента,
-# пересчитываются kz.ml.photo_features и kz.ml.photo_clip
+# Image-derived features are private derivatives of third-party content.
 data/models/*.npz
 
-# рабочие каталоги локальных инструментов (генерируются, не код проекта)
+# Generated local-tool working directories.
 output/
 tmp/
 cache/

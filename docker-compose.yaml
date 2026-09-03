@@ -11,45 +11,39 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # postgres сам выполняет .sql отсюда по алфавиту, но ТОЛЬКО когда
-      # volume пустой (первый старт на чистом клоне) — ровно то, что
-      # нужно новому пользователю: docker compose up -d создаёт схему
-      # сам, без ручного psql -f
+      # PostgreSQL applies these files alphabetically on the first start with
+      # an empty volume, so a clean clone needs no manual psql command.
       - ./sql/init:/docker-entrypoint-initdb.d:ro
 
-  # ─── Веб-сервис оценки цены ───────────────────────────────────────────────
-  # Тот же образ, что уезжает в облако, только здесь рядом стоит база и
-  # видны «похожие машины». Поднимается явно, чтобы обычная работа с
-  # пайплайном не тянула за собой сборку образа:
+  # Price-estimation web service. This is the cloud image plus a local database
+  # for comparable cars. It starts only when requested so normal pipeline work
+  # does not rebuild the image:
   #     docker compose --profile web up -d --build
-  # Дальше http://localhost:8000
+  # Then open http://localhost:8000.
   web:
     build: .
     profiles: ["web"]
     depends_on:
       - postgres
     environment:
-      # внутри compose-сети база зовётся именем сервиса, а не localhost
+      # Inside the Compose network, use the service name rather than localhost.
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      # локально разметка нужна, поэтому публичный режим НЕ включаем
+      # Local development keeps labeling enabled, so public mode stays off.
       KZ_PUBLIC_DEMO: "0"
     ports:
       - "8000:8000"
     volumes:
-      # фотографии и журнал вердиктов остаются на хосте: в образ они не
-      # попадают (см. .dockerignore), а локально без них не разметить
+      # Photos and label journals stay on the host and never enter the image.
       - ./data/photos:/app/data/photos:ro
       - ./data/manual_labels.csv:/app/data/manual_labels.csv
 
-  # ─── Airflow demo-слой (портфолио, НЕ путь по умолчанию) ──────────────────
-  # Основной способ запуска — run_all.py + cron (см. README). Этот блок
-  # поднимается ТОЛЬКО явно: `docker compose --profile airflow up -d`.
-  # Отдельная metadata-БД Airflow — намеренно, чтобы не мешать со
-  # схемой самого проекта (raw_ads/clean_data/...).
+  # Airflow portfolio layer, not the default execution path. Start it only with
+  # `docker compose --profile airflow up -d`. Its metadata database is isolated
+  # from the project's raw_ads/clean_data schema.
   airflow-postgres:
     image: postgres:15-alpine
     profiles: ["airflow"]
@@ -69,8 +63,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      # для тасков DAG'а, вызывающих наши скрипты: container-to-container
-      # адрес нашей БД — не "localhost" (см. .env, там он для запуска с хоста)
+      # DAG tasks connect container-to-container, not through localhost.
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: ${POSTGRES_USER}

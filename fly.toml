@@ -1,53 +1,43 @@
-# Конфигурация деплоя веб-сервиса на fly.io.
+# Optional Fly.io deployment configuration.
 #
-# Почему fly.io, а не Render/Railway: артефакт модели лежит в .gitignore и в
-# публичном репозитории его нет. Хостинги, которые собирают образ из GitHub,
-# модель просто не найдут. fly deploy собирает образ из ЛОКАЛЬНОГО каталога —
-# модель попадает в образ с твоей машины, а в репозиторий по-прежнему не
-# уезжает. Ровно то поведение, которое нам нужно.
+# Render is the primary free demo host and reads render.yaml. This file remains
+# as a portable alternative for deploying the same Docker image with Fly.io.
 #
-# Развернуть в первый раз:
+# First deployment:
 #     fly launch --no-deploy --copy-config --name kz-price
 #     fly deploy
-# Обновить после переобучения модели:
+# Update after retraining:
 #     fly deploy
 #
-# app = имя приложения; оно же становится поддоменом kz-price.fly.dev.
-# Если имя занято — поменяй здесь и повтори fly deploy.
+# The app name also becomes the kz-price.fly.dev subdomain.
 app = "kz-price"
-primary_region = "waw"        # Варшава: ближайший к Казахстану регион fly
+primary_region = "waw"        # Warsaw is the closest available Fly region.
 
 [build]
   dockerfile = "Dockerfile"
 
 [env]
-  # Наружу отдаём только оценку цены. Разметка вердиктов пишет в ручной
-  # журнал ground truth — открывать её анониму нельзя (см. kz/web/app.py).
+  # Expose estimation only. Anonymous access must never mutate ground truth.
   KZ_PUBLIC_DEMO = "1"
   PORT = "8000"
 
 [http_service]
   internal_port = 8000
   force_https = true
-  # Машина засыпает без трафика и просыпается на первом запросе. Для витрины
-  # это правильный размен: платить за простой незачем, а лишние секунды на
-  # первый запрос никому не мешают.
+  # Sleep while idle and wake on the first request.
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
 
   [[http_service.checks]]
-    grace_period = "40s"       # столько занимает загрузка артефакта CatBoost
+    grace_period = "40s"       # Allow CatBoost artifacts to load.
     interval = "30s"
     method = "GET"
     path = "/api/health"
     timeout = "5s"
 
 [[vm]]
-  # 1 ГБ с запасом: catboost, pandas и numpy заметно весят уже на импортах,
-  # плюс сама модель (11 МБ на диске, в памяти больше). Точный минимум не
-  # замерялся — если захочется сэкономить, смотри `fly logs` на предмет OOM
-  # после снижения.
+  # One gigabyte leaves comfortable headroom for CatBoost, pandas, and NumPy.
   memory = "1gb"
   cpu_kind = "shared"
   cpus = 1

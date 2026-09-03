@@ -1,0 +1,167 @@
+{
+  "categorical_features": [
+    "brand",
+    "model",
+    "engine_type",
+    "transmission",
+    "body_type",
+    "condition"
+  ],
+  "categorical_vocabulary": {
+    "body_type": [
+      "внедорожник",
+      "кроссовер",
+      "купе",
+      "лифтбек",
+      "микроавтобус",
+      "минивэн",
+      "пикап",
+      "седан",
+      "универсал",
+      "фургон",
+      "хэтчбек"
+    ],
+    "condition": [
+      "б/у",
+      "новый"
+    ],
+    "engine_type": [
+      "бензин",
+      "газ",
+      "газ-бензин",
+      "гибрид",
+      "дизель",
+      "электро"
+    ],
+    "transmission": [
+      "автомат",
+      "вариатор",
+      "механика",
+      "робот"
+    ]
+  },
+  "created_at_utc": "2026-09-03T18:46:27.435104+00:00",
+  "data_fingerprint_sha256": "bac5bc7bc4334342b141e004a37ecc6a2c5e3e4f793820ef0102cfc91c0f3cf9",
+  "features": [
+    "age",
+    "mileage_km",
+    "engine_volume",
+    "photos_count",
+    "is_mileage_missing",
+    "is_vip",
+    "has_monthly_price",
+    "brand",
+    "model",
+    "engine_type",
+    "transmission",
+    "body_type",
+    "condition"
+  ],
+  "git_commit": "4f0c0d09a67750a196068902bca1bf406e09f358",
+  "git_dirty": false,
+  "oof_diagnostics": {
+    "path": "data/eda/price_model_oof.csv",
+    "rows": 12455
+  },
+  "routing": {
+    "artifact": "data/models/price_cheap_specialist.cbm",
+    "route_below_tenge": 5000000,
+    "specialist_train_below_tenge": 8000000,
+    "specialist_training_rows": 6959
+  },
+  "schema_version": 1,
+  "target": "log(first_seen_listing_price_tenge)",
+  "target_policy": {
+    "is_transaction_price": false,
+    "later_prices_table": "sightings",
+    "observation": "first_saved_listing_price",
+    "source": "raw_ads.price_tenge"
+  },
+  "training_code_sha256": "69033bdcb721159bbc7e98c06ca2a46880401599fc921690c44ee95c1a819cce",
+  "training_rows": 12455,
+  "validation": {
+    "grouped_cv": {
+      "base_model": {
+        "mae_tenge": 2335784.533327116,
+        "mape_pct": 21.38344210956876,
+        "median_ape_pct": 13.937052899326238,
+        "r2_log": 0.934962184327601
+      },
+      "baseline": {
+        "mae_tenge": 2843986.92491505,
+        "mape_pct": 30.704000032583416,
+        "median_ape_pct": 14.21319796954315,
+        "r2_log": 0.8467492238979333
+      },
+      "model": {
+        "mae_tenge": 2333710.137497382,
+        "mape_pct": 21.358000777123173,
+        "median_ape_pct": 13.81459798620987,
+        "r2_log": 0.9349873137611915
+      },
+      "routed_vs_base": {
+        "bootstrap_95_ci": [
+          -0.16740686463304547,
+          0.13115387329666695
+        ],
+        "bootstrap_probability_better": 0.613,
+        "bootstrap_repeats": 1000,
+        "independent_groups": 12431,
+        "mape_delta_pct_points": -0.02544133244559057
+      }
+    },
+    "segments": {
+      "10-20M": {
+        "mape_pct": 15.474799073858012,
+        "n": 2369
+      },
+      "20M+": {
+        "mape_pct": 17.851517279023746,
+        "n": 2071
+      },
+      "5-10M": {
+        "mape_pct": 15.295962338152595,
+        "n": 2926
+      },
+      "<5M": {
+        "mape_pct": 29.009161443664144,
+        "n": 5089
+      }
+    },
+    "temporal_holdout": {
+      "base_model": {
+        "mae_tenge": 2127764.377954175,
+        "mape_pct": 23.203571855030013,
+        "median_ape_pct": 14.804846652664416,
+        "r2_log": 0.929113445292028
+      },
+      "baseline": {
+        "mae_tenge": 2634340.466908417,
+        "mape_pct": 35.01164344960863,
+        "median_ape_pct": 15.245266566878687,
+        "r2_log": 0.846166760927581
+      },
+      "model": {
+        "mae_tenge": 2125083.2697857753,
+        "mape_pct": 23.242456085308433,
+        "median_ape_pct": 14.816032315832715,
+        "r2_log": 0.9299645171180467
+      },
+      "route_fraction": 0.47250100361300684,
+      "routed_vs_base": {
+        "bootstrap_95_ci": [
+          -0.4008737421641475,
+          0.44343778214679086
+        ],
+        "bootstrap_probability_better": 0.431,
+        "bootstrap_repeats": 1000,
+        "independent_groups": 2490,
+        "mape_delta_pct_points": 0.03888423027842219
+      },
+      "test_from": "2026-08-29 20:12:09",
+      "test_rows": 2491,
+      "train_rows": 9958,
+      "train_until": "2026-08-29 20:12:09"
+    }
+  }
+}

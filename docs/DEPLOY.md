@@ -1,85 +1,82 @@
-# Выкладка KZ Auto Market Intelligence
+# Deploying KZ Auto Market Intelligence
 
-Оценка цены — единственная часть проекта, которую имеет смысл показывать
-кому-то кроме себя. Сбор данных наружу не выкладывается никогда: он ходит на
-kolesa.kz, и запускать его с чужих адресов нельзя.
+The public service exposes the price estimator only. Collection jobs and human
+labeling workflows remain local because they access third-party pages or write
+ground truth.
 
----
+## What enters the image
 
-## Как выложить сервис наружу
+| Asset | Included | Reason |
+|---|---:|---|
+| `kz/` source code | Yes | Required for inference and HTTP endpoints |
+| General model, specialist, metadata | Yes | All three are required by routed inference |
+| Raw listings and descriptions | **No** | Source marketplace content is not redistributed |
+| Photos and photo URLs | **No** | Not required by the deployed estimator |
+| Manual verdicts and damage labels | **No** | Private ground truth must remain protected |
+| Playwright browser | **No** | Collection is not executed by the web service |
 
-Оценка цены — единственная часть проекта, которую имеет смысл показывать
-кому-то кроме себя. Сбор данных наружу не выкладывается никогда: он ходит
-на kolesa.kz, и запускать его с чужих адресов нельзя.
+`requirements-web.txt` and `.dockerignore` keep the image focused on inference.
 
-## Что едет в контейнер, а что нет
-
-| | едет | почему |
-|---|---|---|
-| код `kz/` | да | без него нечего запускать |
-| main + cheap specialist + metadata | да | routed-оценка не загрузится без любого из трёх файлов |
-| собранные объявления | **нет** | контент kolesa.kz не наш, чтобы его перевыкладывать |
-| фотографии | **нет** | то же самое, плюс 400 МБ |
-| playwright | **нет** | браузер на 300 МБ, в сервисе не выполняется ни строчки его кода |
-
-Отсюда отдельный `requirements-web.txt` и `.dockerignore`: сборка не должна
-тащить в образ ни браузер, ни данные.
-
-## Локально
+## Local container smoke test
 
 ```bash
-docker compose --profile web up -d --build
+docker build -t kz-auto-market-intelligence .
+docker run --rm -p 8000:8000 \
+  -e KZ_PUBLIC_DEMO=1 \
+  kz-auto-market-intelligence
+curl -s http://127.0.0.1:8000/api/health
 ```
 
-Сервис на `http://localhost:8000`, рядом стоит база, поэтому видны «похожие
-машины» и работает разметка вердиктов.
+The health endpoint loads both CatBoost models and validates their metadata,
+so a successful response proves that the service can perform inference.
 
-## В облако
+## Free Render deployment
 
-```bash
-fly launch --no-deploy --copy-config --name kz-price
-fly deploy
-```
+The root `render.yaml` defines one Docker web service on Render's free plan:
 
-`fly deploy` собирает образ из **локального** каталога. Это не случайный
-выбор: артефакт модели лежит в `.gitignore`, и хостинг, который собирает
-образ из GitHub, модель просто не найдёт. Здесь модель попадает в образ с
-твоей машины, а в публичный репозиторий по-прежнему не уезжает.
+- one instance and one Uvicorn worker;
+- Frankfurt region;
+- automatic deployment only after GitHub checks pass;
+- `/api/health` model-loading health check;
+- `KZ_PUBLIC_DEMO=1` to disable mutable labeling endpoints.
 
-После переобучения модели достаточно повторить `fly deploy`.
+Create the service from the Blueprint:
 
-GitHub Actions отдельно собирает образ с маленьким синтетическим артефактом
-и вызывает `/api/health`. Он проверяет Python, зависимости, наличие main и
-specialist и реальную загрузку CatBoost, но никогда не подменяет production-
-модель и не публикует её fingerprint.
+1. open `https://dashboard.render.com/blueprints`;
+2. connect `etozhegatito/kz-auto-market-intelligence`;
+3. keep the Blueprint plan set to **Free**;
+4. deploy and wait for the health check;
+5. verify the public URL and `/api/health`.
 
-## Публичный режим
+Later pushes to `main` deploy automatically only after GitHub Actions passes.
+No PostgreSQL service is needed for the public demo.
 
-Переменная `KZ_PUBLIC_DEMO=1` (в `fly.toml` она уже стоит) меняет две вещи:
+Free instances sleep after inactivity, so the first request can take about a
+minute. The filesystem is ephemeral; this is safe because the public app is
+read-only and the models are baked into the image.
 
-- **разметка отключается.** `/label` и `/verdict` пишут в
-  `data/manual_labels.csv` — единственный ручной ground truth в проекте, на
-  котором меряется весь антифрод. Открыть его анониму значит дать кому
-  угодно испортить эталон, а восстановить его будет неоткуда;
-- **включается лимит запросов** — 30 в минуту на адрес. Не защита от злого
-  умысла, а страховка от случайного цикла в чужом скрипте.
+## Public-mode boundary
 
-## Что происходит без базы
+`KZ_PUBLIC_DEMO=1` applies two safeguards:
 
-В облаке Postgres рядом нет, и это нормальное рабочее состояние, а не
-авария. Оценка цены целиком живёт в артефакте модели, база нужна только
-для украшений — списка похожих машин и позиции среди них. При недоступной
-базе сервис отдаёт оценку, разбор «почему столько» и замечания к
-объявлению, а блок похожих просто пустой. В лог один раз пишется
-предупреждение.
+- `/label`, `/damage`, and verdict-writing endpoints are unavailable;
+- a per-address request limit protects against accidental loops.
 
-Проверить, что всё поднялось:
+This is a portfolio demo, not a hardened multi-tenant production API.
 
-```bash
-curl -s https://kz-price.fly.dev/api/health
-```
+## Operation without PostgreSQL
 
-Ответ содержит дату обучения модели, число строк в обучении и текущий MAPE
-— то есть по нему сразу видно, не устарела ли выложенная модель.
+Core price inference is artifact-only. If PostgreSQL is unavailable, the
+service omits comparable-listing decorations while continuing to return the
+estimate, calibrated range, explanations, and warnings. It logs the missing
+database once instead of failing startup.
 
----
+## Updating the model
+
+Replace the three files under `deploy/models/` together, then run the tests and
+Docker smoke before pushing. The metadata exposes the training timestamp,
+training-row count, target policy, data fingerprint, code hash, and current
+validation MAPE through `/api/health`.
+
+Never publish raw `data/`, photos, manual labels, `.env`, generated reports, or
+the private textbook.

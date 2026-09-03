@@ -1290,16 +1290,19 @@ def test_runtime_python_contract_is_consistent():
 
 
 def test_web_container_includes_every_routed_model_artifact():
-    """Metadata включает specialist, поэтому образ без него собирается,
-    но падает ровно на healthcheck после запуска."""
+    """A routed image must carry the general model, specialist, and metadata."""
     from pathlib import Path
 
     docker = Path("Dockerfile").read_text(encoding="utf-8")
     ignore = Path(".dockerignore").read_text(encoding="utf-8")
+    ignore_lines = {line.strip() for line in ignore.splitlines()}
+    assert "ARG MODEL_DIR=deploy/models" in docker
+    assert "data/" in ignore_lines
+    assert "deploy/models/" not in ignore_lines
     for name in ("price_model.cbm", "price_cheap_specialist.cbm",
                  "price_model.metadata.json"):
         assert name in docker
-        assert f"!data/models/{name}" in ignore
+        assert (Path("deploy/models") / name).is_file()
 
 
 def test_ci_smoke_artifact_matches_runtime_schema(tmp_path):
@@ -2824,9 +2827,7 @@ def test_public_demo_closes_the_labelling_journal():
 
 
 def test_image_carries_model_but_not_collected_ads():
-    """В образ едет производная (веса модели), но не сырьё: объявления
-    kolesa.kz не наши, чтобы выкладывать их наружу. По весам дерева
-    объявление не восстановить, поэтому модель везём."""
+    """The image carries derivative model weights but never source listings."""
     from pathlib import Path
     docker = Path("Dockerfile").read_text(encoding="utf-8")
     assert "price_model.cbm" in docker
@@ -2834,7 +2835,7 @@ def test_image_carries_model_but_not_collected_ads():
                       "COPY . "):
         assert forbidden not in docker, forbidden
     ignore = Path(".dockerignore").read_text(encoding="utf-8")
-    assert "data/*" in ignore and ".env" in ignore
+    assert "data/" in ignore and ".env" in ignore
 
 
 def test_web_image_skips_playwright():
