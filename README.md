@@ -10,7 +10,7 @@ market-anomaly review, and experimental visual-condition analysis.
 > type. The service returns a fair listing-price estimate, a calibrated range,
 > the main factors behind the estimate, and input-quality warnings.
 
-[**Open the live demo**](https://kz-auto-market-intelligence.onrender.com)
+[**Open the live demo**](https://kz-auto-market-intelligence.onrender.com/estimate)
 · [Model card](docs/MODEL_CARD.md)
 · [Verified findings](docs/FINDINGS.md)
 
@@ -54,7 +54,7 @@ metadata.
 
 ## Try the demo
 
-Open the [live estimator](https://kz-auto-market-intelligence.onrender.com)
+Open the [live estimator](https://kz-auto-market-intelligence.onrender.com/estimate)
 and choose **Price estimate**. A realistic example is:
 
 ```text

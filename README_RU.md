@@ -17,7 +17,7 @@ Risk screening здесь не обвиняет продавца, а очища�
 попадут объявления-приманки по миллиону тенге, модель решит, что это
 нормальная цена, и начнёт занижать оценку честным продавцам.
 
-[**Открыть живое демо**](https://kz-auto-market-intelligence.onrender.com)
+[**Открыть живое демо**](https://kz-auto-market-intelligence.onrender.com/estimate)
 · [Паспорт модели](docs/MODEL_CARD.md)
 · [Проверенные эксперименты](docs/FINDINGS.md)
 
