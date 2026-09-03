@@ -243,18 +243,18 @@ def listing_warnings(
 
     if not num("mileage_km"):
         out.append(
-            "Mileage is missing. Listings with mileage receive about "
-            "16% more views in this dataset."
+            "Mileage is missing. Add the current odometer reading so buyers "
+            "can assess wear and compare the vehicle with similar listings."
         )
     if num("photos_count") < 5:
         out.append(
-            "Fewer than five photos. Listings with at least five photos "
-            "receive about 77% more views in this dataset."
+            "Fewer than five photos. Add clear exterior, interior, dashboard, "
+            "and known-defect views so buyers can inspect the vehicle remotely."
         )
     if len(text.strip()) < 50:
         out.append(
-            "The description is shorter than 50 characters. Listings "
-            "with at least 200 characters receive about 36% more views."
+            "The description is shorter than 50 characters. Add condition, "
+            "maintenance, ownership, and known-defect details."
         )
     return out
 

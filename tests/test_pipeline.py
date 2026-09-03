@@ -2284,7 +2284,7 @@ def test_web_jsonable_handles_numpy_and_nan():
 
 
 def test_web_listing_warnings_are_evidence_based():
-    """Seller warnings cite measured associations without promising a sale time."""
+    """Seller warnings stay actionable without turning correlations into promises."""
     from kz.web.service import listing_warnings
 
     w = listing_warnings(
@@ -2294,8 +2294,10 @@ def test_web_listing_warnings_are_evidence_based():
     assert "mileage" in joined.lower()
     assert "photos" in joined.lower()
     assert "below" in joined.lower()  # unexplained low price
-    for promise in ("will sell", "one day", "guaranteed"):
+    for promise in ("will sell", "one day", "guaranteed", "more views", "receive about"):
         assert promise not in joined.lower(), f"unsupported promise: {promise}"
+    for unsupported_percentage in ("16%", "36%", "77%"):
+        assert unsupported_percentage not in joined
     # A complete listing at a normal price should have no warnings.
     clean = listing_warnings(
         {"mileage_km": 90000, "photos_count": 9},
