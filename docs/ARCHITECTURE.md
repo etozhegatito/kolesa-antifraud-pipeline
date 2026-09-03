@@ -1,410 +1,181 @@
-# Архитектура
+# Architecture
 
-Как объявление проходит путь от страницы kolesa.kz до строки в обучающей
-выборке, где что лежит и почему разложено именно так.
+## Design principle
 
-Читать после [README](../README.md). Соседние документы:
-[как устроена очистка и антифрод](ANTIFRAUD.md),
-[как работает модель цены](MODELLING.md),
-[что не сработало](FINDINGS.md).
+The system separates evidence from conclusions:
 
----
+> Raw data is append-only; derived conclusions are rebuilt.
 
-## Как объявление проходит через систему
+Changing a cleaning rule, duplicate detector, or anomaly threshold must never
+rewrite what was originally observed. This makes the pipeline auditable and
+allows corrected logic to be applied consistently to historical records.
 
-Процесс можно представить как конвейер.
+## End-to-end flow
 
 ```text
-источник данных
-      │
-      ▼
-parser.py ─────────────► raw_ads + sightings + photos
-      │
-      ▼
-check_status.py ───────► ad_status
-      │
-      ▼
-clean.py, проход 1 ────► первичная clean_data и приоритеты
-      │
-      ├───────────────► enrich.py ───────► enriched
-      │
-      └───────────────► photo_dedup.py ─► photo_hashes/photo_duplicates
-      │
-      ▼
-clean.py, проход 2 ────► финальная clean_data
-      │
-      ▼
-explore.py ────────────► отчёты и labeling_queue.csv
-      │
-      ▼
-train_price_model.py ─► модель справедливой цены
-      │
-      ▼
-residual_detector.py ─► калиброванный ценовой пол
-```
-
-## Шаг 1. `kz/collect/parser.py`: сохранить сырьё
-
-Сохраняются три разных сущности.
-
-`raw_ads` — паспорт объявления при первом появлении:
-
-- `ad_id`;
-- марка и модель;
-- цена;
-- год;
-- пробег;
-- двигатель;
-- коробка;
-- кузов;
-- описание;
-- количество фотографий;
-- дата сбора.
-
-`sightings` — дневник повторных наблюдений:
-
-```text
-объявление 123 увидели 20 июля по цене 10 млн
-объявление 123 увидели 21 июля по цене 9,8 млн
-объявление 123 увидели 22 июля по цене 9,5 млн
-```
-
-Так можно исследовать снижение цены и время нахождения на рынке, не копируя
-весь паспорт каждый день.
-
-`photos` — отдельная таблица «одна строка = одна фотография». Это называется
-long format. Колонки `photo_1`, `photo_2`, ..., `photo_20` были бы неудобны,
-потому что число фотографий у объявлений разное.
-
-Parser не имеет права молча принять поломку HTML за пустой рынок. На первых
-трёх страницах широких ценовых сегментов действует health gate: слишком мало
-raw-карточек или потеря более половины карточек при разборе завершают шаг с
-`schema_error`. Структурный итог лежит в `logs/parser_last_run.json`. Там же
-есть `freshness_truncated_segments`: сегменты, где на последней разрешённой
-странице всё ещё встречались unseen для датасета объявления. Это позволяет
-отличить «свежую границу достигли» от «нас остановил искусственный page cap».
-
-## Шаг 2. `kz/collect/check_status.py`: понять жизненный цикл
-
-Объявление может быть:
-
-- `active` — доступно;
-- `archived` — ушло в архив;
-- `deleted` — удалено.
-
-Статус обновляется отдельно от паспорта. Исторический факт появления машины не
-удаляется только потому, что объявление позже исчезло.
-
-## Шаг 3. `kz/transform/clean.py`: построить воспроизводимый clean-слой
-
-`clean_data` каждый раз пересобирается из сырья. Наблюдавшиеся исходные значения
-не «исправляются» правилами очистки задним числом. Узкое техническое исключение:
-если краткая VIP-карточка оставила поле пустым, а более полная карточка того же
-`ad_id` позже дала значение, parser может дозаполнить именно этот пропуск. Уже
-заполненное наблюдение не заменяется «очищенной» догадкой.
-
-Почему это важно:
-
-```text
-плохой вариант:
-нашли ошибку → вручную изменили исходный CSV → потеряли первоначальное значение
-
-правильный вариант:
-нашли ошибку → исправили правило clean.py → пересобрали clean_data
-```
-
-## Шаг 4. `kz/collect/enrich.py` и `kz/collect/photo_dedup.py`: добавить контекст
-
-`kz/collect/enrich.py` добавляет поля, которых нет в краткой карточке:
-
-- растаможку;
-- привод;
-- руль;
-- цвет;
-- поколение;
-- полный комментарий;
-- структурный бейдж «Аварийная», «Не на ходу» и похожие поля.
-- явный факт наличия/отсутствия VIN (`has_vin`), но не сам VIN. Метка
-  «История авто» является положительным доказательством; если явного
-  признака нет, значение остаётся неизвестным.
-
-`kz/collect/photo_dedup.py` считает perceptual hash изображения и ищет случаи, когда
-похожая фотография используется у разных машин.
-
-Покрытие enrichment считается по полезным строкам: `HTTP 200` и `ad_id`,
-который существует в текущем raw/clean. 404 и архивы показываются отдельно,
-а orphan-строки не увеличивают progress bar. Поэтому число строк в таблице
-`enriched` намеренно может быть больше честного полезного покрытия.
-
-Parser, status, enrich и backfill делят один атомарный **скользящий бюджет
-за 24 часа** по хосту Kolesa. Календарная полночь квоту не сбрасывает: каждое
-списание выходит из окна ровно через 24 часа. CDN фотографий имеет отдельный
-счётчик. Календарные агрегаты budget-файла сохраняются только для аудита.
-
-## Шаг 5. второй `kz/transform/clean.py`
-
-Первый проход нужен, чтобы понять, какие объявления обогащать первыми. Второй
-проход нужен, чтобы пересчитать правила уже с новым текстом, бейджами и
-фотографиями.
-
-## Шаг 6. `kz/report/explore.py`
-
-Скрипт:
-
-- печатает сводку;
-- строит графики;
-- сортирует подозрительные объявления;
-- формирует очередь ручной разметки.
-
-## Шаг 7. обучение и inference
-
-`kz/ml/train_price_model.py` проверяет общую модель и дешёвого специалиста,
-который включается только при базовом прогнозе ниже 5 млн ₸. Он сохраняет оба
-артефакта и правило маршрутизации в metadata.
-`kz/ml/predict_price.py` загружает именно этот артефакт и не обучает скрытую новую
-модель при каждом прогнозе.
-
-## Как к конвейеру добавятся текст и фотографии
-
-Текущий production-baseline использует табличные признаки. Full-frame CLIP
-не включён в продукт. Его прошлые supervised-метрики отозваны после аудита
-definition drift: 38 из 47 `damaged`-кадров требуют визуальной перепроверки.
-Поэтому целевая мультимодальная архитектура остаётся планом, а не выданной за
-готовую частью продукта:
-
-Для CV группа включает `ad_id` и точные pHash-дубли между разными
-объявлениями. Новые метки заранее разделяются на active-learning train и
-случайный audit; ручные рамки экспортируются в COCO отдельным модулем.
-
-```text
-Ветка 1: характеристики
-год, пробег, двигатель, кузов, коробка
+kolesa.kz listing pages
         │
+        │ kz/collect/parser.py
         ▼
-табличный encoder / CatBoost
-        │
-        ├──────────────────────────────┐
-        │                              │
-Ветка 2: текст                         │
-описание и комментарий                 │
-        │                              │
-        ▼                              │
-NLP-признаки / text embeddings         │
-        │                              │
-        ├────────► объединение ◄───────┤
-        │              │               │
-Ветка 3: фото          │               │
-пиксели снимков        │               │
-        │              │               │
-        ▼              ▼               │
-CV embeddings    итоговые модели ◄─────┘
-                       │
-                       ├─► диапазон цены
-                       ├─► score полноты объявления
-                       ├─► видимые дефекты
-                       └─► рекомендации продавцу
+raw_ads ───────── sightings ───────── photos
+   │                    │                 │
+   │ enrich             │ status          │ download + pHash
+   ▼                    ▼                 ▼
+enriched             ad_status       photo_hashes/files
+   └────────────────────┬─────────────────┘
+                        │ kz/transform/clean.py
+                        ▼
+                    clean_data
+                        │
+        ┌───────────────┼────────────────┐
+        ▼               ▼                ▼
+ price models      anomaly review    CV research
+        │               │                │
+        ▼               ▼                ▼
+ estimator        manual journal     photo journal
 ```
 
-Ветки должны сначала проверяться отдельно через ablation:
+## Collection layer
 
-```text
-baseline:              только таблица
-эксперимент A:         таблица + текст
-эксперимент B:         таблица + фото
-финальный эксперимент: таблица + текст + фото
-```
+### `kz/collect/parser.py`
 
-Новая ветка включается только если улучшает out-of-time метрику или даёт
-отдельную доказанную пользовательскую пользу. «Добавили нейросеть» само по себе
-не считается улучшением.
+The listing parser stores the vehicle passport, first observed price, daily
+sightings, and photo URLs. It does not enrich each detail page during the same
+loop. Keeping the top-level parser narrow makes request accounting and failure
+recovery easier.
 
-Для фото нужны две разные задачи:
+Collection safeguards include:
 
-1. **Качество объявления** — темно, размыто, мало ракурсов, повторяющиеся
-   снимки. Это можно оценивать относительно объективно.
-2. **Состояние автомобиля** — видимая ржавчина, вмятина, разбитый элемент.
-   Это сложнее и требует ручной разметки изображений.
+- a shared rolling 24-hour request budget;
+- atomic request reservation across processes;
+- randomized polite pacing;
+- a circuit breaker on HTTP 429 and repeated failures;
+- a schema-health gate that detects an empty result caused by HTML drift;
+- structured last-run metadata in `logs/parser_last_run.json`;
+- per-run card and page limits for controlled smoke tests.
 
-Computer vision не заменит диагностику двигателя, коробки, геометрии кузова и
-скрытых повреждений. В пользовательском интерфейсе результат должен называться
-«видимые признаки», а не «полная техническая диагностика».
+### `kz/collect/check_status.py`
 
----
+Status checks append lifecycle observations such as active, archived, or
+deleted. They do not overwrite the original advertisement. This history is
+required for later survival analysis and for avoiding false assumptions that an
+unchecked ad is known to be active.
 
-## Как устроены данные
+### `kz/collect/enrich.py`
 
-Архитектура похожа на medallion-подход.
+Enrichment visits selected detail pages to obtain seller comments, options,
+site badges, drivetrain, and safe structured evidence. It stores only a Boolean
+VIN-backed flag when the site explicitly exposes vehicle-history evidence; the
+VIN itself is never collected.
 
-| Слой | Простое объяснение | Можно пересобрать? |
-|---|---|---:|
-| Raw | Что источник отдал; sightings дописываются, пустоты паспорта могут дозаполняться | Не очищается |
-| Enriched | Дополнительные факты из разрешённых источников | Да |
-| Clean | Типы, признаки, флаги и объединение таблиц | Да |
-| Analytics/ML | Отчёты, очереди, модели | Да |
+The queue prioritizes suspicious rows, reserves capacity for fresh listings,
+then prioritizes inexpensive vehicles. Fresh coverage prevents enrichment
+presence from becoming a proxy for the target segment.
 
-## Основные таблицы PostgreSQL
+### Photos
 
-| Таблица | Одна строка означает |
+`photo_fetch.py` downloads controlled batches. `photo_dedup.py` computes
+perceptual hashes and groups exact cross-listing image copies. DNS preflight
+avoids long retries against retired CDN hosts. Image traffic has its own budget.
+
+## Transformation layer
+
+`kz/transform/clean.py` rebuilds `clean_data` from source tables. It performs:
+
+- numeric and categorical normalization;
+- missingness indicators;
+- impossible-value checks;
+- relist grouping without using price;
+- rule-based anomaly signals;
+- exculpation for disclosed damage or other valid low-price reasons;
+- attachment of the latest manual verdict without mutating the journal.
+
+The clean layer is disposable. Raw, enriched, status, and manual-label layers
+are durable.
+
+## Modelling layer
+
+`kz/ml/train_price_model.py` trains a general CatBoost regressor and a specialist
+for inexpensive vehicles. Validation groups relisted copies together and also
+holds out later listings by time. The artifact metadata records feature schema,
+target policy, data fingerprint, code hash, Git commit, training rows, and
+measured metrics.
+
+At inference:
+
+1. the general model predicts every vehicle;
+2. predictions below 5M tenge are routed to a specialist trained on actual
+   prices below 8M;
+3. the selected log-price prediction is transformed back to tenge;
+4. conformal residual calibration supplies a range;
+5. SHAP values explain the individual result.
+
+Routing is based on the first model's prediction, which is available at serving
+time. Routing on the actual price would be target leakage.
+
+## Review layers
+
+`/label` operates on listings and records fraud/legit/unknown verdicts. Its queue
+combines rule positives, residual candidates, and a random control sample.
+Controls are required to estimate missed cases and recall.
+
+`/damage` operates on individual frames. It records exact English label keys,
+optional notes, one or more relative bounding boxes, selection provenance,
+dataset split, annotator, version, and review status.
+
+Both journals are atomically updated and snapshotted before mutation. Tests use
+`KZ_LABELS_DIR` to redirect writes to a scratch directory.
+
+## Storage
+
+Important PostgreSQL tables include:
+
+| Table | Role |
 |---|---|
-| `raw_ads` | один уникальный паспорт объявления |
-| `sightings` | объявление было замечено в конкретный день |
-| `photos` | одна фотография объявления |
-| `ad_status` | последний известный статус объявления |
-| `enriched` | дополнительные поля страницы |
-| `photo_hashes` | результат обработки одной фотографии |
-| `clean_data` | итоговая строка для аналитики и ML |
-| `photo_duplicates` | подозрительная пара объявлений с похожим фото |
+| `raw_ads` | One immutable vehicle passport per ad ID |
+| `sightings` | One observation per ad and day |
+| `photos` | Ordered source photo URLs |
+| `enriched` | Detail-page fields and fetch status |
+| `ad_status` | Append-only lifecycle checks |
+| `photo_hashes` | Perceptual image hashes and fetch outcomes |
+| `clean_data` | Rebuilt analytical table |
 
-## Почему PostgreSQL и CSV существуют одновременно
+CSV files are retained where they provide append-only audit logs, portable
+manual journals, or offline artifacts. PostgreSQL is the operational store;
+CSV is not treated as a second mutable database.
 
-Исторически проект начинался с CSV. Во время миграции часть сетевых задач пишет
-и в CSV, и в PostgreSQL. Это называется dual-write.
-
-Сейчас:
-
-- CSV сохраняет переносимый локальный след;
-- PostgreSQL используется основным вычислительным контуром;
-- `clean_data` пересобирается из PostgreSQL;
-- `manual_labels.csv` остаётся отдельным человеческим журналом.
-
-`manual_labels.csv` нельзя автоматически обрезать или пересоздавать. Это
-единственное место, где хранится ручной труд человека.
-
----
-
-## Структура репозитория
-
-Код собран в пакет `kz/`, разбитый по этапам конвейера. Один подпакет —
-один этап, поэтому по названию папки сразу видно, на каком шаге живёт файл.
+## Repository structure
 
 ```text
-kz/
-├── core/                     # общий фундамент
-│   ├── config.py             #   чтение .env, DATABASE_URL
-│   ├── db.py                 #   тонкий слой Postgres (engine, upsert)
-│   └── pacing.py             #   вежливый ритм сетевых запросов
-├── collect/                  # СБОР: единственные, кто ходит в сеть
-│   ├── parser.py             #   листинг: паспорта, sightings, фото
-│   ├── check_status.py       #   active / archived / deleted
-│   ├── enrich.py             #   дополнительные поля со страницы
-│   ├── photo_dedup.py        #   perceptual hash фотографий (CDN)
-│   └── backfill_avgprice.py  #   добор средней цены и бейджа
-├── transform/                # ОЧИСТКА: из сырья в проверяемую таблицу
-│   ├── clean.py              #   правила, статистика, clean_data
-│   ├── damage.py             #   лексикон повреждений с отрицаниями
-│   ├── data_quality.py       #   санитария перед ML, Isolation Forest
-│   └── text_features.py      #   текстовые признаки (замерены, не в модели)
-├── ml/                       # МОДЕЛИ
-│   ├── train_price_model.py  #   обучение, CV, out-of-time, артефакт
-│   ├── photo_damage.py       #   supervised grouped OOF по ручным фото-меткам
-│   ├── photo_dataset.py      #   безопасный COCO-export train/audit рамок
-│   ├── residual_detector.py  #   калиброванный нижний ценовой квантиль
-│   ├── predict_price.py      #   inference сохранённой модели
-├── report/                   # ВЫВОД для человека
-│   ├── explore.py            #   EDA, дашборд, очередь разметки
-│   ├── ml_report.py          #   HTML-отчёт по модели
-│   ├── ml_dashboard.py       #   графики модели
-│   ├── label_cards.py        #   карточки для ручной разметки
-│   └── evaluate_detector.py  #   precision/recall/F1 по разметке
-└── ops/                      # ЗАПУСК и наблюдение
-    ├── run_all.py            #   оркестратор полного конвейера
-    ├── catch_up.py           #   резюмируемый догоняльщик пробелов
-    ├── pipeline_status.py     #   офлайн-пульт состояния
-    └── migrate_to_postgres.py #   импорт старых CSV
-
-tests/test_pipeline.py        # регрессионные тесты
-docs/                         # паспорт модели и материалы
-airflow/                      # DAG-слой: офлайн-DAG и сетевой (выключен)
-sql/init/01_schema.sql        # схема базы, применяется на чистом volume
-debug/                        # разбор «почему у объявления X пусто поле Y»
-conftest.py                   # чтобы pytest видел пакет kz
-docker-compose.yaml           # Postgres и опциональный Airflow
+kz/core/       configuration, database, pacing, freshness
+kz/collect/    listing, detail-page, status, and photo collection
+kz/transform/  deterministic cleaning and data-quality logic
+kz/ml/         price, interval, anomaly, monitoring, and CV research
+kz/report/     reports plus human-review queue generation
+kz/ops/        orchestrated flows and operational status
+kz/web/        FastAPI routes, service logic, and HTML interfaces
+airflow/       collection and offline DAGs
+tests/         offline regression and safe PostgreSQL integration tests
 ```
-
-Запуск — через `-m`, потому что модули внутри пакета:
-
-```bash
-python -m kz.ops.run_all --fast
-python -m kz.web
-# /label — вердикт объявления, /damage — рамки на отдельных фото
-```
-
-Так работает и импорт между модулями, и запуск из корня, без правок
-`sys.path`. Данные читаются и пишутся по путям относительно корня проекта,
-поэтому запускать нужно из него.
-
----
 
 ## Airflow
 
-Запуск и интерфейс:
+Two DAGs represent two operational concerns:
 
-```bash
-docker compose --profile airflow up -d --build
-```
+- collection DAG: one budgeted network chain;
+- offline DAG: clean, monitor drift, train, calibrate, evaluate, and report.
 
-```text
-http://localhost:8080      login: admin      password: admin
-```
+The network catch-up remains one coordinated task because independent status,
+enrichment, and photo tasks could reserve overlapping quotas. The offline graph
+places drift monitoring before retraining so the previous artifact is compared
+with genuinely new data rather than with itself.
 
-Это локальные демонстрационные данные входа, для публичного развёртывания они
-не годятся.
+Regression tests verify that DAG dependencies contain every corresponding
+pipeline step and preserve the intended order.
 
-## Два DAG'а по двум задачам
+## Deployment boundary
 
-| DAG | Сеть | Состояние | Что делает |
-|---|---:|---|---|
-| `kolesa_offline_rebuild` | нет | включён, `schedule=None` | пересборка, отчёты, переобучение |
-| `kolesa_collect` | **да** | **выключен**, заготовка `0 9 * * *` | сбор под rolling-лимитом 24ч |
-
-Сетевой DAG создаётся выключенным намеренно: незамеченный автозапуск означал
-бы сбор без присмотра, а домашний IP уже получал блокировку за объём запросов.
-Включать расписание — осознанно, тумблером в интерфейсе.
-
-Офлайн-DAG, наоборот, создаётся включённым, и это безопасно: `schedule=None`
-означает, что сам он не стартует никогда. Выключенный же DAG в Airflow не
-исполнится даже при ручном запуске — прогон повис бы в очереди, что выглядит
-как поломка.
-
-## Почему DAG — не копия линейной цепочки
-
-`kolesa_offline_rebuild` выражает настоящий граф зависимостей, поэтому
-независимые ветки идут одновременно:
-
-```text
-clean ──┬── explore ── label_cards
-        ├── evaluate_detector
-        └── data_drift ── train_price_model ──┬── ml_dashboard
-                                              └── residual_detector ── ml_report
-```
-
-- `clean` первым: он пересобирает `clean_data` и подхватывает новые вердикты;
-- `evaluate_detector` нужен только `clean_data`, ждать обучение ему незачем;
-- `data_drift` обязан сравнить текущие данные со **старым развёрнутым**
-  артефактом до того, как обучение заменит его; после train сравнение было бы
-  текущих данных с самими собой;
-- `ml_dashboard` читает модель цены, а `ml_report` — модель **и** ценовой пол,
-  отсюда разная глубина ветвей.
-
-На реальном прогоне это 66 секунд против примерно 92 последовательно: три
-ветки от `clean` стартуют в одну секунду. В этом и смысл оркестратора —
-иначе он был бы дорогим `cron`.
-
-## Почему сетевой добор — один таск, а не пять
-
-```text
-show_budget ── parser ── catch_up ── clean ── explore ── label_cards
-```
-
-Расписать статусы, обогащение и фото отдельными тасками красивее в интерфейсе,
-но тогда Airflow запускал бы их по своему усмотрению, в том числе параллельно,
-и общий 24-часовой лимит перестал бы соблюдаться: все три обращаются к kolesa.kz с
-одного адреса. Поэтому весь добор отдан `catch_up` — он единственный знает
-бюджет и держит джобы строго последовательно. Airflow здесь отвечает за
-расписание и наблюдаемость, а не за темп запросов.
-
-Соответствие DAG'ов и оркестратора закреплено тестами: если в `run_all`
-появится шаг, которого нет в DAG, тесты упадут — иначе Airflow-прогон молча
-считал бы не всё.
-
----
+The public Docker image contains only inference code and three derivative model
+artifacts: the general model, cheap-segment specialist, and metadata. It does
+not contain raw listings, the operational database, photos, seller text, or
+manual labels. `KZ_PUBLIC_DEMO=1` disables every labelling write endpoint.

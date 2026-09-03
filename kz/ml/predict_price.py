@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Inference сохранённого артефакта модели справедливой цены.
-
-Этот файл модель НЕ переобучает. Поэтому один и тот же артефакт используется
-во всех вызовах, а его метрики, commit и fingerprint данных можно проверить в
-data/models/price_model.metadata.json.
-"""
+"""Implementation for the `kz.ml.predict_price` module."""
 
 from datetime import date
 
@@ -24,7 +19,7 @@ CY = date.today().year
 
 
 def make_row(**car) -> pd.DataFrame:
-    """Преобразует публичные поля машины в точную train-схему признаков."""
+    """Implement `make_row`."""
     car = car.copy()
     row = {f: np.nan for f in NUM_FEATURES}
     row.update({f: "NA" for f in CAT_FEATURES})
@@ -41,34 +36,43 @@ def make_row(**car) -> pd.DataFrame:
 
 
 def estimate(mdl, **car) -> float:
-    """Оценка цены (₸) по признакам машины. Пример:
-       estimate(m, brand='Toyota', model='Camry', year=2019, engine_volume=2.5).
-       (первый аргумент — mdl, а не model, чтобы не спутать с фичей model=марка)"""
+    """Implement `estimate`."""
     return float(np.exp(mdl.predict(make_row(**car))[0]))
 
 
 def main():
     m, metadata = load_artifact()
     temporal = metadata["validation"].get("temporal_holdout")
-    print(f"Артефакт: {metadata['training_rows']} машин, "
-          f"создан {metadata['created_at_utc']}")
+    print(f"Artifact: {metadata['training_rows']} vehicles, created {metadata['created_at_utc']}")
     if temporal:
-        print(f"Честный out-of-time MAPE: {temporal['model']['mape_pct']:.1f}% "
-              f"(test={temporal['test_rows']})")
+        print(
+            f"Held-out out-of-time MAPE: {temporal['model']['mape_pct']:.1f}% "
+            f"(test={temporal['test_rows']})"
+        )
 
-    # Случайная строка — только демонстрация inference, НЕ оценка качества:
-    # финальный артефакт обучен на всех чистых данных.
     df = load()
     clean = df[(df["price_tenge"] > 0) & (df["is_suspicious"] == 0)]
     car = clean.sample(1).iloc[0]
-    p = estimate(m, brand=car["brand"], model=car["model"], age=int(car["age"]),
-                 engine_volume=car["engine_volume"], mileage_km=car["mileage_km"],
-                 engine_type=car["engine_type"], transmission=car["transmission"],
-                 body_type=car["body_type"], condition=car["condition"])
-    print(f"(a) {car['brand']} {car['model']} {int(car['year'])} — оценка модели "
-          f"≈ {p/1e6:.1f}М ₸  (в объявлении: {car['price_tenge']/1e6:.1f}М)")
-    print("Это иллюстрация. Качество берётся из сохранённой out-of-time "
-          "валидации, а не из этой обучающей строки.")
+    p = estimate(
+        m,
+        brand=car["brand"],
+        model=car["model"],
+        age=int(car["age"]),
+        engine_volume=car["engine_volume"],
+        mileage_km=car["mileage_km"],
+        engine_type=car["engine_type"],
+        transmission=car["transmission"],
+        body_type=car["body_type"],
+        condition=car["condition"],
+    )
+    print(
+        f"(a) {car['brand']} {car['model']} {int(car['year'])} — model estimate "
+        f"≈ {p / 1e6:.1f}M ₸  (listed: {car['price_tenge'] / 1e6:.1f}M)"
+    )
+    print(
+        "This is an illustration. Reported quality comes from saved out-of-time "
+        "validation, not from this training row."
+    )
 
 
 if __name__ == "__main__":

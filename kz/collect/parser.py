@@ -1,31 +1,13 @@
-"""
-Kolesa.kz parser — Job 1 (сбор RAW-данных, город Алматы).
+"""Implementation for the `kz.collect.parser` module."""
 
-Принципы (это важно понимать, а не просто копировать):
-  1. RAW-слой ничего не фильтрует и не чистит. Пишем ВСЁ как есть.
-     Чистка — это Job 2, отдельный скрипт. Так данные воспроизводимы:
-     ошиблись в чистке → перезапустили Job 2, ничего не потеряли.
-  2. Дедупликация только по ad_id — единственная логика, которая
-     допустима в RAW-слое (иначе файл раздуется повторами).
-  3. Вежливый скрейпинг = защита от бана. Мы не «атакуем» сайт:
-     паузы, перерывы, не более двух небольших запусков с интервалом
-     около 12 часов, общий антибан-лимит и остановка при первых признаках
-     блокировки.
-
-Запуск:  python -m kz.collect.parser
-Зависимости:  pip install playwright beautifulsoup4
-              playwright install chromium
-"""
-
-# ─── Самопроверка файла (защита от путаницы при копировании) ────────────────
-# Если этот код оказался в файле с другим именем — останавливаемся сразу,
-# а не делаем «не то» молча. Тихая подмена хуже громкого падения.
 import pathlib as _p
+
 _expected = "parser.py"
 if _p.Path(__file__).name != _expected:
     raise SystemExit(
-        f"ОШИБКА: этот код — {_expected}, а файл называется "
-        f"{_p.Path(__file__).name}. Файлы перепутаны при копировании!")
+        f"ERROR: this code belongs to {_expected}, but the file is named "
+        f"{_p.Path(__file__).name}. Files may have been mixed up while copying."
+    )
 
 
 import asyncio
@@ -46,64 +28,43 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from kz.core.db import upsert
 from kz.ops import catch_up as request_budget
 
-# ─── Настройки ────────────────────────────────────────────────────────────────
-OUTPUT_CSV    = "data/raw/raw_data.csv"    # «паспорт» объявления: первая встреча
-SIGHTINGS_CSV = "data/raw/sightings.csv"   # журнал наблюдений: каждая встреча каждый день
-LOG_FILE      = "logs/parser.log"
-RUN_STATUS_FILE = "logs/parser_last_run.json"  # структурный итог последнего запуска
-STATE_FILE = "browser_state.json"   # cookies между запусками → выглядим как
-                                    # постоянный посетитель, а не новый бот
+
+OUTPUT_CSV = "data/raw/raw_data.csv"
+SIGHTINGS_CSV = "data/raw/sightings.csv"
+LOG_FILE = "logs/parser.log"
+RUN_STATUS_FILE = "logs/parser_last_run.json"
+STATE_FILE = "browser_state.json"
+
 
 BASE_URL = "https://kolesa.kz"
 
-# Категории = сегменты листинга. Зачем: kolesa показывает ограниченное число
-# страниц в одном листинге, а сортировка «по дате» плывёт между запросами.
-# Разбив листинг на непересекающиеся сегменты (по цене), мы:
-#   а) достаём больше объявлений, чем даёт одна «лента»;
-#   б) каждый сегмент короче → меньше дублей и пропусков при листании.
-# Сегменты НЕ пересекаются (price[to] включительно, следующий from = to+1).
+
 CATEGORIES = [
-    ("almaty_do_3m",   "/cars/almaty/?price[to]=3000000"),
-    ("almaty_3_7m",    "/cars/almaty/?price[from]=3000001&price[to]=7000000"),
-    ("almaty_7_15m",   "/cars/almaty/?price[from]=7000001&price[to]=15000000"),
-    ("almaty_15m_up",  "/cars/almaty/?price[from]=15000001"),
+    ("almaty_do_3m", "/cars/almaty/?price[to]=3000000"),
+    ("almaty_3_7m", "/cars/almaty/?price[from]=3000001&price[to]=7000000"),
+    ("almaty_7_15m", "/cars/almaty/?price[from]=7000001&price[to]=15000000"),
+    ("almaty_15m_up", "/cars/almaty/?price[from]=15000001"),
 ]
 
-# Глубина листания на сегмент. ×4 сегмента ×~20 карточек = объём/день:
-#   3 → ~240 карточек / 12 запросов; 10 → ~800 / 40.
-# Настраивается через .env (KOLESA_MAX_PAGES) без правки кода — удобно
-# временно снизить нагрузку/риск бана, пока догоняем backlog обогащения.
-# Дефолт 3: свежие объявления сконцентрированы в начале, а глубина не улучшила MAPE.
-# ВАЖНО: новые объявления кучкуются на первых страницах, так что 2-3
-# страницы ловят почти весь свежак; глубокие страницы — это в основном
-# ПОВТОРНЫЕ встречи уже собранного (sightings), не новьё.
+
 MAX_PAGES_PER_CATEGORY = int(os.getenv("KOLESA_MAX_PAGES", "3"))
 
-# С какой страницы начинать (включительно). Нужно, чтобы углублять сбор, не
-# переснимая уже собранное: страницы 1-25 сняты вчера, интерес представляют
-# 26-50, а это ровно вдвое меньше запросов, чем «поставить глубину 50».
-# Top-level переходы парсера списываются в общий бюджет catch_up. Сдвиг
-# страницы всё равно экономит квоту и время: уже снятые страницы не просим.
+
 #
-# Оговорка: сортировка листинга плывёт между запросами, так что «страница 26»
-# сегодня — не тот же набор, что вчера. Для добора глубины это нормально
-# (свежее и так ловится первыми страницами), но пропуск начала означает, что
-# новые объявления этого дня в такой прогон не попадут.
+
+
 START_PAGE = int(os.getenv("KOLESA_START_PAGE", "1"))
-# Микро-прогон для проверки живого HTML без полного сбора. 0 = без лимита.
-# Лимит относится к РАЗОБРАННЫМ карточкам, а не только к новым объявлениям:
-# `KOLESA_MAX_CARDS=10` гарантирует максимум десять обработанных карточек и
-# обычно ровно два top-level запроса (прогрев + первая страница).
+
+
 MAX_CARDS_PER_RUN = int(os.getenv("KOLESA_MAX_CARDS", "0"))
 if MAX_CARDS_PER_RUN < 0:
-    raise SystemExit("KOLESA_MAX_CARDS должно быть >= 0")
-DELAY_MIN, DELAY_MAX   = 3.0, 7.0    # пауза между страницами, сек
-COFFEE_BREAK_EVERY     = 5           # каждые N страниц — длинная пауза
-COFFEE_BREAK_RANGE     = (20, 45)    # длительность длинной паузы, сек
-MAX_CONSECUTIVE_FAILS  = 3           # предохранитель: 3 сбоя подряд → стоп
-# На первых трёх страницах каждого широкого ценового сегмента Алматы всегда
-# заметно больше пяти карточек. Меньше — это не «данных нет», а вероятный
-# дрейф HTML/селекторов. Падаем громко, чтобы пустой прогон не считался успехом.
+    raise SystemExit("KOLESA_MAX_CARDS must be >= 0")
+DELAY_MIN, DELAY_MAX = 3.0, 7.0
+COFFEE_BREAK_EVERY = 5
+COFFEE_BREAK_RANGE = (20, 45)
+MAX_CONSECUTIVE_FAILS = 3
+
+
 LISTING_HEALTH_FIRST_PAGES = 3
 LISTING_HEALTH_MIN_RAW_CARDS = 5
 HEADLESS = True
@@ -111,81 +72,78 @@ HEADLESS = True
 
 
 class DailyBudgetExhausted(RuntimeError):
-    """Общий rolling-потолок kolesa исчерпан: сетевой шаг надо остановить."""
+    """Implementation of `DailyBudgetExhausted`."""
 
 
 class ListingSchemaError(RuntimeError):
-    """HTML листинга больше не соответствует ожидаемой схеме парсера."""
+    """Implementation of `ListingSchemaError`."""
 
 
 _run_kolesa_requests = 0
 
 
 def reserve_kolesa_request() -> dict:
-    """Зарезервировать один top-level запрос браузера в ОБЩЕМ бюджете.
-
-    Раньше parser жил вне счётчика catch_up: 100 страниц листинга плюс 180
-    запросов обогащения выглядели для каждого процесса допустимо, но вместе
-    подходили к объёму, на котором IP уже блокировали. Списываем ДО page.goto:
-    таймаут или 429 тоже являются нагрузкой и не должны возвращать квоту.
-
-    Второй предел — запросы текущего запуска (defence-in-depth поверх
-    скользящего 24-часового счётчика).
-    """
+    """Implement `reserve_kolesa_request`."""
     global _run_kolesa_requests
     limit = request_budget.DAILY_BUDGET["kolesa"]
     if _run_kolesa_requests + 1 > limit:
         raise DailyBudgetExhausted(
-            f"лимит текущего запуска kolesa исчерпан: {limit}/{limit}; "
-            "листинг продолжится в следующий запуск"
+            f"The current-run Kolesa limit is exhausted: {limit}/{limit}; "
+            "listing collection will resume on the next run"
         )
     current = request_budget.reserve_budget("kolesa", 1, limit)
     if current is None:
         used = request_budget.load_budget_used()
         raise DailyBudgetExhausted(
-            f"бюджет kolesa за 24 часа исчерпан: {used['kolesa']}/{limit}; "
-            "листинг продолжится после освобождения окна"
+            f"The rolling 24-hour Kolesa budget is exhausted: {used['kolesa']}/{limit}; "
+            "listing collection will resume when the window frees up"
         )
     _run_kolesa_requests += 1
     return current
 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"),
-              logging.StreamHandler()],
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
 
 FIELDS = [
-    # идентификация
-    "ad_id", "url", "title", "brand", "model",
-    # цена и характеристики машины
-    "price_tenge", "year", "mileage_km", "engine_volume", "engine_type",
-    "transmission", "body_type", "condition",
-    # география и текст
-    "city", "description",
-    # сигналы для антифрода и анализа
-    "photos_count", "photo_url", "views_count", "posted_date",
-    "labels", "is_vip", "has_monthly_price",
-    # техническое
-    "category", "scraped_at",
+    "ad_id",
+    "url",
+    "title",
+    "brand",
+    "model",
+    "price_tenge",
+    "year",
+    "mileage_km",
+    "engine_volume",
+    "engine_type",
+    "transmission",
+    "body_type",
+    "condition",
+    "city",
+    "description",
+    "photos_count",
+    "photo_url",
+    "views_count",
+    "posted_date",
+    "labels",
+    "is_vip",
+    "has_monthly_price",
+    "category",
+    "scraped_at",
 ]
 
-# Журнал наблюдений: только то, что МЕНЯЕТСЯ день ото дня.
-# Статичные характеристики (год, кузов, КПП) лежат в raw_data.csv —
-# дублировать их каждый день = раздувать файл без пользы (нормализация).
-SIGHTING_FIELDS = ["ad_id", "seen_date", "price_tenge", "views_count",
-                   "is_vip", "category"]
 
-# Таблица фото: строка на КАЖДОЕ фото (long format). Число фото у объявлений
-# разное, поэтому колонки photo1..photoN — плохая схема (пустые ячейки,
-# ломается при выходе за N), а склейка URL в одну ячейку — боль при разборе.
+SIGHTING_FIELDS = ["ad_id", "seen_date", "price_tenge", "views_count", "is_vip", "category"]
+
+
 PHOTOS_CSV = "data/raw/photos.csv"
 PHOTO_FIELDS = ["ad_id", "position", "url"]
 
-# Замена суффикса размера превью на -full даёт полноразмерное фото
-# (проверено запросами к CDN: -full существует, без суффикса — 404).
+
 _SIZE_SUFFIX = re.compile(r"-\d+x\d+\.(jpg|webp)$")
 
 
@@ -194,17 +152,7 @@ def to_full_size(url: str) -> str:
 
 
 def extract_photo_urls(card) -> list[str]:
-    """Все превью карточки (главное фото + подгружаемые <template>),
-    приведённые к полному размеру, без дублей, в исходном порядке.
-
-    Фильтр /static/: карточка содержит не только фото машины, но и
-    служебные картинки вёрстки — иконку-бейдж (m.kolesa.kz/static/
-    mobile/images/app/report/advert/badge.png) и заглушки «нет фото»
-    (/static/frontend/images/stubs/noPhoto_*.svg). Это НЕ фото
-    объявления: бейдж одинаковый у всех карточек и, попав в
-    photo_dedup, «совпал» бы у сотен объявлений, завалив детектор
-    ложными парами. Реальные фото живут на CDN (kcdn.kz) и путь
-    /static/ не содержат — отсекаем по нему, не завязываясь на хост."""
+    """Implement `extract_photo_urls`."""
     urls, seen = [], set()
     for img in card.select("img[src]"):
         src = img["src"] or ""
@@ -240,52 +188,55 @@ def init_sightings(path: str):
 
 def append_sighting(path: str, row: dict, today: str):
     with open(path, "a", newline="", encoding="utf-8") as f:
-        csv.DictWriter(f, fieldnames=SIGHTING_FIELDS).writerow({
-            "ad_id": row["ad_id"],
-            "seen_date": today,
-            "price_tenge": row["price_tenge"],
-            "views_count": row["views_count"],
-            "is_vip": row["is_vip"],
-            "category": row["category"],
-        })
+        csv.DictWriter(f, fieldnames=SIGHTING_FIELDS).writerow(
+            {
+                "ad_id": row["ad_id"],
+                "seen_date": today,
+                "price_tenge": row["price_tenge"],
+                "views_count": row["views_count"],
+                "is_vip": row["is_vip"],
+                "category": row["category"],
+            }
+        )
 
 
 def load_today_sightings(path: str, today: str) -> set:
-    """Чтобы при повторном запуске в тот же день не задвоить наблюдения
-    (идемпотентность в пределах дня)."""
+    """Implement `load_today_sightings`."""
     if not Path(path).exists():
         return set()
     with open(path, encoding="utf-8") as f:
-        return {r["ad_id"] for r in csv.DictReader(f)
-                if r.get("seen_date") == today}
+        return {r["ad_id"] for r in csv.DictReader(f) if r.get("seen_date") == today}
 
 
-# Известные бренды из 2+ слов — чтобы правильно разрезать title на brand/model.
 MULTIWORD_BRANDS = [
-    "Mercedes-Benz", "Land Rover", "Alfa Romeo", "Great Wall", "Aston Martin",
-    "Rolls-Royce", "SsangYong", "ВАЗ (Lada)", "Иж",
+    "Mercedes-Benz",
+    "Land Rover",
+    "Alfa Romeo",
+    "Great Wall",
+    "Aston Martin",
+    "Rolls-Royce",
+    "SsangYong",
+    "ВАЗ (Lada)",
+    "Иж",
 ]
 
 
-# ─── Работа с CSV ─────────────────────────────────────────────────────────────
 def init_csv(path: str):
     if not Path(path).exists():
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=FIELDS).writeheader()
         return
-    # Защита от дрейфа схемы: если шапка существующего файла не совпадает
-    # с текущим FIELDS, дописывание строк МОЛЧА сдвинет значения по
-    # колонкам (цена окажется в столбце года). Тихая порча данных хуже
-    # падения — поэтому падаем громко и объясняем, что делать.
+
     with open(path, encoding="utf-8") as f:
         header = f.readline().strip().split(",")
     if header != FIELDS:
         raise SystemExit(
-            f"СХЕМА ИЗМЕНИЛАСЬ: шапка {path} не совпадает с текущим FIELDS.\n"
-            f"  в файле : {header}\n"
-            f"  ожидаем : {FIELDS}\n"
-            f"Переименуй старый файл (например, {path}.old) и запусти снова.")
+            f"SCHEMA CHANGED: the header in {path} does not match the current FIELDS.\n"
+            f"  file     : {header}\n"
+            f"  expected : {FIELDS}\n"
+            f"Rename the old file (for example, {path}.old) and run again."
+        )
 
 
 def append_row(path: str, row: dict):
@@ -294,15 +245,12 @@ def append_row(path: str, row: dict):
 
 
 def load_passports(path: str) -> dict:
-    """Загружаем ВСЕ паспорта в память (dict: ad_id → строка).
-    Зачем целиком, а не только id: паспорта, собранные из VIP-карточек,
-    неполные (нет пробега/кузова). Когда VIP-статус у объявления кончается,
-    оно приходит обычной карточкой со всеми полями — и мы ДОЗАПОЛНЯЕМ дыры."""
+    """Implement `load_passports`."""
     if not Path(path).exists():
         return {}
     with open(path, encoding="utf-8") as f:
         passports = {row["ad_id"]: row for row in csv.DictReader(f)}
-    log.info(f"Уже собрано {len(passports)} объявлений")
+    log.info(f"Already collected {len(passports)} listings")
     return passports
 
 
@@ -310,35 +258,39 @@ _MISSING = {None, "", "nan", "None"}
 
 
 def upgrade_passport(stored: dict, fresh: dict) -> bool:
-    """Заполняет пустые поля паспорта данными из свежей карточки.
-    Возвращает True, если что-то дозаполнили. Существующие значения
-    НЕ перезаписываем (кроме случая VIP→обычная для photo/vip-полей):
-    паспорт — про неизменные свойства машины."""
+    """Implement `upgrade_passport`."""
     changed = False
-    for f in ["mileage_km", "engine_volume", "engine_type", "transmission",
-              "body_type", "condition", "description", "labels", "city"]:
+    for f in [
+        "mileage_km",
+        "engine_volume",
+        "engine_type",
+        "transmission",
+        "body_type",
+        "condition",
+        "description",
+        "labels",
+        "city",
+    ]:
         old = str(stored.get(f, "")).strip()
         new = fresh.get(f)
         if old in _MISSING and new not in (None, ""):
             stored[f] = new
             changed = True
-    # больше фоток / полноразмерный url — берём лучшее
+
     old_cnt = clean_int(str(stored.get("photos_count") or "")) or 0
     if fresh["photos_count"] > old_cnt:
         stored["photos_count"] = fresh["photos_count"]
         changed = True
-    if "-full." in str(fresh.get("photo_url", "")) and \
-            "-full." not in str(stored.get("photo_url", "")):
+    if "-full." in str(fresh.get("photo_url", "")) and "-full." not in str(
+        stored.get("photo_url", "")
+    ):
         stored["photo_url"] = fresh["photo_url"]
         changed = True
     return changed
 
 
 def rewrite_passports(path: str, passports: dict):
-    """Атомарная перезапись: пишем во временный файл, потом переименовываем.
-    Если скрипт умрёт посреди записи — старый файл останется целым
-    (rename на одном диске атомарен: файл либо старый, либо новый,
-    «наполовину записанного» состояния не бывает)."""
+    """Implement `rewrite_passports`."""
     tmp = path + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
@@ -348,23 +300,34 @@ def rewrite_passports(path: str, passports: dict):
     Path(tmp).replace(path)
 
 
-# Поля паспорта, которые upgrade_passport() реально может дозаполнить
-# (см. саму функцию) — используются как update_cols при батч-UPDATE в Postgres.
-UPGRADE_FIELDS = ["mileage_km", "engine_volume", "engine_type", "transmission",
-                  "body_type", "condition", "description", "labels", "city",
-                  "photos_count", "photo_url"]
+UPGRADE_FIELDS = [
+    "mileage_km",
+    "engine_volume",
+    "engine_type",
+    "transmission",
+    "body_type",
+    "condition",
+    "description",
+    "labels",
+    "city",
+    "photos_count",
+    "photo_url",
+]
 
-# Колонки, которые в Postgres целочисленные (INTEGER/BIGINT/SMALLINT).
-# Паспорта из CSV приходят строками, и после pandas-round-trip в CSV
-# целые пишутся как "50.0" — Postgres такую строку в INTEGER не примет.
-# Приводим через int(float(...)), чтобы и "50", и "50.0", и 50 легли.
-PG_INT_FIELDS = {"price_tenge", "year", "mileage_km", "photos_count",
-                 "views_count", "is_vip", "has_monthly_price"}
+
+PG_INT_FIELDS = {
+    "price_tenge",
+    "year",
+    "mileage_km",
+    "photos_count",
+    "views_count",
+    "is_vip",
+    "has_monthly_price",
+}
 
 
 def _pg_value(col: str, v):
-    """Готовит значение к вставке в Postgres: пусто → NULL; целочисленные
-    колонки → int (терпит '50', '50.0', 50, 50.0)."""
+    """Implement `_pg_value`."""
     if v is None or v == "":
         return None
     if col in PG_INT_FIELDS:
@@ -375,17 +338,14 @@ def _pg_value(col: str, v):
     return v
 
 
-def flush_postgres(pg_new_ads: list[dict], pg_new_photos: list[dict],
-                    pg_sightings: list[dict], pg_upgraded: list[dict]):
-    """Двойная запись (пилот миграции на Postgres, см. план): CSV остаётся
-    источником истины весь пилот, сбой записи в БД не должен ронять
-    прогон — это дорогие (сетевые) данные, терять их нельзя. Батчами, а
-    не построчно — иначе на каждую карточку листинга уходил бы отдельный
-    round-trip к БД поверх и так небыстрого похода за страницей."""
-    # Готовим значения к вставке: пусто → NULL, целочисленные колонки →
-    # int (см. _pg_value). pg_upgraded приходит из CSV-паспортов строками,
-    # где после pandas-round-trip целые записаны как "50.0" — без
-    # приведения Postgres роняет батч с invalid input syntax.
+def flush_postgres(
+    pg_new_ads: list[dict],
+    pg_new_photos: list[dict],
+    pg_sightings: list[dict],
+    pg_upgraded: list[dict],
+):
+    """Implement `flush_postgres`."""
+
     def clean_rows(rows):
         return [{k: _pg_value(k, v) for k, v in row.items()} for row in rows]
 
@@ -393,13 +353,11 @@ def flush_postgres(pg_new_ads: list[dict], pg_new_photos: list[dict],
         upsert("raw_ads", clean_rows(pg_new_ads), ["ad_id"])
         upsert("photos", pg_new_photos, ["ad_id", "position"])
         upsert("sightings", clean_rows(pg_sightings), ["ad_id", "seen_date"])
-        upsert("raw_ads", clean_rows(pg_upgraded), ["ad_id"],
-               update_cols=UPGRADE_FIELDS)
+        upsert("raw_ads", clean_rows(pg_upgraded), ["ad_id"], update_cols=UPGRADE_FIELDS)
     except Exception as e:
-        log.warning(f"Postgres dual-write не удался: {e}")
+        log.warning(f"PostgreSQL dual-write failed: {e}")
 
 
-# ─── Извлечение чисел и характеристик из текста ──────────────────────────────
 def clean_int(raw: str) -> int | None:
     digits = re.sub(r"\D", "", raw or "")
     return int(digits) if digits else None
@@ -411,20 +369,23 @@ def split_brand_model(title: str) -> tuple[str | None, str | None]:
         return None, None
     for b in MULTIWORD_BRANDS:
         if title.startswith(b):
-            return b, title[len(b):].strip() or None
+            return b, title[len(b) :].strip() or None
     parts = title.split(maxsplit=1)
     return parts[0], (parts[1] if len(parts) > 1 else None)
 
 
 def parse_spec_line(text: str) -> dict:
-    """
-    Разбирает строку характеристик вида:
-    '2014 г., Б/у седан, 3 л, бензин, КПП автомат, с пробегом 170 000 км, <текст продавца>'
-    У VIP-карточек она короче: '2026 г., 1.5 л, гибрид, КПП автомат' (без пробега).
-    """
-    r = {"year": None, "engine_volume": None, "engine_type": None,
-         "transmission": None, "body_type": None, "condition": None,
-         "mileage_km": None, "description": ""}
+    """Implement `parse_spec_line`."""
+    r = {
+        "year": None,
+        "engine_volume": None,
+        "engine_type": None,
+        "transmission": None,
+        "body_type": None,
+        "condition": None,
+        "mileage_km": None,
+        "description": "",
+    }
     if not text:
         return r
     low = text.lower()
@@ -433,9 +394,6 @@ def parse_spec_line(text: str) -> dict:
     if m:
         r["year"] = int(m.group())
 
-    # Пробег: сначала строгий формат «с пробегом 170 000 км», затем
-    # fallback — просто «260 000 км» (kolesa использует оба варианта;
-    # привязка только к первому теряла ~40% пробегов).
     m = re.search(r"с пробегом\s+([\d\s\u00a0]+)\s*км", low)
     if not m:
         m = re.search(r"(?:^|,)\s*([\d][\d\s\u00a0]*)\s*км\b", low)
@@ -448,24 +406,37 @@ def parse_spec_line(text: str) -> dict:
     if m:
         r["engine_volume"] = float(m.group(1).replace(",", "."))
 
-    # ВАЖНО: порядок — от специфичного к общему. Иначе подстрока «бензин»
-    # внутри «газ-бензин» сработает первой и мы получим неверную метку.
-    for fuel in ["газ-бензин", "гибрид", "электричество", "электро",
-                 "дизель", "газ", "бензин"]:
+    for fuel in ["газ-бензин", "гибрид", "электричество", "электро", "дизель", "газ", "бензин"]:
         if fuel in low:
             r["engine_type"] = "электро" if fuel == "электричество" else fuel
             break
 
-    for kpp, canon in [("автомат", "автомат"), ("вариатор", "вариатор"),
-                       ("робот", "робот"), ("механи", "механика")]:
+    for kpp, canon in [
+        ("автомат", "автомат"),
+        ("вариатор", "вариатор"),
+        ("робот", "робот"),
+        ("механи", "механика"),
+    ]:
         if kpp in low:
             r["transmission"] = canon
             break
 
-    # «кроссовер» — самый частый кузов на kolesa, в старом списке его не было!
-    for body in ["кроссовер", "внедорожник", "седан", "хэтчбек", "лифтбек",
-                 "универсал", "минивэн", "микроавтобус", "купе", "пикап",
-                 "кабриолет", "родстер", "лимузин", "фургон"]:
+    for body in [
+        "кроссовер",
+        "внедорожник",
+        "седан",
+        "хэтчбек",
+        "лифтбек",
+        "универсал",
+        "минивэн",
+        "микроавтобус",
+        "купе",
+        "пикап",
+        "кабриолет",
+        "родстер",
+        "лимузин",
+        "фургон",
+    ]:
         if body in low:
             r["body_type"] = body
             break
@@ -475,22 +446,17 @@ def parse_spec_line(text: str) -> dict:
     elif "нов" in low.split(",")[0] or "новый" in low or "новая" in low:
         r["condition"] = "новый"
 
-    # Текст продавца. Строка устроена как «спеки, ..., текст», поэтому
-    # ищем последний надёжный якорь и берём всё после него. Цепочка
-    # запасных якорей (fallback): пробег → КПП → топливо. Раньше якорь
-    # был только один («км,») — и у строк без пробега текст продавца
-    # выбрасывался целиком (~360 потерянных описаний).
-    for anchor in (r"с пробегом[\d\s\u00a0]+км,?\s*",
-                   r"\bкм,?\s*",
-                   r"КПП\s+\S+,\s*",
-                   r"(?:газ-бензин|бензин|дизель|гибрид|электро|газ),\s*"):
+    for anchor in (
+        r"с пробегом[\d\s\u00a0]+км,?\s*",
+        r"\bкм,?\s*",
+        r"КПП\s+\S+,\s*",
+        r"(?:газ-бензин|бензин|дизель|гибрид|электро|газ),\s*",
+    ):
         m = re.search(anchor + r"(.+)$", text, re.IGNORECASE)
         if not m:
             continue
         candidate = m.group(1).strip()
-        # ранний якорь мог захватить хвост спеков («КПП автомат») —
-        # такое не текст продавца, отвергаем и НЕ пробуем более
-        # поздние якоря (текста в строке просто нет)
+
         if re.match(r"^(КПП\b|с пробегом\b)", candidate, re.IGNORECASE):
             break
         r["description"] = candidate[:500]
@@ -499,7 +465,6 @@ def parse_spec_line(text: str) -> dict:
     return r
 
 
-# ─── Разбор карточек листинга ────────────────────────────────────────────────
 def txt(node) -> str:
     return node.get_text(" ", strip=True) if node else ""
 
@@ -516,77 +481,80 @@ def parse_cards(html: str, category: str) -> list[dict]:
         is_vip = "vip-card" in " ".join(card.get("class", []))
         prefix = "vip-card" if is_vip else "a-card"
 
-        # URL без трекинговых параметров (?search_id=...)
         link = card.select_one("a[href*='/a/show/']")
         href = re.sub(r"\?.*", "", link["href"]) if link else f"/a/show/{ad_id}"
         url = BASE_URL + href
 
-        title = txt(card.select_one(f".{prefix}__title")).replace(
-            "Добавить в избранное", "").strip() or None
+        title = (
+            txt(card.select_one(f".{prefix}__title")).replace("Добавить в избранное", "").strip()
+            or None
+        )
         brand, model = split_brand_model(title or "")
 
         price = clean_int(txt(card.select_one(f".{prefix}__price")))
 
-        # У VIP-карточек характеристики лежат в .vip-card__description —
-        # раньше мы брали только alt картинки и теряли КПП/топливо/объём.
         spec = txt(card.select_one(f".{prefix}__description"))
-        if not spec:  # запасной вариант — alt картинки
+        if not spec:
             img_alt = card.select_one("img[alt]")
             spec = img_alt["alt"] if img_alt else ""
         parsed = parse_spec_line(spec)
 
-        city = txt(card.select_one(f".{prefix}__region")
-                   or card.select_one("[data-test='region']")) or None
+        city = (
+            txt(card.select_one(f".{prefix}__region") or card.select_one("[data-test='region']"))
+            or None
+        )
 
-        # ── Новые поля-сигналы ────────────────────────────────────────────
-        views = clean_int(txt(card.select_one(".nb-views")))          # просмотры
-        posted = txt(card.select_one(f".{prefix}__date")
-                     or card.select_one(".a-card__param--date")) or None
+        views = clean_int(txt(card.select_one(".nb-views")))
+        posted = (
+            txt(card.select_one(f".{prefix}__date") or card.select_one(".a-card__param--date"))
+            or None
+        )
         labels = "|".join(txt(x) for x in card.select(".a-label__text")) or None
-        has_monthly = "/мес" in card.get_text()   # рассрочка/кредит от дилера
+        has_monthly = "/мес" in card.get_text()
 
-        # Фото: собираем ВСЕ превью карточки и переводим в полный размер.
-        # Счётчик из листинга — нижняя граница: сайт кладёт в карточку
-        # максимум ~5 превью, даже если фоток больше.
         photo_urls = extract_photo_urls(card)
         cnt = clean_int(txt(card.select_one(".thumb-gallery__count")))
         photos_count = max(cnt or 0, len(photo_urls), 1)
         photo_url = photo_urls[0] if photo_urls else ""
 
         if not title or not price:
-            continue  # карточка-заглушка/реклама
+            continue
 
-        results.append({
-            "ad_id": ad_id, "url": url, "title": title,
-            "brand": brand, "model": model,
-            "price_tenge": price,
-            "year": parsed["year"],
-            "mileage_km": parsed["mileage_km"],
-            "engine_volume": parsed["engine_volume"],
-            "engine_type": parsed["engine_type"],
-            "transmission": parsed["transmission"],
-            "body_type": parsed["body_type"],
-            "condition": parsed["condition"],
-            "city": city,
-            "description": parsed["description"],
-            "photos_count": photos_count,
-            "photo_url": photo_url,
-            "_photo_urls": photo_urls,  # служебное поле: уйдёт в photos.csv
-            "views_count": views,
-            "posted_date": posted,
-            "labels": labels,
-            "is_vip": int(is_vip),
-            "has_monthly_price": int(has_monthly),
-            "category": category,
-            "scraped_at": datetime.now().isoformat(timespec="seconds"),
-        })
+        results.append(
+            {
+                "ad_id": ad_id,
+                "url": url,
+                "title": title,
+                "brand": brand,
+                "model": model,
+                "price_tenge": price,
+                "year": parsed["year"],
+                "mileage_km": parsed["mileage_km"],
+                "engine_volume": parsed["engine_volume"],
+                "engine_type": parsed["engine_type"],
+                "transmission": parsed["transmission"],
+                "body_type": parsed["body_type"],
+                "condition": parsed["condition"],
+                "city": city,
+                "description": parsed["description"],
+                "photos_count": photos_count,
+                "photo_url": photo_url,
+                "_photo_urls": photo_urls,
+                "views_count": views,
+                "posted_date": posted,
+                "labels": labels,
+                "is_vip": int(is_vip),
+                "has_monthly_price": int(has_monthly),
+                "category": category,
+                "scraped_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
 
     return results
 
 
-# ─── Сетевая часть: вежливо и с предохранителями ─────────────────────────────
 async def human_pause(page):
-    """Имитация чтения страницы: скролл + случайная пауза."""
+    """Implement `human_pause`."""
     await asyncio.sleep(random.uniform(0.8, 1.6))
     await page.evaluate(f"window.scrollBy(0, {random.randint(400, 900)})")
     await asyncio.sleep(random.uniform(0.5, 1.2))
@@ -602,72 +570,58 @@ async def get_html(page, url: str, retries: int = 3) -> str | None:
         except DailyBudgetExhausted:
             raise
         except request_budget.BudgetStateError:
-            raise  # fail closed: битый счётчик нельзя маскировать ретраями
+            raise
         except PWTimeout:
-            log.warning(f"Таймаут [{attempt}/{retries}]: {url}")
+            log.warning(f"Timeout [{attempt}/{retries}]: {url}")
         except Exception as e:
-            log.error(f"Ошибка [{attempt}/{retries}]: {e}")
+            log.error(f"Error [{attempt}/{retries}]: {e}")
         if attempt < retries:
-            # Экспоненциальный backoff: 5с, 10с, 20с — каждый повтор ждём
-            # вдвое дольше. Если сайт «устал» от нас, частые ретраи только
-            # ухудшают ситуацию; растущая пауза даёт ему остыть.
             await asyncio.sleep(5 * (2 ** (attempt - 1)))
     return None
 
 
 def looks_blocked(html: str) -> bool:
-    """
-    ВАЖНО: маркеры должны встречаться ТОЛЬКО на странице блокировки.
-    Слово «captcha» есть в футере каждой обычной страницы kolesa
-    («Защищено reCAPTCHA») — из-за него детектор ловил ложные
-    срабатывания на здоровых страницах. Поэтому:
-      1) маркеры — только специфичные фразы страниц блокировки/логина;
-      2) страница с карточками объявлений блокировкой не считается
-         в принципе (структурная проверка сильнее текстовой).
-    """
-    if "js__a-card" in html:          # есть карточки → точно не блокировка
+    """Implement `looks_blocked`."""
+    if "js__a-card" in html:
         return False
-    markers = ["Вход в личный кабинет", "passport/login",
-               "Доступ ограничен", "Too Many Requests",
-               "Подтвердите, что вы не робот"]
+    markers = [
+        "Вход в личный кабинет",
+        "passport/login",
+        "Доступ ограничен",
+        "Too Many Requests",
+        "Подтвердите, что вы не робот",
+    ]
     return any(m in html for m in markers)
 
 
-def validate_listing_page(html: str, cards: list[dict], page_num: int,
-                          category: str) -> int:
-    """Fail-fast проверка контракта HTML → карточки.
-
-    Раньше смена CSS-класса давала `cards=[]`, после чего парсер писал
-    «конец сегмента» и завершался с кодом 0. Теперь первые страницы широких
-    сегментов обязаны содержать карточки, а сильная потеря при разборе
-    считается поломкой схемы. Возвращаем raw-count для run status.
-    """
+def validate_listing_page(html: str, cards: list[dict], page_num: int, category: str) -> int:
+    """Implement `validate_listing_page`."""
     raw_count = len(BeautifulSoup(html, "html.parser").select(".js__a-card"))
-    if page_num <= LISTING_HEALTH_FIRST_PAGES and \
-            raw_count < LISTING_HEALTH_MIN_RAW_CARDS:
+    if page_num <= LISTING_HEALTH_FIRST_PAGES and raw_count < LISTING_HEALTH_MIN_RAW_CARDS:
         raise ListingSchemaError(
-            f"[{category}] стр. {page_num}: найдено только {raw_count} raw-карточек; "
-            "вероятно, Kolesa изменила HTML/селекторы"
+            f"[{category}] page {page_num}: found only {raw_count} raw cards; "
+            "Kolesa may have changed its HTML or selectors"
         )
     min_parsed = max(1, raw_count // 2)
     if raw_count >= LISTING_HEALTH_MIN_RAW_CARDS and len(cards) < min_parsed:
         raise ListingSchemaError(
-            f"[{category}] стр. {page_num}: разобрано {len(cards)}/{raw_count}; "
-            "поля карточки или селекторы изменились"
+            f"[{category}] page {page_num}: parsed {len(cards)}/{raw_count}; "
+            "listing-card fields or selectors may have changed"
         )
     return raw_count
 
 
-def page_limit_has_unseen(page_num: int, unseen: int, card_count: int,
-                          start_page: int, max_pages: int) -> bool:
-    """Истина, если остановились по лимиту, пока новые для датасета ещё идут."""
-    return (start_page == 1 and page_num == max_pages
-            and card_count > 0 and unseen > 0)
+def page_limit_has_unseen(
+    page_num: int, unseen: int, card_count: int, start_page: int, max_pages: int
+) -> bool:
+    """Implement `page_limit_has_unseen`."""
+    return start_page == 1 and page_num == max_pages and card_count > 0 and unseen > 0
 
 
-def cap_cards_for_run(cards: list[dict], already_processed: int,
-                      limit: int) -> tuple[list[dict], bool]:
-    """Обрезать страницу до остатка микро-лимита; вернуть (карточки, стоп)."""
+def cap_cards_for_run(
+    cards: list[dict], already_processed: int, limit: int
+) -> tuple[list[dict], bool]:
+    """Implement `cap_cards_for_run`."""
     if limit <= 0:
         return cards, False
     remaining = max(0, limit - already_processed)
@@ -676,7 +630,7 @@ def cap_cards_for_run(cards: list[dict], already_processed: int,
 
 
 def write_run_status(report: dict):
-    """Атомарный машинно-читаемый итог парсера для мониторинга/диагностики."""
+    """Implement `write_run_status`."""
     target = Path(RUN_STATUS_FILE)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
@@ -691,19 +645,20 @@ def write_run_status(report: dict):
 
 
 def mark_unhandled_failure(error: Exception):
-    """Не оставлять `running`, если CLI упал по непредусмотренной причине."""
+    """Implement `mark_unhandled_failure`."""
     try:
         report = json.loads(Path(RUN_STATUS_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        report = {"schema_version": 1, "started_at": None,
-                  "segments": {}, "totals": {}}
+        report = {"schema_version": 1, "started_at": None, "segments": {}, "totals": {}}
     if report.get("status") != "running":
         return
-    report.update({
-        "status": "failed",
-        "message": f"{type(error).__name__}: {error}",
-        "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-    })
+    report.update(
+        {
+            "status": "failed",
+            "message": f"{type(error).__name__}: {error}",
+            "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+    )
     write_run_status(report)
 
 
@@ -727,10 +682,12 @@ async def run():
         "finished_at": None,
         "status": "running",
         "message": None,
-        "config": {"start_page": START_PAGE,
-                   "max_pages_per_category": MAX_PAGES_PER_CATEGORY,
-                   "max_cards_per_run": MAX_CARDS_PER_RUN,
-                   "categories": [name for name, _ in CATEGORIES]},
+        "config": {
+            "start_page": START_PAGE,
+            "max_pages_per_category": MAX_PAGES_PER_CATEGORY,
+            "max_cards_per_run": MAX_CARDS_PER_RUN,
+            "categories": [name for name, _ in CATEGORIES],
+        },
         "segments": {},
         "freshness_truncated_segments": [],
         "totals": {},
@@ -740,19 +697,20 @@ async def run():
         run_report["status"] = status
         run_report["message"] = message
         run_report["totals"] = {
-            "new_ads": total_saved, "upgraded_passports": total_upgraded,
+            "new_ads": total_saved,
+            "upgraded_passports": total_upgraded,
             "sightings": total_sightings,
             "cards_processed": total_cards_processed,
             "kolesa_requests_reserved": _run_kolesa_requests,
         }
         run_report["card_limit_reached"] = card_limit_reached
         run_report["freshness_truncated_segments"] = sorted(
-            name for name, state in run_report["segments"].items()
+            name
+            for name, state in run_report["segments"].items()
             if state.get("page_limit_has_unseen")
         )
         if status != "running":
-            run_report["finished_at"] = datetime.now().astimezone().isoformat(
-                timespec="seconds")
+            run_report["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         write_run_status(run_report)
 
     save_status("running")
@@ -762,15 +720,15 @@ async def run():
             headless=HEADLESS,
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
-        # storage_state: сохраняем cookies между запусками. Для сайта мы —
-        # один и тот же посетитель, который заходит раз в день. Это гораздо
-        # менее подозрительно, чем «свежий» браузер без истории каждый раз.
+
         state = STATE_FILE if Path(STATE_FILE).exists() else None
         context = await browser.new_context(
             storage_state=state,
-            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"),
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
             locale="ru-RU",
             viewport={"width": 1440, "height": 900},
             extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"},
@@ -780,57 +738,51 @@ async def run():
         )
         page = await context.new_page()
 
-        # Прогрев: заходим на главную, как обычный человек
-        log.info("Прогрев сессии...")
+        log.info("Warming up the session...")
         try:
             reserve_kolesa_request()
             await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30_000)
             await human_pause(page)
         except DailyBudgetExhausted as e:
-            log.warning(f"Стоп до сети: {e}")
+            log.warning(f"Stopped before network access: {e}")
             save_status("budget_exhausted", str(e))
             await browser.close()
             return
         except request_budget.BudgetStateError as e:
-            log.error(f"Стоп до сети: {e}")
+            log.error(f"Stopped before network access: {e}")
             save_status("budget_error", str(e))
             await browser.close()
             return
         except Exception as e:
-            log.warning(f"Прогрев не удался: {e}")
+            log.warning(f"Session warm-up failed: {e}")
 
         pages_done = 0
         for cat_name, cat_path in CATEGORIES:
-            log.info(f"── Категория: {cat_name} ──")
+            log.info(f"── Category: {cat_name} ──")
             for page_num in range(START_PAGE, MAX_PAGES_PER_CATEGORY + 1):
-                # kolesa канонизирует URL: «?page=1» редиректится на адрес
-                # БЕЗ параметра page → петля редиректов (ERR_TOO_MANY_REDIRECTS).
-                # Поэтому первую страницу запрашиваем без page.
                 if page_num == 1:
                     url = f"{BASE_URL}{cat_path}"
                 else:
                     sep = "&" if "?" in cat_path else "?"
                     url = f"{BASE_URL}{cat_path}{sep}page={page_num}"
-                log.info(f"[{cat_name}] стр. {page_num}: {url}")
+                log.info(f"[{cat_name}] page {page_num}: {url}")
 
                 try:
                     html = await get_html(page, url)
                 except DailyBudgetExhausted as e:
-                    log.warning(f"Стоп по общему бюджету: {e}")
+                    log.warning(f"Stopped by shared request budget: {e}")
                     if total_upgraded:
                         rewrite_passports(OUTPUT_CSV, passports)
-                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings,
-                                   pg_upgraded)
+                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded)
                     save_status("budget_exhausted", str(e))
                     await context.storage_state(path=STATE_FILE)
                     await browser.close()
                     return
                 except request_budget.BudgetStateError as e:
-                    log.error(f"Стоп: {e}")
+                    log.error(f"Stopped: {e}")
                     if total_upgraded:
                         rewrite_passports(OUTPUT_CSV, passports)
-                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings,
-                                   pg_upgraded)
+                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded)
                     save_status("budget_error", str(e))
                     await context.storage_state(path=STATE_FILE)
                     await browser.close()
@@ -838,17 +790,18 @@ async def run():
 
                 if html is None or looks_blocked(html or ""):
                     consecutive_fails += 1
-                    log.error(f"Сбой/блокировка ({consecutive_fails}/"
-                              f"{MAX_CONSECUTIVE_FAILS})")
+                    log.error(
+                        f"Failure/block response ({consecutive_fails}/{MAX_CONSECUTIVE_FAILS})"
+                    )
                     if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
-                        # Предохранитель (circuit breaker): лучше потерять
-                        # один день сбора, чем IP на неделю.
-                        log.error("Стоп: слишком много сбоев подряд. "
-                                  "Завтра запуск продолжит с того же места.")
+                        log.error(
+                            "Stopped after too many consecutive failures. "
+                            "The next run will resume from the same position."
+                        )
                         if total_upgraded:
                             rewrite_passports(OUTPUT_CSV, passports)
                         flush_postgres(pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded)
-                        save_status("blocked", "три сетевых сбоя/блокировки подряд")
+                        save_status("blocked", "three consecutive network or block responses")
                         await context.storage_state(path=STATE_FILE)
                         await browser.close()
                         sys.exit(1)
@@ -858,51 +811,52 @@ async def run():
 
                 cards = parse_cards(html, cat_name)
                 try:
-                    raw_card_count = validate_listing_page(
-                        html, cards, page_num, cat_name)
+                    raw_card_count = validate_listing_page(html, cards, page_num, cat_name)
                 except ListingSchemaError as e:
                     log.error(f"SCHEMA_ERROR {e}")
                     if total_upgraded:
                         rewrite_passports(OUTPUT_CSV, passports)
-                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings,
-                                   pg_upgraded)
+                    flush_postgres(pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded)
                     save_status("schema_error", str(e))
                     await context.storage_state(path=STATE_FILE)
                     await browser.close()
                     sys.exit(1)
                 if not cards:
                     run_report["segments"][cat_name] = {
-                        "last_page": page_num, "raw_cards": raw_card_count,
-                        "parsed_cards": 0, "unseen_ads": 0,
-                        "unseen_share": 0.0, "page_limit_has_unseen": False,
+                        "last_page": page_num,
+                        "raw_cards": raw_card_count,
+                        "parsed_cards": 0,
+                        "unseen_ads": 0,
+                        "unseen_share": 0.0,
+                        "page_limit_has_unseen": False,
                     }
                     save_status("running")
-                    log.info(f"[{cat_name}] карточек нет — конец сегмента")
+                    log.info(f"[{cat_name}] no listing cards; segment complete")
                     break
 
                 run_cards, stop_after_page = cap_cards_for_run(
-                    cards, total_cards_processed, MAX_CARDS_PER_RUN)
+                    cards, total_cards_processed, MAX_CARDS_PER_RUN
+                )
                 total_cards_processed += len(run_cards)
                 new = 0
                 for row in run_cards:
                     photo_urls = row.pop("_photo_urls", [])
 
-                    # 1) Журнал наблюдений — пишем ВСЕГДА: из повторов
-                    #    Job 2 соберёт историю цены и days_on_market.
                     if row["ad_id"] not in seen_today:
                         append_sighting(SIGHTINGS_CSV, row, today)
-                        pg_sightings.append({
-                            "ad_id": row["ad_id"], "seen_date": today,
-                            "price_tenge": row["price_tenge"],
-                            "views_count": row["views_count"],
-                            "is_vip": row["is_vip"], "category": row["category"],
-                        })
+                        pg_sightings.append(
+                            {
+                                "ad_id": row["ad_id"],
+                                "seen_date": today,
+                                "price_tenge": row["price_tenge"],
+                                "views_count": row["views_count"],
+                                "is_vip": row["is_vip"],
+                                "category": row["category"],
+                            }
+                        )
                         seen_today.add(row["ad_id"])
                         total_sightings += 1
 
-                    # 2) Паспорт: новый — добавляем; известный — пробуем
-                    #    дозаполнить дыры (VIP-карточки дают неполные
-                    #    паспорта, обычные — полные).
                     if row["ad_id"] in passports:
                         if upgrade_passport(passports[row["ad_id"]], row):
                             total_upgraded += 1
@@ -913,21 +867,27 @@ async def run():
                     append_row(OUTPUT_CSV, row)
                     append_photos(PHOTOS_CSV, row["ad_id"], photo_urls)
                     pg_new_ads.append(dict(row))
-                    pg_new_photos.extend({"ad_id": row["ad_id"], "position": i, "url": u}
-                                         for i, u in enumerate(photo_urls, 1))
+                    pg_new_photos.extend(
+                        {"ad_id": row["ad_id"], "position": i, "url": u}
+                        for i, u in enumerate(photo_urls, 1)
+                    )
                     total_saved += 1
                     new += 1
-                log.info(f"  карточек: {len(cards)}, новых: {new}, "
-                         f"обработано в этом запуске: {total_cards_processed}, "
-                         f"наблюдений сегодня: {total_sightings}, "
-                         f"всего объявлений: {total_saved}")
+                log.info(
+                    f"  cards: {len(cards)}, new: {new}, "
+                    f"processed this run: {total_cards_processed}, "
+                    f"observations today: {total_sightings}, "
+                    f"total new listings: {total_saved}"
+                )
 
                 boundary_open = page_limit_has_unseen(
-                    page_num, new, len(cards), START_PAGE,
-                    MAX_PAGES_PER_CATEGORY)
+                    page_num, new, len(cards), START_PAGE, MAX_PAGES_PER_CATEGORY
+                )
                 run_report["segments"][cat_name] = {
-                    "last_page": page_num, "raw_cards": raw_card_count,
-                    "parsed_cards": len(cards), "unseen_ads": new,
+                    "last_page": page_num,
+                    "raw_cards": raw_card_count,
+                    "parsed_cards": len(cards),
+                    "unseen_ads": new,
                     "processed_cards": len(run_cards),
                     "unseen_share": round(new / len(cards), 4),
                     "page_limit_has_unseen": boundary_open,
@@ -937,7 +897,10 @@ async def run():
                     log.warning(
                         "FRESHNESS_TRUNCATED category=%s page=%d unseen=%d "
                         "cards=%d unseen_share=%.1f%%",
-                        cat_name, page_num, new, len(cards),
+                        cat_name,
+                        page_num,
+                        new,
+                        len(cards),
                         100 * new / len(cards),
                     )
 
@@ -950,7 +913,7 @@ async def run():
                 pages_done += 1
                 if pages_done % COFFEE_BREAK_EVERY == 0:
                     brk = random.uniform(*COFFEE_BREAK_RANGE)
-                    log.info(f"  ☕ длинная пауза {brk:.0f}s")
+                    log.info(f"  Long pacing break: {brk:.0f}s")
                     await asyncio.sleep(brk)
                 else:
                     await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
@@ -963,15 +926,17 @@ async def run():
 
     if total_upgraded:
         rewrite_passports(OUTPUT_CSV, passports)
-        log.info(f"Дозаполнено паспортов: {total_upgraded}")
+        log.info(f"Backfilled listing records: {total_upgraded}")
     flush_postgres(pg_new_ads, pg_new_photos, pg_sightings, pg_upgraded)
 
     save_status("success")
 
-    log.info(f"\n{'=' * 50}\nГотово! Новых: {total_saved}, "
-             f"дозаполнено: {total_upgraded}, "
-             f"наблюдений: {total_sightings}, "
-             f"карточек обработано: {total_cards_processed} → {OUTPUT_CSV}")
+    log.info(
+        f"\n{'=' * 50}\nCompleted. New: {total_saved}, "
+        f"backfilled: {total_upgraded}, "
+        f"observations: {total_sightings}, "
+        f"cards processed: {total_cards_processed} → {OUTPUT_CSV}"
+    )
 
 
 if __name__ == "__main__":

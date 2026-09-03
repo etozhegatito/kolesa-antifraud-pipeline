@@ -1,357 +1,179 @@
-# Модель цены и проверка качества
+# Price modelling and validation
 
-Как обучается оценка справедливой цены, как её проверяют без самообмана и
-почему числа в отчёте именно такие.
+## Current measured quality
 
-Паспорт текущего артефакта — в [MODEL_CARD.md](MODEL_CARD.md).
-Что пробовали и не взлетело — в [FINDINGS.md](FINDINGS.md).
+The current artifact uses 12,455 training rows and reports:
 
----
-
-## Текущее измеренное качество
-
-## Объём данных на 29 августа 2026 года
-
-| Слой | Значение |
-|---|---:|
-| объявлений всего | 11 682 |
-| помечено подозрительными | 186 (1,6%) |
-| страниц обогащено | 1 488 из 11 682 (12,7%) |
-| средняя цена kolesa заполнена | 1 074 |
-| ссылок на фото / хэшировано / скачано | 56 446 / 4 368 / 5 633 |
-| наблюдений в истории цен | 14 571 за 17 июля — 29 августа |
-| статусы: активно / архив / удалено | 11 482 / 173 / 27 |
-| пропуск пробега в листинге | 36% |
-| проставлено вердиктов | 111 |
-| размечено кадров фотографий | 782; все 47 legacy damaged в `needs_review`, 38 явно затронуты definition drift |
-
-Вердиктов 111, из них валидных 88, и все — «честное объявление». Для оценки
-доли важны не все 88, а 65 случайных контролей: в них фрода нет, поэтому по
-правилу трёх верхняя 95%-граница составляет **3 / 65 = 4,6%**. Вердикты из
-очереди подозрительных не являются случайной выборкой и в этот знаменатель
-не подмешиваются. Подробнее — в разделе «Как проверяется качество».
-
-Обогащение просело в долях не потому, что встало, а потому что база выросла
-быстрее: 1 488 страниц против 1 196 месяц назад при вдвое большем объёме.
-Запросы к сайту ограничены суточным бюджетом.
-
-## Качество модели цены
-
-Метрики ниже измерены на срезе от **30 августа 2026 года** (11 530 строк
-после очистки). Они не переписываются под новый объём данных без повторного
-замера: цифра, взятая по аналогии, была бы выдумкой. Пересчитать на текущем
-срезе — `python -m kz.ml.train_price_model`.
-
-Данные относятся к Алматы и одному источнику.
-
-| Проверка | Routed CatBoost | Одна общая модель | Простой baseline |
-|---|---:|---:|---:|
-| Grouped 5-fold MAPE | **21,52%** | 21,66% | 31,19% |
-| Grouped 5-fold R² на `log(price)` | **0,935** | 0,934 | 0,842 |
-| Grouped медианная APE | **13,86%** | 14,01% | 14,41% |
-| Out-of-time MAPE | **22,00%** | 22,78% | 32,28% |
-
-У общей модели **по медианной ошибке простой справочник близок к CatBoost**:
-14,41% против 14,01%. Специалист улучшил медиану до 13,86%. Выигрыш
-routed-модели в 9,7 п.п. по среднему
-целиком набирается на хвостах: редкие комплектации, битые машины, странные
-пробеги — там, где справочнику не на что опереться. На типичном объявлении
-CatBoost больше ничего не добавляет.
-
-Это механика, а не случайность: чем плотнее данные, тем больше непустых
-ячеек «марка + модель + год». Разрыв падает пятый замер подряд —
-13,4 → 12,0 → 11,2 → 10,1 → 8,5 п.п.
-
-Ошибка зависит от ценового сегмента:
-
-| Цена объявления | MAPE | строк |
+| Evaluation | MAPE | Median APE |
 |---|---:|---:|
-| до 5 млн ₸ | 29,2% | 4 661 |
-| 5–10 млн ₸ | 15,7% | 2 681 |
-| 10–20 млн ₸ | 15,5% | 2 221 |
-| от 20 млн ₸ | 18,1% | 1 967 |
+| Grouped out-of-fold routed prediction | **21.36%** | **13.81%** |
+| Out-of-time routed prediction | **23.24%** | **14.82%** |
+| Grouped make/model/year baseline | 30.70% | 14.21% |
 
-Это означает:
+The 95% grouped-bootstrap interval for MAPE is 20.87%–21.87%. Changes smaller
+than this sampling variation should not be described as real improvements.
 
-- модель заметно лучше простого справочника медианных цен;
-- **средняя ошибка и типичная — разные вещи.** Для routed-модели это MAPE
-  21,52% против медианной APE 13,86%;
-- этот хвост сидит в дешёвом сегменте. До 5 млн — 40% выборки и 29,2% ошибки,
-  потому что там цену определяет состояние машины, а его в объявлении не
-  видно. В диапазоне 5–20 млн модель уже даёт 15,5%;
-- без дешёвого сегмента общий MAPE был бы около 16%;
-- MAPE 21,52% не следует называть «точностью 78,48%».
+## Target
 
-## Где предел и что его двигает
+The model predicts:
 
-**Кривая вышла на плато, и это установлено пятью замерами.**
+```text
+y = log(first observed listing price in KZT)
+```
 
-| объявлений | 4 777 | 6 718 | 8 348 | 9 938 | 11 496 |
-|---|---:|---:|---:|---:|---:|
-| MAPE | 22,66% | 22,19% | 21,60% | 21,60% | 21,41% |
-| медианная APE | 14,54% | 14,60% | 14,07% | 14,02% | 14,19% |
-| baseline | 36,1% | 34,2% | 32,8% | 31,8% | 29,96% |
-| выигрыш, п.п. | 13,4 | 12,0 | 11,2 | 10,1 | 8,5 |
+The first observation is chosen explicitly so retraining does not silently
+change the target from original price to latest price as observation history
+grows. At inference, the output is transformed back:
 
-Последние два шага дали +18% данных каждый. Метрика сдвинулась на 0,19 п.п.,
-медиана даже ухудшилась. Подгонка степенного закона `a + b·n^(-c)` даёт
-асимптоту около **20,1%**; по трём последним точкам 20% требуют примерно
-143 тысяч объявлений, 18% — почти пяти миллионов. В Алматы столько машин не
-продаётся.
+```text
+price_hat = exp(y_hat)
+```
 
-Более ранняя редакция этого раздела утверждала обратное — «кривая не вышла
-на плато, рычаг в расширении сбора за пределы Алматы». Оба утверждения
-оказались неверны. Расширение географии отвергнуто отдельно: города
-различаются уровнем цен, и модель без признака города училась бы усреднять
-разные рынки (FINDINGS §14).
+Log price reduces the dominance of very expensive vehicles and turns many
+multiplicative price relationships into additive ones.
 
-Специалист с честной маршрутизацией по прогнозу общей модели даёт на текущем
-срезе 21,66% → 21,52% и особенно помогает OOT: 22,78% → 22,00%. Где
-оставшиеся 3,52 п.п. действительно лежат — в дешёвом
-сегменте, а не в объёме:
+## Features
 
-Grouped разница имеет ДИ [−0,28; +0,01] п.п. и ещё не проходит строгий 95%-
-gate. OOT-разница проходит: −0,78 п.п., ДИ [−1,13; −0,41]. Поэтому маршрут
-оставлен как поддержанный временной проверкой, но его надо перепроверить после
-следующего заметного изменения clean-среза.
+The deployed schema contains 13 features:
 
-| сегмент до 5 млн | общий MAPE |
+| Type | Features |
 |---|---|
-| 29,2% (сейчас) | 21,52% |
-| 26% | 20,2% |
-| 24% | 19,4% |
-| **20,5%** | **18,0%** |
+| Numeric | `age`, `mileage_km`, `engine_volume`, `photos_count` |
+| Flags | `mileage_missing`, `is_vip`, `has_monthly_price` |
+| Categorical | `brand`, `model`, `engine_type`, `transmission`, `body_type`, `condition` |
 
-Из измеренного туда ведёт обогащение: признаки со страницы объявления
-(текст продавца, список опций) дают −3,4 п.п. по этому сегменту при полном
-покрытии. Это может приблизить общий MAPE к 20,2%, но эффекты нельзя просто
-складывать до повторного OOF-замера. Остаток требует сигнала о состоянии.
-Исторический full-frame замер его не дал, но его supervised-цифры теперь
-отозваны: аудит definition drift отправил все 47 legacy `damaged`-кадров на
-визуальную перепроверку. В продукт CV никогда не включался — см. FINDINGS
-§19-24 и §28. После исправления меток ROC-AUC и PR-AUC считаются заново.
-Фото-CV группирует не только кадры одного `ad_id`,
-но и разные объявления с точным одинаковым pHash. Новые метки имеют
-случайный audit-split, выбранный до active learning; старые метки остаются
-train. Рамки экспортируются `python -m kz.ml.photo_dataset` в раздельные
-COCO train/audit артефакты. Один кадр может содержать несколько рамок:
-журнал хранит их одним `boxes_json`, а экспорт создаёт несколько COCO
-annotations. Старые одиночные `x1…y2` остаются совместимыми.
+The marketplace's own average price and price category are forbidden as model
+features because they derive from the same target. Seller text, options, and
+photo features are not deployed until coverage and inference parity are strong
+enough.
 
-В старом `photo_ablation.py` PCA эмбеддингов обучалась до CV. Она не видела
-цену, но видела распределение test-фотографий — feature leakage. Теперь PCA
-fit выполняется отдельно внутри каждого train-фолда. Старый отрицательный
-вывод («фото цене не помогло») не становится положительным от устранения
-оптимистической утечки, но точные ablation-цифры следует цитировать только
-после нового полного запуска.
+## Why CatBoost
 
-Все цифры, причины и воспроизводящие команды — в [FINDINGS.md](FINDINGS.md).
+CatBoost handles mixed numerical and high-cardinality categorical data without
+manual one-hot expansion. Ordered target statistics reduce leakage compared
+with naive target encoding, and tree interactions capture nonlinear effects
+such as age behaving differently by make/model.
 
-Подробный паспорт модели находится в [MODEL_CARD.md](MODEL_CARD.md).
+This is still compared with a simple baseline. A complex model has value only
+if it beats a transparent reference under the same split.
 
----
+## Baseline
 
-## Как работает модель цены
+The baseline predicts a robust central price for the make/model/year group,
+with fallback levels when a group is sparse. Its grouped MAPE is much worse than
+CatBoost, but median APE is close. This means much of the model's average gain
+comes from reducing tail errors rather than improving every typical listing.
 
-## Входные признаки
+## Duplicate-safe grouped validation
 
-Числовые:
-
-- возраст;
-- пробег;
-- объём двигателя;
-- количество фотографий;
-- факт отсутствия пробега;
-- VIP-статус;
-- наличие месячного платежа.
-
-Категориальные:
-
-- марка;
-- модель;
-- тип двигателя;
-- коробка передач;
-- кузов;
-- состояние `новый/б/у`.
-
-Не используются:
-
-- сама цена как признак;
-- `price_z`, потому что он рассчитан из цены;
-- `kolesa_avg_price`, потому что это чужая оценка той же цели;
-- `is_suspicious`, потому что он частично зависит от цены;
-- просмотры, потому что они накапливаются после публикации;
-- город, потому что текущий срез содержит только Алматы.
-
-Использование производного от цели признака называется target leakage.
-Модель с утечкой красиво выглядит на тесте, но не умеет честно работать на
-новом объекте.
-
-## Что предсказывается
-
-Target:
+A physical vehicle may be relisted under multiple ad IDs. Random row splitting
+would let the model train on one copy and validate on another. The project first
+constructs relist groups without using price and then uses grouped folds:
 
 ```text
-y = log(price_tenge)
+all rows in one relist group → exactly one fold
 ```
 
-После предсказания результат возвращается в тенге:
+Every row receives a prediction from a model that did not train on its group.
+Those out-of-fold predictions drive model metrics, interval calibration,
+residual anomaly thresholds, and stability analysis.
+
+## Out-of-time validation
+
+Grouped cross-validation estimates behavior across the observed dataset.
+Out-of-time validation asks whether a model trained on earlier listings works on
+later ones. The higher 23.24% temporal MAPE is a warning that market drift and
+data-history limits remain important.
+
+## Routed inference
+
+One general model cannot fully capture the inexpensive segment. The route is:
 
 ```text
-predicted_price = exp(predicted_log_price)
+general prediction < 5M KZT → cheap specialist
+otherwise                    → general model
 ```
 
-## Почему CatBoost
+The specialist trains on a wider band of actual prices below 8M KZT to reduce
+edge instability. The route never uses actual price during inference.
 
-CatBoost подходит для этой задачи, потому что:
+On the current snapshot, routing changes overall grouped MAPE by only -0.03
+percentage points and the paired confidence interval includes zero. The
+architecture is correct, but the latest data do not support a strong claim of
+overall improvement.
 
-- умеет работать с категориальными признаками;
-- не требует вручную создавать тысячи one-hot колонок для моделей машин;
-- принимает пропуски в числах;
-- моделирует нелинейные зависимости;
-- хорошо работает на табличных данных среднего размера.
+## Metrics
 
-## Что такое baseline
+### Absolute percentage error and MAPE
 
-Baseline — простой ответ, который сложная модель обязана победить.
-
-Здесь baseline ищет медиану `log(price)` по цепочке:
-
-1. марка + модель + точный год;
-2. марка + модель + возрастная корзина;
-3. марка + модель;
-4. марка;
-5. общая медиана.
-
-Каждая медиана считается только на train-части. Если CatBoost не лучше этого
-справочника, сложная модель не оправдана.
-
-## Grouped cross-validation
-
-Обычный случайный split может положить оригинальное объявление в train, а его
-перезалив — в validation. Модель почти видела правильный ответ, и метрика стала
-слишком хорошей.
-
-Grouped CV сначала объединяет точные перезаливы в группу, затем кладёт всю
-группу только в один фолд.
-
-Для пяти фолдов процесс выглядит так:
+For actual price `y_i` and prediction `p_i`:
 
 ```text
-фолд 1: обучились на 2–5, проверились на 1
-фолд 2: обучились на 1,3–5, проверились на 2
-...
-фолд 5: обучились на 1–4, проверились на 5
+APE_i = |y_i - p_i| / y_i
+MAPE  = (1 / n) × Σ_i APE_i × 100%
 ```
 
-Каждая строка проверяется моделью, которая её не видела.
+MAPE is intuitive but gives a fixed tenge error more weight on cheap vehicles.
+That is why price-segment metrics and median APE are always reported.
 
-## Out-of-time проверка
-
-Продукт будет предсказывать будущие объявления, поэтому самые новые 20% строк
-отделяются как временной holdout:
+### Median APE
 
 ```text
-старые 80% → обучение
-новые 20%  → финальная временная проверка
+Median APE = median(APE_1, ..., APE_n) × 100%
 ```
 
-Перезаливы также не должны пересекать границу.
+The median describes a typical listing and is resistant to a small number of
+large errors. A model can improve MAPE while leaving median APE unchanged if it
+mainly fixes the tail.
 
-Это строже случайного split: рынок, состав марок и цены успевают измениться.
-
----
-
-## Как проверяется качество
-
-## MAPE
-
-Средняя абсолютная процентная ошибка:
+### MAE
 
 ```text
-MAPE = mean(|prediction - actual| / actual) × 100%
+MAE = (1 / n) × Σ_i |y_i - p_i|
 ```
 
-Пример:
+MAE in tenge answers an important business question but naturally emphasizes
+expensive vehicles. It complements rather than replaces MAPE.
+
+### R-squared on log price
 
 ```text
-факт = 10 млн
-прогноз = 8 млн
-ошибка = |8 - 10| / 10 = 20%
+R² = 1 - Σ_i (z_i - z_hat_i)² / Σ_i (z_i - mean(z))²
 ```
 
-MAPE 22,9% означает среднюю относительную ошибку около 22,9%. Это не означает,
-что каждое предсказание находится ровно в пределах 22,9%.
+where `z = log(price)`. The current value is approximately 0.935. R-squared is
+useful for fit diagnostics but less direct for seller-facing error.
 
-## MAE
+## Confidence intervals
 
-Средняя абсолютная ошибка в тенге:
+Rows are not independent within a relist group. Bootstrap resampling therefore
+samples groups, not individual rows. Paired comparisons resample the same groups
+for both models and compute the MAPE difference. A change is treated as
+supported only when the confidence interval excludes zero in the intended
+direction.
 
-```text
-MAE = mean(|prediction - actual|)
-```
+## Prediction ranges
 
-Текущий MAE около 2,85 млн ₸. На эту метрику сильно влияют дорогие машины.
+The interval module calibrates absolute residuals on out-of-fold predictions.
+The default target is roughly 80% coverage. Group-specific adjustments use
+predicted price bands, because actual price is unavailable at inference.
 
-## R² на логарифме цены
+Calibration answers a repeated-sample question: approximately what fraction of
+similar held-out listing prices fell inside intervals produced by this method?
+It does not create a probability guarantee for one transaction.
 
-R² показывает, какую долю изменчивости target объясняет модель:
+## Residual anomaly detector
 
-```text
-R² = 1 - ошибка модели / ошибка константного прогноза
-```
+A lower quantile model estimates how low a price can plausibly be for the
+vehicle. Listings below the calibrated floor enter manual review unless their
+low price is explained by explicit damage or another valid reason. The detector
+is not a fraud classifier.
 
-- `1` — идеальное совпадение;
-- `0` — не лучше постоянного среднего;
-- меньше `0` — хуже постоянного среднего.
+## Where the remaining error lives
 
-В проекте R² считается для `log(price)`, поэтому его нельзя напрямую читать как
-«91,1% машин угадано».
+Below-5M vehicles have 29.01% MAPE versus 16.07% above that threshold. The
+21+-year, below-5M intersection alone contributes about 41.1% of total
+percentage error. Repeated same-source data growth has reached a plateau.
 
-## Квантильный ценовой пол
-
-Обычная модель предсказывает центральную цену. Residual-детектор обучается на
-нижний квантиль `alpha = 0.10`.
-
-Идея:
-
-```text
-примерно 10% нормальных цен могут быть ниже пола
-существенный провал ниже пола → кандидат на ручную проверку
-```
-
-CatBoost не обязан идеально соблюдать 10%, поэтому пол калибруется по
-out-of-fold остаткам:
-
-```text
-offset = 10-й перцентиль(actual_log_price - raw_floor_log)
-calibrated_floor = raw_floor_log + offset
-```
-
-На текущем срезе доля ниже калиброванного пола равна 10%.
-
-Это калибровка статистического порога, а не precision fraud-детектора.
-
-## Precision, recall и F1 антифрода
-
-После ручной разметки получаются четыре случая:
-
-| | Детектор пометил | Детектор не пометил |
-|---|---:|---:|
-| Реально fraud | TP | FN |
-| Реально legit | FP | TN |
-
-```text
-precision = TP / (TP + FP)
-recall    = TP / (TP + FN)
-F1        = 2 × precision × recall / (precision + recall)
-```
-
-- precision: насколько редко детектор поднимает ложную тревогу;
-- recall: сколько реального fraud он не пропустил;
-- F1: компромисс между ними.
-
-Пока однозначных ручных вердиктов недостаточно, эти показатели честно
-выводятся как неизвестные.
-
----
+The modelling roadmap therefore focuses on condition evidence and coverage,
+not arbitrary hyperparameter tuning or unsupported feature expansion.

@@ -1,298 +1,150 @@
-# Рыночные аномалии и очистка данных
+# Market anomalies and data cleaning
 
-Как из сырой страницы получается проверяемая таблица, по каким правилам
-объявление становится подозрительным, и почему честно битая машина
-подозрительной быть не должна.
+## The core definition
 
-Главное, что стоит понять с самого начала: **fraud здесь — это обман, а не
-плохая машина.** Честно проданный хлам, у которого аварийность видна из
-текста и бейджа, — легитимное объявление. Завышенная цена — плохая сделка,
-а не мошенничество.
+In this project, **fraud means deception**, not an unattractive or damaged
+vehicle. An honestly described wreck at a low price is a legitimate listing.
+An unusually high price can be a poor deal without being fraud.
 
-Читать после [README](../README.md). Соседние документы:
-[архитектура](ARCHITECTURE.md), [модель цены](MODELLING.md).
+The anomaly system therefore does not auto-ban sellers. It protects the price
+training set and creates a human-review queue.
 
----
+## Cleaning and screening flow
 
-## Как работают очистка и anomaly screening
+### 1. Normalize types
 
-## 1. Нормализация типов
+Prices, mileage, years, engine displacement, counts, and Boolean indicators are
+converted explicitly. Impossible values are rejected or marked missing. Model
+categories remain in their original marketplace vocabulary because those exact
+values define the trained feature space.
 
-Строки `"2019"`, число `2019` и значение `"2019 "` должны стать одним и тем же
-годом. Пробелы удаляются, числовые поля преобразуются в числа.
+### 2. Preserve missingness
 
-Возраст рассчитывается так:
+A missing value is not silently converted to a plausible zero. Dedicated flags
+such as `mileage_missing` let the model distinguish unknown mileage from a real
+zero. Enrichment absence is treated carefully because it may reflect queue
+selection rather than seller behavior.
 
-```text
-age = текущий год - год выпуска + 1
-```
+### 3. Apply deterministic rules
 
-`+1` нужен, чтобы машина текущего года имела возраст 1, а не 0. Иначе выражение
-`пробег / возраст` делилось бы на ноль.
+Current rules identify candidates such as:
 
-## 2. Пропуск — тоже информация
+- price far below a make/model/year reference;
+- a recent vehicle at an implausibly low price;
+- a used vehicle recorded with zero mileage;
+- possible relisting with conflicting attributes;
+- an exact photo reused across different vehicles;
+- low price combined with urgency language.
 
-Для пробега создаётся дополнительный признак:
+These are candidate-generating signals, not final verdicts.
 
-```text
-is_mileage_missing = 1, если пробег не указан
-is_mileage_missing = 0, если пробег указан
-```
+### 4. Work in log-price space
 
-Причина: продавцы старых машин могут скрывать большой пробег неслучайно. Такое
-отсутствие значения называется MNAR — Missing Not At Random.
+Vehicle prices span a wide range. The model and many residual checks use
+`log(price)` so that a multiplicative discrepancy has similar meaning across
+cheap and expensive segments.
 
-## 3. Жёсткие правила
+### 5. Use robust deviation
 
-Примеры:
-
-- год слишком старый или из будущего;
-- цена ниже физически разумного минимума;
-- пробег больше 1 млн км;
-- подержанная машина имеет нулевой пробег;
-- пробег в пересчёте на год нереалистично велик;
-- очень молодая подержанная машина стоит подозрительно мало.
-
-Каждый флаг имеет текстовую причину. Одна колонка `is_suspicious=1` без
-объяснения была бы неудобна для проверки.
-
-## 4. Почему цена логарифмируется
-
-Цены имеют длинный правый хвост: большинство машин стоят относительно
-недорого, но есть автомобили за десятки и сотни миллионов.
-
-Используется:
+For a value `x`, median `m`, and median absolute deviation `MAD`, the modified
+z-score is:
 
 ```text
-log_price = ln(price_tenge)
+z = 0.6745 × (x - m) / MAD
 ```
 
-В логарифмах важна относительная, а не абсолютная разница:
+Median-based scale is less sensitive to extreme advertisements than mean and
+standard deviation. It helps rank unusual prices within comparable groups.
 
-```text
-рост с 2 до 4 млн = цена выросла в 2 раза
-рост с 20 до 40 млн = цена тоже выросла в 2 раза
+### 6. Parse damage text with negation
+
+Damage keywords are not matched blindly. Phrases that deny damage must not be
+treated the same as a positive disclosure. The parser retains original market
+text because translating source evidence could change negation and meaning.
+
+### 7. Exculpate explained low prices
+
+A low price is less suspicious when seller text, photos, or a site badge clearly
+discloses crash damage, a non-running vehicle, missing components, corrosion, or
+an instalment down payment. Enrichment exists partly to collect this context.
+
+The exculpation layer is applied to both rule and model candidates. A previous
+bug cleared rule alerts but left an explained listing flagged by the residual
+detector; tests now enforce consistent behavior.
+
+### 8. Group relists
+
+The same physical vehicle may reappear under a new ad ID. Grouping uses vehicle
+attributes and text evidence but deliberately excludes price, because price
+changes are often the phenomenon under investigation. Entire groups stay in one
+validation fold.
+
+### 9. Detect exact photo reuse
+
+Perceptual hashes identify exact or effectively exact photo copies. The current
+production threshold is Hamming distance zero: looser thresholds created false
+pairs among common dealer-style studio images. Photo reuse is evidence for
+review, not proof of deception.
+
+### 10. Build the final candidate flag
+
+The clean layer combines rules, unexplained residuals, relist/photo evidence,
+and any existing manual verdict. A final human `legit` verdict must remain valid
+even if a row is still unusual numerically.
+
+## Human review protocol
+
+Run the single local application:
+
+```bash
+python -m kz.web
 ```
 
-Для модели эти два изменения становятся сопоставимыми.
+Open `http://127.0.0.1:8000/label`. The queue combines:
 
-## 5. Модифицированный z-score
+- `rule_positive`: deterministic flags;
+- `residual_candidate`: prices unexpectedly low for the model;
+- `random_control`: unflagged rows required to estimate misses.
 
-Объявление сравнивается не со всеми машинами сразу, а с максимально похожей
-достаточно большой группой:
+Verdicts:
 
-1. марка + модель + возрастная корзина;
-2. если данных мало — марка + возрастная корзина;
-3. если снова мало — возрастная корзина.
-
-Минимальный размер группы — 8.
-
-Формула:
-
-```text
-modified_z = 0.6745 × (x - median) / MAD
-
-x      = log-цена объявления
-median = медианная log-цена группы
-MAD    = median(|x - median|)
-```
-
-Почему медиана и MAD, а не среднее и стандартное отклонение:
-
-- один очень дорогой автомобиль сильно двигает среднее;
-- медиана устойчива к отдельным выбросам;
-- обычный z-score может «спрятать» выброс, раздув стандартное отклонение.
-
-Правило проекта:
-
-```text
-modified_z < -3.5 → подозрительно дёшево
-modified_z > +3.5 → необычно дорого, но не обязательно fraud
-```
-
-Дорогая машина получает информационную пометку. Завышенная цена — плохая
-сделка, но не обман.
-
-## 6. Поиск повреждений с отрицаниями
-
-Наивный поиск слова `гнил` ошибочно считает фразу «нет никаких гнилей»
-признанием повреждения.
-
-`kz/transform/damage.py` проверяет небольшое окно слов до и после совпадения:
-
-```text
-«кузов гнилой»             → повреждение
-«нет никаких гнилей»       → не повреждение
-«требует вложений»         → повреждение
-«вложений не требует»      → не повреждение
-```
-
-Это не полноценная языковая модель, а прозрачная эвристика, которую можно
-проверить тестами.
-
-## 7. Exculpation — объяснение честно низкой цены
-
-Низкая цена снимается с подозрения, если есть наблюдаемое объяснение:
-
-- машина аварийная;
-- машина не на ходу;
-- машина заложена;
-- машина не растаможена;
-- в тексте раскрыты серьёзные повреждения;
-- это явная дилерская финансовая цена;
-- ручной вердикт человека — `legit`;
-- цена близка к независимой проверочной оценке источника.
-
-Важно:
-
-> Честно проданная битая машина — плохая машина, но не fraud.
-
-## 8. Перезаливы
-
-Совпадение `title + year + price` ещё не означает дубликат: у популярных машин
-часто одинаковые круглые цены.
-
-Для сильного флага нужен второй фактор:
-
-- одинаковый существенный пробег; или
-- одинаковое непустое описание.
-
-Разный базовый цвет отменяет подтверждение. Большая группа одинаковых новых
-машин может быть дилерским складом, а не перезаливом.
-
-## 9. Повторное использование фотографий
-
-Perceptual hash превращает изображение в короткий отпечаток. Расстояние Хэмминга
-считает, в скольких битах отличаются два отпечатка:
-
-```text
-hamming = 0  → отпечатки одинаковы
-hamming мал  → изображения визуально похожи
-hamming велик → изображения разные
-```
-
-Кандидаты дополнительно проверяются по модели, году и цене. Одинаковая
-пресс-фотография у двух новых дилерских машин не должна автоматически считаться
-кражей.
-
-## 10. Финальный флаг
-
-Причины объединяются:
-
-```text
-suspicion_reasons =
-    hard_rules
-    + statistical_rules
-    + duplicate_rules
-    + photo_rules
-
-is_suspicious = 1, если список причин не пуст
-```
-
-Строки не удаляются. Флаг можно проверить, исправить и пересчитать.
-
----
-
-## Как размечать антифрод
-
-## Что именно размечается
-
-После `kz/report/explore.py` создаётся:
-
-```text
-data/eda/labeling_queue.csv
-```
-
-В ней три слоя:
-
-| `sampling_stratum` | Зачем нужен |
+| Verdict | Meaning |
 |---|---|
-| `rule_positive` | измерить precision правил |
-| `residual_candidate` | проверить новые модельные подозрения |
-| `random_control` | найти fraud, который пропустили оба детектора |
+| `fraud` | Evidence supports deliberate deception or bait |
+| `legit` | The listing is unusual but honestly explained or ordinary |
+| `unknown` | Evidence is insufficient for a defensible decision |
 
-Без `random_control` нельзя честно оценивать false negatives и recall.
+The journal at `data/manual_labels.csv` is manual ground truth. It is never
+recreated from a queue, never deleted as a whole, and is written atomically.
+Repeated review updates the existing row.
 
-## Значения verdict
+## Why random controls matter
 
-- `fraud` — есть признаки обмана;
-- `legit` — объявление честно раскрывает состояние и цену;
-- `unknown` — информации недостаточно.
+Reviewing only flagged rows estimates precision but cannot estimate recall.
+Random controls reveal fraud the detector did not flag.
 
-Плохая машина не равна fraud:
-
-```text
-битая машина + продавец честно написал «после ДТП» → legit
-нормальная машина + чужое фото/цена-приманка → возможно fraud
-просто дорогое объявление → не fraud
-```
-
-## Рекомендуемый способ: офлайн-карточки
-
-```bash
-python -m kz.report.label_cards           # → data/eda/label_cards.html
-python -m kz.report.label_cards --all     # включить и residual-кандидатов из очереди
-```
-
-Откройте получившийся HTML в браузере. На каждое подозрительное объявление в
-карточке есть всё, что нужно для решения: галерея всех фото, полный текст,
-цена рядом со средней ценой kolesa, цвет, пробег, растаможка, damage-слова,
-бейдж сайта, и подсказка «как решать fraud/legit» именно для тех флагов,
-которые сработали. Кнопки собирают готовые строки для журнала — их остаётся
-скопировать и **дописать** в конец `data/manual_labels.csv`.
-
-Карточки решают две реальные проблемы, из-за которых разметка стояла.
-
-**Первая: у архивных и удалённых объявлений страницы больше нет.** Смотреть
-состояние машины было негде. Но фотографии лежат на CDN `kcdn.kz`, а это
-другой хост, и они переживают смерть страницы: у `archived` и даже у
-`deleted` объявлений картинки отдаются с кодом 200 (проверено HEAD-запросом).
-Всё остальное уже хранится в базе. Поэтому карточка собирается локально.
-
-**Вторая: ручное листание kolesa.kz тратит тот же лимит, что и джобы.**
-Запросы идут с того же IP, но в суточный счётчик `kz/ops/catch_up.py` не попадают.
-Именно смесь автоматических джобов и ручного браузинга привела к временной
-блокировке IP 2026-07-23. Открытие карточек не делает ни одного запроса к
-`kolesa.kz` — грузятся только картинки с CDN. Разметка стала бесплатной с
-точки зрения лимита.
-
-Единственное исключение — ссылка «открыть на kolesa» в карточке живого
-объявления. Она помечена прямо в интерфейсе, потому что тратит лимит.
-
-## Ручной способ: работа с очередью в таблице
-
-1. Откройте `data/eda/labeling_queue.csv`.
-2. Заполните `verdict` и при необходимости `comment`.
-3. Перенесите **только заполненные строки** в `data/manual_labels.csv`.
-4. Если `manual_labels.csv` уже существует, только дописывайте новые строки.
-5. Никогда не заменяйте журнал новой очередью целиком.
-6. Пересоберите clean-слой:
-
-```bash
-python -m kz.transform.clean
-python -m kz.report.explore
-python -m kz.report.evaluate_detector
-```
-
-Почему очередь и журнал — разные файлы:
-
-- очередь временная и пересоздаётся;
-- журнал постоянный и хранит человеческие решения;
-- объявление может исчезнуть из новой очереди, но его старый вердикт остаётся
-  полезным.
-
-## Взвешенные метрики
-
-Очередь хранит размер каждого слоя и размер выборки. Когда строки переносятся
-в журнал вместе с этими колонками, `kz/report/evaluate_detector.py` может рассчитать
-population estimate через inverse-probability weights:
+With weighted sampling, population metrics must use stratum weights. If stratum
+`h` has population size `N_h`, reviewed sample size `n_h`, and `y_i` is a fraud
+indicator, the estimated population total is:
 
 ```text
-weight = stratum_population / stratum_sample_size
+T_hat = Σ_h (N_h / n_h) × Σ_{i in h} y_i
 ```
 
-Так один случайно проверенный контроль может представлять больше строк
-населения, чем один `rule_positive`, потому что положительные проверяются почти
-все, а контроль — выборочно.
+The project stores sampling stratum in the durable journal because a rebuilt
+queue intentionally removes completed work. Losing the stratum would make the
+control sample unusable for unbiased evaluation.
 
----
+## Current evidence
+
+The labelled anomaly sample currently contains no confirmed fraud. That does
+not prove the market has none. A random sample of 65 controls with zero observed
+fraud gives a one-sided 95% upper prevalence bound of roughly 4.6% by the rule
+of three (`3 / n`). The correct conclusion is limited: no fraud was found in
+that sample, and larger review coverage is required for a tighter bound.
+
+## Safety boundary
+
+The public demo disables `/label`, `/damage`, `/verdict`, and photo-label writes.
+Anonymous access to these routes would allow anyone to corrupt the project's
+only ground truth. UI tests must use `KZ_LABELS_DIR` with a scratch directory.

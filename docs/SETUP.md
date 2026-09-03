@@ -1,615 +1,275 @@
-# Установка и работа
+# Installation and operation
 
-От пустого каталога до первой оценки цены: что поставить, что запустить, в
-каком порядке и что делать, когда сломалось.
+## Requirements
 
-Разворачивание сервиса наружу — отдельно, в [DEPLOY.md](DEPLOY.md).
+- Git
+- Python 3.13.x
+- Docker Desktop with Compose
+- approximately 4 GB of free disk space for the standard environment
+- more space only if the optional photo/CV dependencies are installed
 
----
+The dependency pins are tied to Python 3.13. Do not substitute another Python
+version and assume metrics remain reproducible.
 
-## Установка с нуля
-
-Инструкция ниже рассчитана на macOS или Linux. В Windows удобнее использовать
-WSL2.
-
-## Шаг 0. Установить внешние программы
-
-Нужны:
-
-- Git;
-- Python 3.13.x — точная поддерживаемая ветка;
-- Docker Desktop с запущенным Docker Engine.
-
-Проверка:
-
-```bash
-git --version
-python --version
-docker --version
-docker compose version
-```
-
-Если какая-либо команда не найдена, сначала установите соответствующую
-программу.
-
-## Шаг 1. Скачать проект
+## Install from scratch
 
 ```bash
 git clone https://github.com/etozhegatito/kz-auto-market-intelligence.git
 cd kz-auto-market-intelligence
-```
 
-Проверка:
-
-```bash
-pwd
-ls
-```
-
-В выводе должны быть `README.md`, `requirements.txt`, `docker-compose.yaml` и
-Python-файлы проекта.
-
-## Шаг 2. Создать отдельное Python-окружение
-
-```bash
-python -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
-```
-
-После активации в начале строки терминала обычно появляется `(.venv)`.
-
-Проверка:
-
-```bash
-which python
-```
-
-Путь должен вести внутрь папки проекта:
-
-```text
-.../kz-auto-market-intelligence/.venv/bin/python
-```
-
-Перед каждой новой сессией терминала окружение нужно активировать снова:
-
-```bash
-source .venv/bin/activate
-```
-
-## Шаг 3. Установить Python-зависимости
-
-```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
 
-Chromium нужен только разрешённому сетевому сборщику:
-
-```bash
-playwright install chromium
-```
-
-Для тестов и полностью офлайн-анализа браузер не открывается.
-
-## Шаг 4. Создать локальный конфиг
-
-```bash
 cp .env.example .env
-```
-
-Откройте `.env` и замените `change-me` на собственный локальный пароль:
-
-```dotenv
-POSTGRES_USER=admin
-POSTGRES_PASSWORD=your-local-password
-POSTGRES_DB=market_db
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-```
-
-Файл `.env` находится в `.gitignore`. Его нельзя публиковать.
-
-## Шаг 5. Запустить PostgreSQL
-
-Убедитесь, что Docker Desktop работает, затем:
-
-```bash
 docker compose up -d
 ```
 
-Проверка:
+Edit `.env` before using the database outside a local development machine.
+Never commit it. PostgreSQL applies `sql/init/01_schema.sql` automatically on a
+new Docker volume.
+
+Verify the installation:
 
 ```bash
-docker ps
-```
-
-Нужен контейнер:
-
-```text
-market_db_container
-```
-
-При первом старте на пустом Docker volume PostgreSQL выполняет
-`sql/init/01_schema.sql` и создаёт raw-таблицы.
-
-## Шаг 6. Запустить тесты
-
-```bash
+source .venv/bin/activate
 python -m pytest tests/ -q
+ruff check kz/ tests/ airflow/
+python -m kz.ops.pipeline_status
 ```
 
-Ожидаемый результат:
+Database integration tests refuse to run against a database whose name does not
+contain `test`. This prevents a test fixture from truncating production data.
 
-```text
-`95 passed`
-```
+## Quick evaluation for a reviewer
 
-Эти тесты не доказывают качество модели. Они доказывают, что известные
-инженерные ошибки не вернулись:
+The fastest route requires no local installation: open the
+[live estimator](https://kz-auto-market-intelligence.onrender.com/estimate).
+The free service may take about a minute to wake after inactivity.
 
-- отрицания в damage-тексте;
-- ложные перезаливы;
-- ошибки CSV/PostgreSQL типов;
-- неправильная калибровка;
-- leakage дублей между фолдами;
-- несовпадение train/inference схемы;
-- ошибки очереди разметки;
-- неправильная матрица ошибок.
-
----
-
-## Что делать после установки
-
-Выберите свой сценарий.
-
-## Сценарий A. Я проверяю проект как рекрутер или Data Scientist
-
-Без данных можно:
+For a local code review:
 
 ```bash
-python -m pytest tests/ -q
+source .venv/bin/activate
+python -m pytest tests/test_pipeline.py -q
+ruff check kz/ tests/ airflow/
+python -m kz.web
 ```
 
-Затем изучить:
+Open `http://127.0.0.1:8000`. A public clone contains trained demo artifacts but
+not raw marketplace data or the private operational database.
 
-- этот README;
-- [MODEL_CARD.md](MODEL_CARD.md);
-- `tests/test_pipeline.py`;
-- `kz/ml/train_price_model.py`;
-- `kz/transform/clean.py`;
-- `kz/ops/run_all.py`;
-- SQL-схему `sql/init/01_schema.sql`.
+## Main commands
 
-Нельзя воспроизвести опубликованные метрики без обучающего среза. Данные
-исключены из Git намеренно.
-
-## Сценарий B. У меня есть собственные CSV совместимой схемы
-
-Положите доступные файлы по ожидаемым путям:
-
-```text
-data/raw/raw_data.csv
-data/raw/sightings.csv
-data/raw/photos.csv
-data/raw/ad_status.csv
-data/enriched/enriched.csv
-data/enriched/photo_hashes.csv
-```
-
-Необязательные файлы можно пропустить. Затем:
+Only four commands are needed for normal work:
 
 ```bash
-python -m kz.ops.migrate_to_postgres
-python -m kz.transform.clean
-python -m kz.report.explore
-python -m kz.ml.train_price_model
-python -m kz.ml.residual_detector
-python -m kz.report.ml_dashboard
-python -m kz.report.ml_report
+python -m kz.web
+python -m kz.ops.run_all --collect
+python -m kz.ops.run_all --ml
+python -m kz.ops.pipeline_status
 ```
 
-Что должно появиться:
+### `python -m kz.web`
 
-```text
-PostgreSQL: clean_data
-data/clean/clean_data.csv
-data/models/price_model.cbm
-data/models/price_cheap_specialist.cbm
-data/models/price_model.metadata.json
-data/models/price_floor.cbm
-data/models/price_floor.metadata.json
-data/eda/dashboard.png
-data/eda/ml_dashboard.png
-data/eda/ml_report.html
-data/eda/labeling_queue.csv
-```
+Starts the single local application:
 
-## Сценарий C. PostgreSQL уже заполнен
+- `/estimate`: price estimate and explanation;
+- `/label`: market-anomaly verdicts;
+- `/damage`: photo labels and bounding boxes;
+- `/api/docs`: OpenAPI documentation;
+- `/api/health`: loaded-model metadata.
 
-Полный офлайн-пересчёт:
+Manual UI tests must use a scratch journal:
 
 ```bash
-python -m kz.ops.run_all --fast
+KZ_LABELS_DIR=/tmp/kz-label-test python -m kz.web
 ```
 
-Он выполняет:
+Never delete a whole file under `data/` to clean up a test.
 
-```text
-clean.py → explore.py
-```
+### `python -m kz.ops.run_all --collect`
 
-После этого модели обучаются отдельно:
+Runs the only coordinated network path. It uses a shared rolling 24-hour
+request budget across parser, status, enrichment, and related jobs. The parser
+stops on HTTP 429, repeated failures, exhausted budget, or schema-health errors.
 
-```bash
-python -m kz.ml.train_price_model
-python -m kz.ml.residual_detector
-python -m kz.report.ml_dashboard
-python -m kz.report.ml_report
-```
+Network collection is not required to review or run the public estimator. Use
+it only when access is permitted. Do not use VPNs, proxies, mobile tethering,
+or IP rotation to evade restrictions.
 
-`--fast` не делает сетевых запросов. Он всё равно требует заполненные raw-таблицы
-PostgreSQL.
-
-## Сценарий D. У меня есть письменное разрешение на сетевой сбор
-
-Только в этом случае доступны сетевые режимы:
-
-```bash
-python -m kz.ops.run_all
-```
-
-Порядок:
-
-```text
-parser
-→ check_status
-→ clean, проход 1
-→ enrich и photo_dedup
-→ clean, проход 2
-→ explore
-```
-
-Облегчённый режим:
-
-```bash
-python -m kz.ops.run_all --light
-```
-
-Он собирает листинг и выполняет офлайн-пересборку, но пропускает тяжёлые
-per-ad задачи.
-
-Для быстрой проверки живой разметки без полного сбора есть микро-лимит:
+Useful controlled variants:
 
 ```bash
 KOLESA_MAX_CARDS=10 python -m kz.ops.run_all --light
+KOLESA_START_PAGE=1 KOLESA_MAX_PAGES=3 python -m kz.ops.run_all --light
+python -m kz.ops.catch_up --run --values --budget 20
+python -m kz.ops.catch_up --run --values --until-done --budget 100
 ```
 
-Parser проверит полную первую страницу, но обработает максимум десять
-карточек и остановит все остальные ценовые сегменты. Обычно это два запроса
-к Kolesa: прогрев и одна страница. В `logs/parser_last_run.json` сохраняются
-`cards_processed: 10` и `card_limit_reached: true`. Лимит считает все
-обработанные карточки, поэтому новых объявлений среди них может быть меньше
-десяти — это тест парсера, а не обещание десяти новых строк.
+`--light` runs only the budgeted listing parser. `--collect` coordinates the
+complete collection chain. Request budgets are rolling windows, not values that
+reset at midnight.
 
-`kz/ops/catch_up.py` показывает и дозаполняет пробелы:
+### `python -m kz.ops.run_all --ml`
+
+Runs the deterministic offline chain:
+
+1. rebuild the clean layer;
+2. monitor drift against the previous training reference;
+3. train general and specialist price models;
+4. save grouped and temporal OOF predictions;
+5. compute grouped-bootstrap stability and segment metrics;
+6. calibrate price intervals;
+7. build residual anomaly candidates;
+8. generate reports and survival diagnostics.
+
+Do not interrupt artifact publication halfway through. Compare new metadata
+with `docs/MODEL_CARD.md` before accepting a dependency or feature change.
+
+### `python -m kz.ops.pipeline_status`
+
+Shows data freshness, useful enrichment coverage, queue backlogs, request
+budget usage, latest parser status, model age, and missing artifacts. Run it
+before deciding whether the next step is collection, enrichment, labelling, or
+offline retraining.
+
+## Optional photo research environment
+
+Photo experiments require larger dependencies:
 
 ```bash
-python -m kz.ops.catch_up
-python -m kz.ops.catch_up --run
-python -m kz.ops.catch_up --run --values
-python -m kz.ops.catch_up --run --backfill
-python -m kz.ops.catch_up --run --until-done
+pip install -r requirements-photos.txt
+python -m kz.ml.photo_clip --validate
+python -m kz.ml.photo_damage
+python -m kz.ml.photo_dataset
 ```
 
-Ограничения частоты и circuit breaker защищают инфраструктуру от случайного
-бесконечного цикла. Они не являются разрешением на сбор.
+The CV workflow should ideally use a separate environment from the pinned
+tabular production stack. Current supervised results are quarantined until
+legacy labels are visually reviewed.
 
-## Сколько запросов делать за скользящие 24 часа
-
-Главная защита от блокировки — не длина пауз, а **объём за последние 24 часа**
-с одного IP. Поэтому у `kz/ops/catch_up.py` есть настраиваемый потолок:
-
-```bash
-python -m kz.ops.catch_up --run --backfill --budget 300
-```
-
-Порядок приоритета: `--budget N`, затем переменная окружения
-`KOLESA_BUDGET`, затем значение по умолчанию 200. При запуске без `--run`
-печатается таблица зон и оценка времени.
-
-| Запросов к kolesa за 24 часа | Зона | На чём основано |
-|---|---|---|
-| до 100 | спокойно | гонялось многократно, последствий не было |
-| до 200 | безопасно (по умолчанию) | рабочая зона, блокировок не наблюдали |
-| до 270 | риск | подходит к зафиксированной блокировке |
-| больше 270 | высокий риск | выше уже случившейся блокировки |
-
-Границы взяты не из статей, а из собственного опыта проекта: 2026-07-23
-домашний IP получил временную блокировку примерно на 270 запросах за сутки.
-Счётчик скользящий: запрос в 23:50 не исчезает в 00:00, а выходит из квоты
-ровно через 24 часа. Календарные суммы сохраняются рядом только для аудита.
-Это то же правило, что и для порогов детектора — калибровать на своих данных.
-
-Счётчик атомарно делят `parser.py` и все сетевые джобы `catch_up.py`, включая
-запуск через `run_all.py`. Он не может увидеть только ручное листание сайта
-в обычном браузере — его по-прежнему нельзя складывать с большим прогоном.
-
-## Ритм запросов
-
-Все джобы, обращающиеся к kolesa.kz, используют общий модуль `kz/core/pacing.py`:
-
-- базовая пауза 4–8 секунд между запросами;
-- изредка затяжная пауза вместо базовой;
-- каждые 15 запросов длинный перерыв на 30–90 секунд.
-
-Пауза никогда не бывает короче нижней границы диапазона, то есть запросов в
-час становится **меньше**, чем при равномерных паузах. Это снижение нагрузки
-на сайт, а не маскировка: user-agent, отпечаток браузера и IP не подделываются.
-Прогон при этом занимает примерно в полтора раза больше времени, и оценка
-времени в `kz/ops/catch_up.py` учитывает это честно.
-
----
-
-## Как получить прогноз для своей машины
-
-Сначала должен существовать обученный артефакт:
-
-```bash
-python -m kz.ml.train_price_model
-```
-
-Для демонстрации на случайной строке базы:
-
-```bash
-python -m kz.ml.predict_price
-```
-
-Для своей машины запустите интерактивный Python:
-
-```bash
-python
-```
-
-Затем:
+## Run an estimate from Python
 
 ```python
-from kz.ml.train_price_model import load_artifact
-from kz.ml.predict_price import estimate
+from kz.web.service import full_estimate
 
-model, metadata = load_artifact()
-
-price = estimate(
-    model,
-    brand="Toyota",
-    model="Camry",
-    year=2019,
-    engine_volume=2.5,
-    mileage_km=90_000,
-    engine_type="бензин",
-    transmission="автомат",
-    body_type="седан",
-    condition="б/у",
+result = full_estimate(
+    {
+        "brand": "Toyota",
+        "model": "Camry",
+        "age": 8,
+        "mileage_km": 95_000,
+        "engine_volume": 2.5,
+        "engine_type": "бензин",
+        "transmission": "автомат",
+        "body_type": "седан",
+        "condition": "б/у",
+        "photos_count": 8,
+    },
+    asking_price=11_000_000,
+    text="One owner, regularly maintained, service records available.",
 )
-
-print(f"{price:,.0f} ₸")
+print(result["fair_price"], result["range_low"], result["range_high"])
 ```
 
-Чтобы выйти из Python:
+The category values above intentionally match the source-market vocabulary used
+by the trained artifact. The web interface displays English labels and submits
+these internal values automatically.
 
-```python
-exit()
-```
-
-Если часть характеристик неизвестна, её можно не указывать. Но чем меньше
-информации, тем менее индивидуальным будет прогноз.
-
----
-
-## Команды и создаваемые файлы
-
-## Четыре команды — это всё, что нужно помнить
+## Public Docker image
 
 ```bash
-docker compose up -d                        # поднять базу, один раз за сеанс
-
-python -m kz.ops.run_all --collect          # собрать данные (сеть)
-python -m kz.web                            # оценка, /label и /damage
-python -m kz.ops.run_all --ml               # пересчитать всё после разметки
+docker build -t kz-auto-market-intelligence .
+docker run --rm -p 8000:8000 \
+  -e KZ_PUBLIC_DEMO=1 \
+  kz-auto-market-intelligence
+curl -s http://127.0.0.1:8000/api/health
 ```
 
-Обычный день выглядит так: собрал → разметил → пересчитал → посмотрел
-`data/eda/ml_report.html`. Всё остальное ниже — внутренние шаги, которые
-оркестратор вызывает сам; по одному их запускают только при отладке.
+Public mode has no PostgreSQL dependency and disables all human-label mutation
+routes. See [DEPLOY.md](DEPLOY.md) for the complete boundary.
 
-## Что делает `--collect`
+## Generated outputs
 
-Единственный безопасный путь в сеть. Внутри:
-
-```text
-1. parser        свежий листинг: новые объявления и наблюдения цен
-2. catch_up      добор пробелов (статусы, обогащение, фото-хэши) ПОРЦИЯМИ
-                 под скользящим лимитом запросов за 24 часа
-3. photo_fetch   фотографии с CDN — другой хост, своя квота
-4. photo_features признаки из новых снимков
-5. clean → explore → label_cards   офлайн-пересборка
-```
-
-Обогащение здесь обязательно: именно оно приносит полный комментарий
-продавца, цвет, растаможку и бейдж состояния — то, на чём держится снятие
-ложных подозрений.
-
-Полный режим (`run_all` без флагов) теперь является безопасным алиасом
-`--collect`: parser и per-ad джобы делят общий rolling-лимит 24 часа. Прежний прямой
-путь status/enrich вне счётчика удалён после аудита 29 августа.
-
-## Что делает `--ml`
-
-Одиннадцать шагов, около двух минут, сети не касается.
-
-| Шаг | Что делает | Какой метод |
-|---|---|---|
-| 1. `clean` | пересобирает `clean_data`, подхватывает новые вердикты | правила + устойчивая статистика |
-| 2. `explore` | графики и очередь разметки из трёх слоёв | стратифицированная выборка |
-| 3. `label_cards` | карточки под свежий список | — |
-| 4. `monitoring` | не разъехались ли данные со старым артефактом | PSI по каждому признаку |
-| 5. `train_price_model` | обучает общую модель и специалиста <5M | CatBoost на `log(price)`, grouped CV, out-of-time |
-| 6. `residual_detector` | калибрует «ценовой пол» | квантильная регрессия, α=0.10 |
-| 7. `price_interval` | строит продуктовый диапазон цены | grouped conformal calibration |
-| 8. `ml_dashboard` | графики качества | — |
-| 9. `ml_report` | HTML-отчёт | — |
-| 10. `evaluate_detector` | precision/recall антифрода | матрица ошибок, правило трёх |
-| 11. `survival` | сколько объявление живёт на рынке | Каплан-Мейер и модель Кокса |
-
-Порядок задан зависимостями: мониторинг идёт **до** обучения и сравнивает
-данные с предыдущим развёрнутым артефактом. После train такой замер сравнил бы
-текущий срез с самим собой. Графики и HTML читают сохранённые артефакты,
-поэтому обучение и калибровка идут раньше них, а отчёт требует все модели.
-
-**Шаги 4 и 11 — не украшение.** Мониторинг отвечает, можно ли ещё доверять
-модели: рынок меняется, а обученная модель об этом не узнает и будет уверенно
-считать по устаревшим закономерностям. Анализ выживаемости отвечает на
-продуктовый вопрос «за сколько продастся» и использует метод, который умеет
-работать с незавершёнными наблюдениями: большинство объявлений на момент
-замера ещё висит, и обычная регрессия по проданным систематически занижала бы
-срок.
-
-## Куда смотреть результат
-
-| Файл | Что внутри |
+| Path | Purpose |
 |---|---|
-| `data/eda/ml_report.html` | отчёт по модели + подозрительно дешёвые |
-| `data/eda/ml_dashboard.png` | качество, важность признаков, остатки |
-| `data/eda/label_cards.html` | карточки для разметки |
-| `data/models/price_model.metadata.json` | метрики и отпечатки |
-| `data/models/price_cheap_specialist.cbm` | модель для базовых прогнозов ниже 5 млн ₸ |
+| `data/models/price_model.cbm` | General price model |
+| `data/models/price_cheap_specialist.cbm` | Cheap-segment specialist |
+| `data/models/price_model.metadata.json` | Training contract and metrics |
+| `data/eda/price_model_oof.csv` | Saved honest OOF predictions |
+| `data/eda/mape_stability.json` | Bootstrap and segment stability |
+| `data/eda/ml_report.html` | Human-readable ML report |
+| `data/manual_labels.csv` | Durable anomaly verdict journal |
+| `data/photo_labels.csv` | Durable frame and bounding-box journal |
+| `logs/parser_last_run.json` | Structured collection status |
 
-## Редкие команды
+## Troubleshooting
 
-Нужны раз в несколько недель или при разборе проблем.
+### `ModuleNotFoundError`
 
-| Команда | Когда |
-|---|---|
-| `python -m kz.ops.pipeline_status` | посмотреть, что где недозаполнено |
-| `python -m kz.ml.learning_curve` | окупается ли дальнейший сбор данных |
-| `python -m kz.ml.photo_ablation` | помогают ли фотографии предсказывать цену |
-| `python -m kz.ops.db_stats --diff` | сколько строк прибавилось |
-| `python -m kz.report.label_cards --dedupe` | свернуть дубликаты в журнале вердиктов |
-| `python -m kz.ops.migrate_to_postgres` | вернуть данные в базу из CSV |
-| `python -m pytest tests/ -q` | тесты |
-
-## Точечный добор, если нужен именно он
-
-`catch_up` умеет узкие режимы, но в обычной работе его вызывает `--collect`:
-
-```bash
-python -m kz.ops.catch_up --run --values      # только обогащение страниц
-python -m kz.ops.catch_up --run --backfill    # только средняя цена и бейдж
-python -m kz.ops.catch_up --run --budget 300  # свой потолок запросов на сутки
-```
-
----
-
-## Типичные ошибки
-
-## `ModuleNotFoundError`
-
-Причина: виртуальное окружение не активировано.
-
-Решение:
+Activate the project environment:
 
 ```bash
 source .venv/bin/activate
-pip install -r requirements.txt
+which python
+python --version
 ```
 
-## `KeyError: POSTGRES_USER`
+The interpreter should point inside `.venv` and report Python 3.13.
 
-Причина: нет `.env`.
+### Missing PostgreSQL environment variables
 
-Решение:
+Copy `.env.example` to `.env` and fill the values. Model-only public inference
+does not require a database, but collection, cleaning, and comparable listings do.
 
-```bash
-cp .env.example .env
-```
-
-Затем заполните значения.
-
-## `connection refused` или `OperationalError` PostgreSQL
-
-Проверьте Docker:
+### Connection refused / `OperationalError`
 
 ```bash
-docker ps
 docker compose up -d
+docker compose ps
+docker compose logs postgres
 ```
 
-Проверьте, что `POSTGRES_PORT` в `.env` совпадает с портом в
-`docker-compose.yaml`.
+Wait for the health check before retrying.
 
-## `relation "clean_data" does not exist`
+### `relation "clean_data" does not exist`
 
-Raw-таблицы ещё не превращены в clean-слой.
-
-Если база заполнена:
+The schema may exist without derived data. Load compatible source data, then run:
 
 ```bash
 python -m kz.transform.clean
 ```
 
-Если база пустая, сначала загрузите собственные совместимые данные.
+### No trained artifact
 
-## `Нет обученного артефакта`
-
-Решение:
+Run the full offline chain after `clean_data` is populated:
 
 ```bash
-python -m kz.ml.train_price_model
+python -m kz.ops.run_all --ml
 ```
 
-Для HTML-антифрод панели также нужен:
+### Playwright browser executable missing
 
 ```bash
-python -m kz.ml.residual_detector
+python -m playwright install chromium
 ```
 
-## `playwright executable doesn't exist`
+### A container exists but schema changes are absent
 
-Только для разрешённого сетевого режима:
+Docker initialization scripts run only when a volume is first created. Apply a
+targeted migration or create a new disposable development volume; never destroy
+an operational data volume casually.
 
-```bash
-playwright install chromium
-```
+### Metrics differ from the README
 
-## Контейнер есть, но схема не обновилась
+Check `data/models/price_model.metadata.json`, the training timestamp, Git dirty
+flag, data fingerprint, and training row count. README metrics describe the
+published artifact, not every local experimental snapshot.
 
-SQL из `docker-entrypoint-initdb.d` выполняется только при создании пустого
-PostgreSQL volume. Изменение SQL-файла не мигрирует уже существующую базу
-автоматически. Не удаляйте volume с данными без резервной копии.
+### Tests pass but the model is weak
 
-## Метрики отличаются от README
-
-Это нормально, если изменились:
-
-- данные;
-- дата среза;
-- ручные вердикты;
-- признаки;
-- версия кода.
-
-Истина конкретного запуска находится в:
-
-```text
-data/models/price_model.metadata.json
-```
-
-## Тесты прошли, но модель плохая
-
-Unit-тесты проверяют код, а не бизнес-качество. Качество проверяется отдельно:
-
-- grouped CV;
-- baseline;
-- out-of-time holdout;
-- сегментные метрики;
-- ручной review рыночных аномалий.
-
----
+Tests verify software invariants, leakage controls, and failure handling. They
+cannot manufacture missing condition signal or guarantee a lower MAPE. Model
+quality must be measured separately on saved OOF and temporal predictions.

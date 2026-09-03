@@ -1,7 +1,5 @@
 # KZ Auto Market Intelligence
 
-**English** | [Русский](README_RU.md)
-
 An end-to-end data and machine-learning system for the Almaty used-car
 market: collection, data quality, duplicate-safe validation, price estimation,
 market-anomaly review, and experimental visual-condition analysis.
@@ -256,6 +254,10 @@ deploy/models/ production demo artifacts only; no source marketplace rows
 docs/          architecture, findings, setup, model card, and deployment
 ```
 
+Public interfaces and documentation use English. Original Kolesa category
+tokens remain internal where the parser and trained model require exact source
+vocabulary; see the [language policy](docs/LANGUAGE_POLICY.md).
+
 ## Run locally
 
 ```bash
@@ -323,8 +325,8 @@ artifacts, not a browsable copy of the source listings.
 
 ## Documentation
 
-This README is the complete English entry point. Deeper engineering notes are
-currently maintained in Russian:
+This README is the entry point. All maintained public documentation and user
+interfaces use English:
 
 | Document | Purpose |
 |---|---|
@@ -337,6 +339,7 @@ currently maintained in Russian:
 | [Setup](docs/SETUP.md) | Installation, commands, troubleshooting |
 | [Deployment](docs/DEPLOY.md) | Public-mode boundary and Render deployment |
 | [Glossary](docs/GLOSSARY.md) | Project terminology |
+| [Language policy](docs/LANGUAGE_POLICY.md) | English product copy and protected source vocabulary |
 
 ## What the project does not claim
 

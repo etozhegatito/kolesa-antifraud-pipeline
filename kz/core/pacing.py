@@ -1,97 +1,57 @@
 # -*- coding: utf-8 -*-
-"""pacing.py — единый «вежливый ритм» для всех сетевых джобов.
+"""Shared polite pacing for every network job.
 
-ЧТО ЭТО И ЧЕМ НЕ ЯВЛЯЕТСЯ (важно понимать разницу):
-  Это politeness — снижение нагрузки на сайт: паузы длиннее, запросы
-  размазаны во времени, вместо ровной пулемётной очереди — рваный ритм с
-  перерывами. Средняя пауза здесь СТРОГО БОЛЬШЕ, чем была у плоского
-  random.uniform, то есть запросов в час становится МЕНЬШЕ.
-  Это НЕ обход бот-защиты: UA не подменяется по кругу, отпечаток браузера
-  не подделывается, IP не меняется. Оба реальных бана (см. catch_up) были
-  по ОБЪЁМУ запросов с одного IP, и лечится это объёмом (бюджет) плюс вот
-  этим разрежением — а не маскировкой.
-
-ПОЧЕМУ НЕ ПЛОСКИЙ uniform(4, 8):
-  У плоского диапазона паузы всегда «средние»: 200 запросов подряд ровно
-  каждые ~6с — это ровная механическая нагрузка. У человека ритм рваный:
-  в основном быстро, но иногда отвлёкся. Поэтому:
-    1) базовая пауза — uniform(lo, hi), как раньше;
-    2) с вероятностью LONG_TAIL_PROB вместо неё «отвлёкся» — пауза до
-       hi*LONG_TAIL_MULT (правый хвост, НИЖНЯЯ граница не опускается —
-       иначе частота запросов выросла бы, а это ровно наоборот цели);
-    3) каждые BREAK_EVERY запросов — длинный перерыв BREAK_RANGE
-       («кофе-брейк», та же идея, что COFFEE_BREAK_EVERY в parser.py,
-       откуда идиома и взята — теперь она общая для всех джобов).
-
-Все функции принимают rng — чтобы тесты были детерминированными и не
-зависели от глобального random.
+Pacing reduces load; it is not an attempt to evade bot protection. Requests use
+longer, irregular pauses and periodic breaks without rotating user agents,
+fingerprints, or IP addresses. Every helper accepts an RNG for deterministic
+tests.
 """
 
 import random
 import time
 
-# Правый хвост базовой паузы: изредка «отвлёкся» надолго.
+# Occasional long-tailed pause above the normal delay range.
 LONG_TAIL_PROB = 0.15
 LONG_TAIL_MULT = 2.5
 
-# Длинный перерыв: каждые N запросов на столько-то секунд.
-# BREAK_EVERY=15 при порции 20 → примерно один перерыв на порцию.
+# A longer break every N requests.
 BREAK_EVERY = 15
 BREAK_RANGE = (30.0, 90.0)
 
 
 def human_pause(lo: float, hi: float, rng=random) -> float:
-    """Длительность паузы между запросами (сек), НЕ спит — только считает.
-
-    Возвращает либо uniform(lo, hi), либо (с вероятностью LONG_TAIL_PROB)
-    затяжную uniform(hi, hi*LONG_TAIL_MULT). Результат всегда >= lo, то
-    есть частота запросов от этого только падает, никогда не растёт.
-    """
+    """Calculate a delay in seconds without sleeping; the result is always >= lo."""
     if rng.random() < LONG_TAIL_PROB:
         return rng.uniform(hi, hi * LONG_TAIL_MULT)
     return rng.uniform(lo, hi)
 
 
 def long_break(i: int, every: int = BREAK_EVERY, rng=random) -> float | None:
-    """Пора ли длинный перерыв после i-го запроса (i считается с 1).
-
-    Возвращает длительность перерыва или None, если перерыв не нужен.
-    """
+    """Return a long-break duration after request ``i``, or ``None``."""
     if i > 0 and every > 0 and i % every == 0:
         return rng.uniform(*BREAK_RANGE)
     return None
 
 
 def mean_pause(lo: float, hi: float, every: int = BREAK_EVERY) -> float:
-    """Средняя пауза на один запрос с учётом хвоста и перерывов.
-
-    Нужна для честной оценки времени прогона («сколько это займёт»), чтобы
-    не обещать пользователю 4-8с, когда реальный ритм разреженнее.
-    """
-    base = (1 - LONG_TAIL_PROB) * (lo + hi) / 2 \
-        + LONG_TAIL_PROB * (hi + hi * LONG_TAIL_MULT) / 2
+    """Expected delay per request including long tails and periodic breaks."""
+    base = (1 - LONG_TAIL_PROB) * (lo + hi) / 2 + LONG_TAIL_PROB * (hi + hi * LONG_TAIL_MULT) / 2
     per_break = (sum(BREAK_RANGE) / 2 / every) if every > 0 else 0.0
     return base + per_break
 
 
-def polite_sleep(i: int, delay_range: tuple[float, float], log=None,
-                 rng=random, break_every: int = BREAK_EVERY) -> float:
-    """Пауза ПОСЛЕ i-го запроса (i с 1): либо длинный перерыв, либо базовая.
+def polite_sleep(
+    i: int, delay_range: tuple[float, float], log=None, rng=random, break_every: int = BREAK_EVERY
+) -> float:
+    """Sleep after request ``i`` using the shared pacing policy.
 
-    Единственная функция, которую зовут джобы — вся политика ритма живёт
-    здесь, а не размазана по четырём файлам.
-
-    break_every настраивается, потому что нагрузка бывает разной природы.
-    Страницы объявлений парсит человекоподобный сценарий, там перерыв каждые
-    15 запросов уместен. А статичные картинки с CDN — обычная раздача файлов,
-    для неё такая частота перерывов означает, что три четверти времени job
-    просто спит. Реже перерывы для CDN — не спешка, а соответствие тому, как
-    этот ресурс используется в норме.
+    ``break_every`` varies by resource: HTML navigation and static CDN files
+    have different normal access patterns.
     """
     brk = long_break(i, every=break_every, rng=rng)
     if brk is not None:
         if log:
-            log.info(f"  ☕ перерыв {brk:.0f}s (после {i} запросов)")
+            log.info(f"  ☕ break {brk:.0f}s (after {i} requests)")
         time.sleep(brk)
         return brk
     d = human_pause(*delay_range, rng=rng)

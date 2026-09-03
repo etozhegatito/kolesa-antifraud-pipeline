@@ -1,22 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Обучение и строгая проверка модели справедливой цены.
-
-Здесь разделены три разных результата:
-  1. Grouped CV — общая оценка без попадания точных перезаливов в разные фолды.
-  2. Out-of-time holdout — проверка на самых новых объявлениях.
-  3. Финальный CatBoost на всех чистых данных — версионируемый артефакт для
-     predict_price.py и других потребителей.
-
-Метрики CatBoost всегда сравниваются с простым и сильным baseline:
-медианой log(price) по brand/model/year с последовательным fallback до
-brand/model, brand и общей медианы. Без baseline высокая R² сама по себе
-не доказывает пользу ML.
-
-Запуск: python -m kz.ml.train_price_model   (офлайн, только Postgres)
-Выход: data/models/price_model.cbm + price_model.metadata.json
-       data/eda/price_model_oof.csv — обезличенные OOF-прогнозы для аудита
-"""
+"""Implementation for the `kz.ml.train_price_model` module."""
 
 from __future__ import annotations
 
@@ -39,12 +22,21 @@ from kz.transform.data_quality import iforest_anomaly, scrub_junk_mileage
 from kz.core.db import get_engine
 
 NUM_FEATURES = [
-    "age", "mileage_km", "engine_volume", "photos_count",
-    "is_mileage_missing", "is_vip", "has_monthly_price",
+    "age",
+    "mileage_km",
+    "engine_volume",
+    "photos_count",
+    "is_mileage_missing",
+    "is_vip",
+    "has_monthly_price",
 ]
 CAT_FEATURES = [
-    "brand", "model", "engine_type", "transmission",
-    "body_type", "condition",
+    "brand",
+    "model",
+    "engine_type",
+    "transmission",
+    "body_type",
+    "condition",
 ]
 FEATURES = NUM_FEATURES + CAT_FEATURES
 
@@ -56,31 +48,14 @@ OOF_DIAGNOSTICS_PATH = Path("data/eda/price_model_oof.csv")
 ARTIFACT_SCHEMA_VERSION = 1
 RANDOM_SEED = 42
 
-# Специалист отвечает только там, где ОСНОВНАЯ модель предсказала <5 млн,
-# но учится на более широкой полосе фактических цен <8 млн. Если учить его
-# строго на <5 млн, пограничные машины, ошибочно направленные маршрутизатором,
-# оказываются вне train-распределения и портят дорогой сегмент. Честный OOF
-# замер каждого среза сохраняется в metadata вместе с bootstrap-интервалом.
+
 CHEAP_ROUTE_MAX = 5_000_000
 CHEAP_TRAIN_MAX = 8_000_000
 BOOTSTRAP_REPEATS = 1000
 
 
 def new_model(loss_function: str = "RMSE") -> CatBoostRegressor:
-    """Единая фабрика: train, CV и inference не расходятся по параметрам.
-
-    Параметры подобраны замером на grouped CV (2026-08-01), а не взяты из
-    статьи. Проверенные варианты и их MAPE на 4334 строках:
-        600 итераций, lr 0.05, depth 8   23.77%   (было)
-        2000 итераций, lr 0.03, depth 8  22.96%   ← выбрано
-        2000 итераций, lr 0.03, depth 6  23.37%
-        то же + l2_leaf_reg=10           23.78%
-    Больше итераций с меньшим шагом выигрывают около 0.8 п.п. Это меньше
-    разброса между фолдами (±1.05 п.п.), поэтому по одному прогону такой
-    выигрыш не увидеть — сравнение честное только потому, что все варианты
-    считались на ОДНИХ И ТЕХ ЖЕ разбиениях.
-    Цена: обучение стало примерно втрое дольше (секунды, не минуты).
-    """
+    """Implement `new_model`."""
     return CatBoostRegressor(
         iterations=2000,
         learning_rate=0.03,
@@ -92,15 +67,9 @@ def new_model(loss_function: str = "RMSE") -> CatBoostRegressor:
 
 
 class RoutedPriceModel:
-    """Основная модель плюс специалист дешёвого сегмента.
+    """Implementation of `RoutedPriceModel`."""
 
-    Маршрут выбирается только по предсказанию основной модели — фактической
-    цены новой машины в бою нет. Обёртка сохраняет привычный `.predict()`,
-    поэтому отчёты, survival и веб используют одну и ту же логику.
-    """
-
-    def __init__(self, main, specialist=None,
-                 route_max: float = CHEAP_ROUTE_MAX):
+    def __init__(self, main, specialist=None, route_max: float = CHEAP_ROUTE_MAX):
         self.main = main
         self.specialist = specialist
         self.route_max = float(route_max)
@@ -120,20 +89,18 @@ class RoutedPriceModel:
         return base
 
     def model_for(self, X):
-        """Модель, реально отвечающая за одну строку (нужно для SHAP)."""
+        """Implement `model_for`."""
         if self.specialist is None:
             return self.main
         mask = self.route_mask(X)
         return self.specialist if len(mask) == 1 and bool(mask[0]) else self.main
 
     def get_feature_importance(self, *args, **kwargs):
-        # Без конкретной строки показываем глобальную важность основной модели.
-        # Для локального SHAP веб вызывает model_for(row).
         return self.main.get_feature_importance(*args, **kwargs)
 
 
 def coerce_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Единый preprocessing train/inference для схемы CatBoost."""
+    """Implement `coerce_features`."""
     out = df.copy()
     for c in NUM_FEATURES:
         out[c] = pd.to_numeric(out[c], errors="coerce")
@@ -150,7 +117,7 @@ def load() -> pd.DataFrame:
 
 
 def prepare_training_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Одинаковая фильтрация и data-quality перед любым обучением."""
+    """Implement `prepare_training_data`."""
     out = df[df["price_tenge"].notna() & (df["price_tenge"] > 0)].copy()
     out, _ = scrub_junk_mileage(out)
     out["log_price"] = np.log(out["price_tenge"])
@@ -158,13 +125,7 @@ def prepare_training_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def duplicate_groups(df: pd.DataFrame) -> pd.Series:
-    """Группа точного перезалива для защиты CV от leakage.
-
-    Цена намеренно не входит в ключ: изменение цены у той же машины не должно
-    превращать её в независимый объект. Если содержательного текста нет,
-    используем ad_id — иначе массовые машины с круглым пробегом ошибочно
-    склеились бы в одну группу.
-    """
+    """Implement `duplicate_groups`."""
     text_col = "text_full" if "text_full" in df.columns else "description"
     text = df.get(text_col, pd.Series("", index=df.index)).fillna("").astype(str)
     text = text.str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
@@ -185,7 +146,7 @@ def duplicate_groups(df: pd.DataFrame) -> pd.Series:
 
 
 def regression_metrics(y_log, pred_log) -> dict[str, float]:
-    """Метрики в log-пространстве и в исходных тенге."""
+    """Implement `regression_metrics`."""
     actual = np.exp(np.asarray(y_log, dtype=float))
     pred = np.exp(np.asarray(pred_log, dtype=float))
     ape = np.abs(pred - actual) / actual
@@ -203,22 +164,14 @@ def grouped_bootstrap_mape_delta(
     base_log: np.ndarray,
     n_boot: int = BOOTSTRAP_REPEATS,
 ) -> dict[str, float | int | list[float]]:
-    """Парный bootstrap ΔMAPE кандидата против base по группам дублей.
-
-    Точечные −0.1 п.п. могут быть шумом. Ресэмплируем целые группы, чтобы
-    перезаливы одной машины не получили независимых лотерейных билетов, и на
-    каждом повторе сравниваем обе модели на одних и тех же строках.
-    Отрицательная разница означает, что routed-модель лучше.
-    """
+    """Implement `grouped_bootstrap_mape_delta`."""
     actual = df["price_tenge"].to_numpy(dtype=float)
     cand_ape = np.abs(np.exp(candidate_log) - actual) / actual * 100
     base_ape = np.abs(np.exp(base_log) - actual) / actual * 100
     group_codes, _ = pd.factorize(duplicate_groups(df), sort=False)
     n_groups = int(group_codes.max()) + 1
     sizes = np.bincount(group_codes, minlength=n_groups).astype(float)
-    delta_sums = np.bincount(
-        group_codes, weights=cand_ape - base_ape, minlength=n_groups
-    )
+    delta_sums = np.bincount(group_codes, weights=cand_ape - base_ape, minlength=n_groups)
     rng = np.random.default_rng(RANDOM_SEED)
     values = np.empty(n_boot, dtype=float)
     for i in range(n_boot):
@@ -234,10 +187,8 @@ def grouped_bootstrap_mape_delta(
     }
 
 
-def _baseline_predict(
-    train: pd.DataFrame, y_train: pd.Series, test: pd.DataFrame
-) -> np.ndarray:
-    """Иерархическая медиана, рассчитанная ТОЛЬКО на train."""
+def _baseline_predict(train: pd.DataFrame, y_train: pd.Series, test: pd.DataFrame) -> np.ndarray:
+    """Implement `_baseline_predict`."""
     work = train.copy()
     work["_target"] = np.asarray(y_train)
     pred = pd.Series(np.nan, index=test.index, dtype=float)
@@ -260,11 +211,11 @@ def _baseline_predict(
 def grouped_oof_predictions(
     df: pd.DataFrame, n_splits: int = 5
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """OOF routed-модель, baseline и основная модель на одних фолдах."""
+    """Implement `grouped_oof_predictions`."""
     groups = duplicate_groups(df)
     n = min(n_splits, groups.nunique())
     if n < 2:
-        raise ValueError("Для grouped CV нужно минимум две независимые группы")
+        raise ValueError("Grouped CV requires at least two independent groups")
     splitter = GroupKFold(n_splits=n)
     base_oof = np.full(len(df), np.nan)
     routed_oof = np.full(len(df), np.nan)
@@ -279,8 +230,7 @@ def grouped_oof_predictions(
         train_rows = df.iloc[tr]
         cheap = train_rows["price_tenge"].to_numpy(dtype=float) < CHEAP_TRAIN_MAX
         specialist = new_model()
-        specialist.fit(Pool(X.iloc[tr][cheap], y.iloc[tr][cheap],
-                            cat_features=CAT_FEATURES))
+        specialist.fit(Pool(X.iloc[tr][cheap], y.iloc[tr][cheap], cat_features=CAT_FEATURES))
         routed = base_pred.copy()
         route = np.exp(base_pred) < CHEAP_ROUTE_MAX
         if route.any():
@@ -291,7 +241,7 @@ def grouped_oof_predictions(
 
 
 def temporal_holdout(df: pd.DataFrame, test_fraction: float = 0.2):
-    """Индексы train/test для проверки на будущем без пересечения дублей."""
+    """Implement `temporal_holdout`."""
     if "scraped_at" not in df.columns:
         return None
     ts = pd.to_datetime(df["scraped_at"], errors="coerce")
@@ -315,23 +265,24 @@ def evaluate_temporal(df: pd.DataFrame) -> dict | None:
         return None
     tr, te = split
     model = new_model()
-    model.fit(Pool(df.loc[tr, FEATURES], df.loc[tr, "log_price"],
-                   cat_features=CAT_FEATURES))
+    model.fit(Pool(df.loc[tr, FEATURES], df.loc[tr, "log_price"], cat_features=CAT_FEATURES))
     base_pred = np.asarray(model.predict(df.loc[te, FEATURES]), dtype=float)
     cheap = df.loc[tr, "price_tenge"].to_numpy(dtype=float) < CHEAP_TRAIN_MAX
     specialist = new_model()
-    specialist.fit(Pool(df.loc[tr, FEATURES].iloc[cheap],
-                        df.loc[tr, "log_price"].iloc[cheap],
-                        cat_features=CAT_FEATURES))
+    specialist.fit(
+        Pool(
+            df.loc[tr, FEATURES].iloc[cheap],
+            df.loc[tr, "log_price"].iloc[cheap],
+            cat_features=CAT_FEATURES,
+        )
+    )
     routed_pred = base_pred.copy()
     route = np.exp(base_pred) < CHEAP_ROUTE_MAX
     if route.any():
         routed_pred[route] = specialist.predict(df.loc[te, FEATURES].iloc[route])
     model_m = regression_metrics(df.loc[te, "log_price"], routed_pred)
     base_model_m = regression_metrics(df.loc[te, "log_price"], base_pred)
-    comparison = grouped_bootstrap_mape_delta(
-        df.loc[te], routed_pred, base_pred
-    )
+    comparison = grouped_bootstrap_mape_delta(df.loc[te], routed_pred, base_pred)
     baseline = _baseline_predict(df.loc[tr], df.loc[tr, "log_price"], df.loc[te])
     baseline_m = regression_metrics(df.loc[te, "log_price"], baseline)
     return {
@@ -348,7 +299,7 @@ def evaluate_temporal(df: pd.DataFrame) -> dict | None:
 
 
 def segment_metrics(df: pd.DataFrame, pred_log: np.ndarray) -> dict[str, dict]:
-    """MAPE и размер по ценовым сегментам — средняя не прячет слабые зоны."""
+    """Implement `segment_metrics`."""
     actual = df["price_tenge"].to_numpy(dtype=float)
     ape = np.abs(np.exp(pred_log) - actual) / actual * 100
     buckets = pd.cut(
@@ -369,23 +320,18 @@ def save_oof_diagnostics(
     base_log: np.ndarray,
     baseline_log: np.ndarray,
 ) -> None:
-    """Сохраняет честные построчные OOF-прогнозы для сегментного аудита.
-
-    Повторно обучать десять CatBoost-моделей только ради вопроса «где именно
-    ошибаемся?» дорого и создаёт риск сравнить разные разбиения. Поэтому
-    сохраняем прогнозы того же grouped CV, из которого попала MAPE в metadata.
-    Тексты, URL и фотографии сюда не входят; артефакт остаётся локальным в
-    gitignored ``data/``.
-    """
+    """Implement `save_oof_diagnostics`."""
     actual = df["price_tenge"].to_numpy(dtype=float)
-    report = pd.DataFrame({
-        "duplicate_group": duplicate_groups(df).astype(str).to_numpy(),
-        "age": pd.to_numeric(df["age"], errors="coerce").to_numpy(),
-        "actual_price_tenge": actual,
-        "routed_pred_tenge": np.exp(np.asarray(routed_log, dtype=float)),
-        "base_pred_tenge": np.exp(np.asarray(base_log, dtype=float)),
-        "baseline_pred_tenge": np.exp(np.asarray(baseline_log, dtype=float)),
-    })
+    report = pd.DataFrame(
+        {
+            "duplicate_group": duplicate_groups(df).astype(str).to_numpy(),
+            "age": pd.to_numeric(df["age"], errors="coerce").to_numpy(),
+            "actual_price_tenge": actual,
+            "routed_pred_tenge": np.exp(np.asarray(routed_log, dtype=float)),
+            "base_pred_tenge": np.exp(np.asarray(base_log, dtype=float)),
+            "baseline_pred_tenge": np.exp(np.asarray(baseline_log, dtype=float)),
+        }
+    )
     report["absolute_percentage_error_pct"] = (
         np.abs(report["routed_pred_tenge"] - actual) / actual * 100
     )
@@ -413,21 +359,17 @@ def _git_commit() -> str | None:
 
 def _git_dirty() -> bool | None:
     try:
-        return bool(subprocess.check_output(
-            ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
-        ).strip())
+        return bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        )
     except (OSError, subprocess.CalledProcessError):
         return None
 
 
 def code_fingerprint(*paths: str) -> str:
-    """Хэш фактического кода, важный при обучении из dirty worktree.
-
-    В хэш идёт только ИМЯ файла, без пути: путь зависит от раскладки проекта
-    и машины, а отпечаток должен зависеть исключительно от самого кода.
-    Раньше здесь были относительные пути-строки, и переезд файлов в пакет
-    ронял обучение с FileNotFoundError — вызывающие теперь передают __file__.
-    """
+    """Implement `code_fingerprint`."""
     digest = hashlib.sha256()
     for name in sorted(paths, key=lambda p: Path(p).name):
         digest.update(Path(name).name.encode("utf-8"))
@@ -446,9 +388,8 @@ def _save_model_atomic(model: CatBoostRegressor, path: Path, prefix: str) -> Non
         tmp_model.unlink(missing_ok=True)
 
 
-def save_artifact(model: CatBoostRegressor, specialist: CatBoostRegressor,
-                  metadata: dict) -> None:
-    """Атомарно публикует модель и метаданные: потребитель не увидит полфайла."""
+def save_artifact(model: CatBoostRegressor, specialist: CatBoostRegressor, metadata: dict) -> None:
+    """Implement `save_artifact`."""
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     _save_model_atomic(model, MODEL_PATH, "price_model.")
     _save_model_atomic(specialist, SPECIALIST_MODEL_PATH, "price_cheap.")
@@ -464,13 +405,13 @@ def save_artifact(model: CatBoostRegressor, specialist: CatBoostRegressor,
 def load_artifact() -> tuple[RoutedPriceModel, dict]:
     if not MODEL_PATH.exists() or not METADATA_PATH.exists():
         raise FileNotFoundError(
-            f"Нет обученного артефакта {MODEL_PATH}. Сначала: python -m kz.ml.train_price_model"
+            f"Trained artifact {MODEL_PATH} is missing. Run: python -m kz.ml.train_price_model"
         )
     metadata = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
     if metadata.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
-        raise ValueError("Несовместимая версия артефакта модели")
+        raise ValueError("Incompatible model artifact version")
     if metadata.get("features") != FEATURES:
-        raise ValueError("Схема признаков артефакта не совпадает с текущим кодом")
+        raise ValueError("Artifact feature schema does not match the current code")
     model = CatBoostRegressor()
     model.load_model(str(MODEL_PATH))
     specialist = None
@@ -478,7 +419,7 @@ def load_artifact() -> tuple[RoutedPriceModel, dict]:
     if routing:
         if not SPECIALIST_MODEL_PATH.exists():
             raise FileNotFoundError(
-                f"Метаданные требуют специалиста, но нет {SPECIALIST_MODEL_PATH}"
+                f"Metadata require the specialist model, but {SPECIALIST_MODEL_PATH} is missing"
             )
         specialist = CatBoostRegressor()
         specialist.load_model(str(SPECIALIST_MODEL_PATH))
@@ -495,9 +436,9 @@ def main():
     valid, n_junk = scrub_junk_mileage(valid)
     valid["log_price"] = np.log(valid["price_tenge"])
     if n_junk:
-        print(f"Data-quality: занулено {n_junk} плейсхолдер-пробегов")
+        print(f"Data quality: cleared {n_junk} placeholder mileage values")
     dq = iforest_anomaly(valid)
-    print(f"Data-quality: iForest пометил {int(dq.sum())} строк для ручного ревью")
+    print(f"Data quality: Isolation Forest queued {int(dq.sum())} rows for manual review")
 
     clean = valid[valid["is_suspicious"] == 0].copy()
     model_oof, baseline_oof, base_oof = grouped_oof_predictions(clean)
@@ -507,40 +448,47 @@ def main():
     comparison = grouped_bootstrap_mape_delta(clean, model_oof, base_oof)
     lift = grouped_base["mape_pct"] - grouped_model["mape_pct"]
 
-    print(f"\nGrouped 5-fold CV без leakage дублей ({len(clean)} машин):")
-    print(f"  Основная: R²(log)={grouped_base_model['r2_log']:.3f}  "
-          f"MAE={grouped_base_model['mae_tenge']/1e6:.2f}М ₸  "
-          f"MAPE={grouped_base_model['mape_pct']:.2f}%")
-    print(f"  + специалист <5M: R²(log)={grouped_model['r2_log']:.3f}  "
-          f"MAE={grouped_model['mae_tenge']/1e6:.2f}М ₸  "
-          f"MAPE={grouped_model['mape_pct']:.2f}%")
-    print(f"  Baseline: R²(log)={grouped_base['r2_log']:.3f}  "
-          f"MAE={grouped_base['mae_tenge']/1e6:.2f}М ₸  "
-          f"MAPE={grouped_base['mape_pct']:.1f}%")
-    print(f"  Выигрыш CatBoost по MAPE: {lift:+.1f} п.п.")
+    print(f"\nGrouped 5-fold CV without duplicate leakage ({len(clean)} vehicles):")
+    print(
+        f"  General model: R²(log)={grouped_base_model['r2_log']:.3f}  "
+        f"MAE={grouped_base_model['mae_tenge'] / 1e6:.2f}M ₸  "
+        f"MAPE={grouped_base_model['mape_pct']:.2f}%"
+    )
+    print(
+        f"  + specialist <5M: R²(log)={grouped_model['r2_log']:.3f}  "
+        f"MAE={grouped_model['mae_tenge'] / 1e6:.2f}M ₸  "
+        f"MAPE={grouped_model['mape_pct']:.2f}%"
+    )
+    print(
+        f"  Baseline: R²(log)={grouped_base['r2_log']:.3f}  "
+        f"MAE={grouped_base['mae_tenge'] / 1e6:.2f}M ₸  "
+        f"MAPE={grouped_base['mape_pct']:.1f}%"
+    )
+    print(f"  CatBoost MAPE improvement: {lift:+.1f} percentage points")
     ci = comparison["bootstrap_95_ci"]
-    print(f"  Routed − основная: {comparison['mape_delta_pct_points']:+.2f} п.п.  "
-          f"95% bootstrap ДИ [{ci[0]:+.2f}; {ci[1]:+.2f}]")
+    print(
+        f"  Routed − general: {comparison['mape_delta_pct_points']:+.2f} points  "
+        f"95% bootstrap CI [{ci[0]:+.2f}; {ci[1]:+.2f}]"
+    )
 
     temporal = evaluate_temporal(clean)
     if temporal:
-        tm, tm_base, tb = (temporal["model"], temporal["base_model"],
-                           temporal["baseline"])
+        tm, tm_base, tb = (temporal["model"], temporal["base_model"], temporal["baseline"])
         print(f"\nOut-of-time: train={temporal['train_rows']}, test={temporal['test_rows']}")
-        print(f"  Основная MAPE={tm_base['mape_pct']:.1f}%  "
-              f"R²(log)={tm_base['r2_log']:.3f}")
-        print(f"  + специалист MAPE={tm['mape_pct']:.1f}%  "
-              f"R²(log)={tm['r2_log']:.3f}")
+        print(f"  General model MAPE={tm_base['mape_pct']:.1f}%  R²(log)={tm_base['r2_log']:.3f}")
+        print(f"  + specialist MAPE={tm['mape_pct']:.1f}%  R²(log)={tm['r2_log']:.3f}")
         tci = temporal["routed_vs_base"]["bootstrap_95_ci"]
-        print("  Routed − основная: "
-              f"{temporal['routed_vs_base']['mape_delta_pct_points']:+.2f} п.п.  "
-              f"95% bootstrap ДИ [{tci[0]:+.2f}; {tci[1]:+.2f}]")
+        print(
+            "  Routed − general: "
+            f"{temporal['routed_vs_base']['mape_delta_pct_points']:+.2f} points  "
+            f"95% bootstrap CI [{tci[0]:+.2f}; {tci[1]:+.2f}]"
+        )
         print(f"  Baseline MAPE={tb['mape_pct']:.1f}%  R²(log)={tb['r2_log']:.3f}")
     else:
-        print("\nOut-of-time: пока недостаточно временного диапазона")
+        print("\nOut-of-time: insufficient time range so far")
 
     segments = segment_metrics(clean, model_oof)
-    print("\nGrouped-CV MAPE по цене:")
+    print("\nGrouped-CV MAPE by price:")
     for name, metric in segments.items():
         print(f"  {name:<7} n={metric['n']:<4} MAPE={metric['mape_pct']:.1f}%")
 
@@ -548,16 +496,15 @@ def main():
     final.fit(Pool(clean[FEATURES], clean["log_price"], cat_features=CAT_FEATURES))
     cheap = clean["price_tenge"].to_numpy(dtype=float) < CHEAP_TRAIN_MAX
     specialist = new_model()
-    specialist.fit(Pool(clean.loc[cheap, FEATURES], clean.loc[cheap, "log_price"],
-                        cat_features=CAT_FEATURES))
+    specialist.fit(
+        Pool(clean.loc[cheap, FEATURES], clean.loc[cheap, "log_price"], cat_features=CAT_FEATURES)
+    )
     metadata = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
         "git_dirty": _git_dirty(),
-        "training_code_sha256": code_fingerprint(
-            __file__, data_quality.__file__
-        ),
+        "training_code_sha256": code_fingerprint(__file__, data_quality.__file__),
         "data_fingerprint_sha256": _data_fingerprint(clean),
         "training_rows": int(len(clean)),
         "routing": {
@@ -568,18 +515,18 @@ def main():
         },
         "features": FEATURES,
         "categorical_features": CAT_FEATURES,
-        # Словарь категорий сохраняется не для модели (CatBoost справляется
-        # сам), а чтобы было с чем сверить формы интерфейса. Реальный случай:
-        # в форме оценки отсутствовал «кроссовер» — второй по частоте кузов,
-        # 1549 объявлений. Владелец кроссовера выбирал «внедорожник» и
-        # получал оценку по другому классу машин.
-        # "NA" сюда не попадает: это сентинел пропуска из coerce_features,
-        # а не значение, которое человек мог бы выбрать в форме.
         "categorical_vocabulary": {
-            c: sorted(v for v in clean[c].astype(str).value_counts()
-                      .loc[lambda s: s >= max(3, len(clean) // 500)].index
-                      if v != "NA")
-            for c in CAT_FEATURES if c not in ("brand", "model")
+            c: sorted(
+                v
+                for v in clean[c]
+                .astype(str)
+                .value_counts()
+                .loc[lambda s: s >= max(3, len(clean) // 500)]
+                .index
+                if v != "NA"
+            )
+            for c in CAT_FEATURES
+            if c not in ("brand", "model")
         },
         "target": "log(first_seen_listing_price_tenge)",
         "target_policy": {
@@ -589,10 +536,12 @@ def main():
             "is_transaction_price": False,
         },
         "validation": {
-            "grouped_cv": {"model": grouped_model,
-                           "base_model": grouped_base_model,
-                           "baseline": grouped_base,
-                           "routed_vs_base": comparison},
+            "grouped_cv": {
+                "model": grouped_model,
+                "base_model": grouped_base_model,
+                "baseline": grouped_base,
+                "routed_vs_base": comparison,
+            },
             "temporal_holdout": temporal,
             "segments": segments,
         },
@@ -603,10 +552,10 @@ def main():
     }
     save_artifact(final, specialist, metadata)
     save_oof_diagnostics(clean, model_oof, base_oof, baseline_oof)
-    print(f"\nАртефакт модели → {MODEL_PATH}")
-    print(f"Специалист       → {SPECIALIST_MODEL_PATH}")
-    print(f"Метаданные       → {METADATA_PATH}")
-    print(f"OOF-диагностика  → {OOF_DIAGNOSTICS_PATH}")
+    print(f"\nModel artifact      → {MODEL_PATH}")
+    print(f"Specialist artifact → {SPECIALIST_MODEL_PATH}")
+    print(f"Metadata            → {METADATA_PATH}")
+    print(f"OOF diagnostics     → {OOF_DIAGNOSTICS_PATH}")
 
 
 if __name__ == "__main__":

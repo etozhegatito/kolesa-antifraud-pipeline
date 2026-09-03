@@ -1,1 +1,1 @@
-"""KZ Auto Market Intelligence: сбор, очистка, аномалии и модель цены."""
+"""Implementation for the `kz.__init__` module."""

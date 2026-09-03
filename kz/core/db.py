@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-db.py — тонкий слой доступа к Postgres. Никакого ORM: pandas.read_sql/
-to_sql закрывают чтение, один helper upsert() закрывает запись с
-ON CONFLICT. Осознанно маленький файл — проект однопользовательский,
-не тянет модельный слой.
-"""
+"""Small PostgreSQL access layer using Pandas, SQLAlchemy, and one upsert helper."""
 
 from functools import lru_cache
 
@@ -16,28 +11,24 @@ from kz.core.config import DATABASE_URL
 
 @lru_cache(maxsize=1)
 def get_engine():
-    """Движок SQLAlchemy или внятная ошибка вместо непонятной.
-
-    Настройки могут отсутствовать законно — веб-сервис оценки в облаке
-    работает без базы (см. kz/core/config.py). Поэтому проверка здесь, в
-    точке обращения: тот, кому база не нужна, до неё не дойдёт, а тот, кому
-    нужна, получит понятное объяснение, а не `create_engine(None)` с
-    сообщением про NoneType.
-    """
+    """Return the cached SQLAlchemy engine or a clear configuration error."""
     if not DATABASE_URL:
         raise RuntimeError(
-            "Не заданы настройки Postgres (POSTGRES_USER/PASSWORD/DB). "
-            "Для пайплайна создайте .env по образцу .env.example; "
-            "веб-сервису оценки база не обязательна.")
+            "PostgreSQL settings are missing (POSTGRES_USER/PASSWORD/DB). "
+            "Create .env from .env.example for pipeline work. The public "
+            "model-only estimator does not require a database."
+        )
     return create_engine(DATABASE_URL)
 
 
-def upsert(table: str, rows: list[dict], conflict_cols: list[str],
-           update_cols: list[str] | None = None):
-    """INSERT нескольких строк с ON CONFLICT. update_cols=None (или []) →
-    ON CONFLICT DO NOTHING (append-only/резюмируемые джобы); update_cols
-    задан → DO UPDATE SET (для "последняя запись побеждает", напр. ad_status).
-    rows — список словарей с ОДИНАКОВЫМ набором ключей."""
+def upsert(
+    table: str, rows: list[dict], conflict_cols: list[str], update_cols: list[str] | None = None
+):
+    """Insert rows with ``ON CONFLICT``.
+
+    No update columns means append-only ``DO NOTHING``; otherwise listed
+    columns use last-write-wins ``DO UPDATE``. Every row must share keys.
+    """
     if not rows:
         return
     cols = list(rows[0].keys())

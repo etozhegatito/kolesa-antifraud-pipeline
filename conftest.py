@@ -1,2 +1,1 @@
-# Пустой conftest в корне нужен, чтобы pytest добавил корень проекта в
-# sys.path — иначе тесты из tests/ не смогут импортировать пакет kz.
+"""Shared pytest configuration; currently no global fixtures are required."""

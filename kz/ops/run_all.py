@@ -1,218 +1,127 @@
 # -*- coding: utf-8 -*-
-"""
-run_all.py — мини-оркестратор: запускает джобы в ПРАВИЛЬНОМ порядке.
+"""Implementation for the `kz.ops.run_all` module."""
 
-Зачем он нужен (проблема из ревью): clean_data.csv собирался ДО обогащения
-и артефакты устаревали. Ручной запуск джобов в голове держать нельзя —
-порядок должен быть закодирован. Это простейшая форма оркестрации
-(в проде это Airflow/Prefect, у нас — 60 строк на subprocess).
-
-Порядок (DAG — directed acyclic graph, граф зависимостей):
-  parser.py         листинг: паспорта, sightings, фото
-  check_status.py   статусы исчезнувших (archived/deleted)
-  clean.py  #1      первичная чистка → очередь приоритетов для enrich
-  enrich.py      ┐  обогащение страниц (подозрительные первыми)
-  photo_dedup.py ┘  ПАРАЛЛЕЛЬНО: pHash фоток («одно фото, разные машины»)
-  clean.py  #2      финальная чистка УЖЕ с обогащением и фото-флагами
-  explore.py        отчёт, дашборд, очередь на разметку
-
-Почему enrich и photo_dedup параллельно, и почему это НЕ ломает
-вежливость к сайту: вежливость — она per-host (частота запросов к
-одному хосту), а не per-компьютер. enrich стучится на kolesa.kz,
-photo_dedup — на CDN картинок (kcdn.kz), это разные хосты с разными
-лимитами. Частота запросов к каждому в отдельности не меняется —
-а стены-времени экономится ~12 минут (photo_dedup целиком прячется
-внутри более длинного enrich). Параллелить два джоба на ОДИН хост
-(например, parser + enrich) — нельзя, это удвоило бы частоту.
-
-РЕЖИМЫ — всё, что нужно в обычной работе:
-
-  python -m kz.ops.run_all --collect
-      СБОР ДАННЫХ, единственный безопасный сетевой путь: свежий листинг,
-      затем добор пробелов через catch_up, который считает суточный лимит
-      запросов по хостам и встаёт, когда квота выбрана. В конце —
-      офлайн-пересборка.
-
-  python -m kz.ops.run_all --ml
-      Офлайн-пересборка + переобучение моделей + отчёты + метрики.
-      Это команда «я разметил вердикты, пересчитай всё». Сети не касается.
-
-  python -m kz.ops.run_all --fast
-      Только офлайн-пересборка: clean_data, EDA, карточки разметки.
-      Быстро (секунды), моделей не трогает.
-
-  python -m kz.ops.run_all --light
-      Свежий листинг + пересборка. Per-ad сеть (статусы, обогащение, фото)
-      НЕ трогает — её отдаём бюджетному catch_up, иначе run_all грузил бы
-      kolesa мимо суточного лимита, то есть двойной нагрузкой на один IP.
-
-  python -m kz.ops.run_all
-      Безопасный полный сбор: тот же COLLECT_CHAIN, что и --collect. Parser и
-      per-ad добор делят общий суточный бюджет; фото-CDN имеет отдельный.
-
-Точечный добор только обогащения, когда нужен именно он:
-  python -m kz.ops.catch_up --run --values
-
-В КАЖДОМ режиме в конце идёт офлайн-пересборка (OFFLINE_CHAIN), поэтому
-артефакты никогда не остаются устаревшими относительно raw-слоя.
-"""
-
-# ─── Самопроверка файла (защита от путаницы при копировании) ────────────────
-# Если этот код оказался в файле с другим именем — останавливаемся сразу,
-# а не делаем «не то» молча. Тихая подмена хуже громкого падения.
 import pathlib as _p
+
 _expected = "run_all.py"
 if _p.Path(__file__).name != _expected:
     raise SystemExit(
-        f"ОШИБКА: этот код — {_expected}, а файл называется "
-        f"{_p.Path(__file__).name}. Файлы перепутаны при копировании!")
+        f"ERROR: this code belongs to {_expected}, but the file is named "
+        f"{_p.Path(__file__).name}. Files were mixed up during copying."
+    )
 
 
 import subprocess
 import sys
 import time
 
+
 def step(name: str, module: str, *args: str):
-    """Шаг = имя для лога плюс команда запуска модуля."""
+    """Implement `step`."""
     return (name, [sys.executable, "-m", module, *args])
 
 
-# ─── Сетевые шаги (только они ходят в интернет) ──────────────────────────────
-STEP_PARSER  = step("Сбор 1 · листинг",        "kz.collect.parser")
-STEP_STATUS  = step("Сбор 2 · статусы",        "kz.collect.check_status")
-STEP_ENRICH  = step("Сбор 3 · обогащение",     "kz.collect.enrich")
-STEP_PHOTOS  = step("Сбор 4 · фото-дедуп",     "kz.collect.photo_dedup")
+STEP_PARSER = step("Collect 1 · listings", "kz.collect.parser")
+STEP_STATUS = step("Collect 2 · statuses", "kz.collect.check_status")
+STEP_ENRICH = step("Collect 3 · enrichment", "kz.collect.enrich")
+STEP_PHOTOS = step("Collect 4 · photo dedup", "kz.collect.photo_dedup")
 
-# ─── Сбор данных (--collect): единственный БЕЗОПАСНЫЙ сетевой путь ───────────
-# Разница с полным режимом принципиальная. Полный режим гонит статусы,
-# обогащение и фото напрямую, не сверяясь с суточным лимитом запросов —
-# именно такая смесь и положила домашний IP 2026-07-23. Здесь же пробелы
-# добирает catch_up, который считает расход по хостам и встаёт, когда квота
-# выбрана. Поэтому листинг собирается один раз, а всё остальное — порциями
-# под бюджетом.
+
 COLLECT_CHAIN = [
     STEP_PARSER,
-    step("Сбор 2 · пробелы под суточным лимитом", "kz.ops.catch_up", "--run"),
-    # Фотографии — часть сбора: это сырьё, и копить его надо, пока ссылки
-    # живы (один CDN-хост уже исчез вместе с 37% ссылок). Картинки лежат на
-    # другом хосте со своим лимитом и квоту основного сайта не тратят.
+    step("Collect 2 · budgeted backlog", "kz.ops.catch_up", "--run"),
     #
-    # А вот признаки из фото сюда НЕ входят. Замер показал, что ни эмбеддинг
-    # ResNet, ни оценки CLIP цену предсказывать не помогают, и гонять сеть по
-    # тысячам картинок на каждом прогоне ради неиспользуемого результата —
-    # трата. Считаются вручную, когда ставится очередной эксперимент:
     #   python -m kz.ml.photo_features
     #   python -m kz.ml.photo_clip
-    step("Сбор 3 · фотографии", "kz.collect.photo_fetch"),
+    step("Collect 3 · photos", "kz.collect.photo_fetch"),
 ]
 
-# ─── Офлайн-пересборка: выполняется в КАЖДОМ режиме ──────────────────────────
-# Порядок обязателен: clean пересобирает clean_data (в т.ч. подхватывает
-# новые вердикты), explore строит очередь разметки, и только потом карточки —
-# иначе размечать пришлось бы по устаревшему списку.
-STEP_CLEAN   = step("Чистка · clean_data",     "kz.transform.clean")
+
+STEP_CLEAN = step("Clean · clean_data", "kz.transform.clean")
 OFFLINE_CHAIN = [
     STEP_CLEAN,
-    step("Отчёт  · EDA и очередь",  "kz.report.explore"),
-    step("Отчёт  · карточки разметки", "kz.report.label_cards"),
+    step("Report · EDA and queue", "kz.report.explore"),
+    step("Report · labelling cards", "kz.report.label_cards"),
 ]
 
-# ─── ML-цепочка (--ml) ───────────────────────────────────────────────────────
-# Порядок НЕ произволен, он задан зависимостями по артефактам:
-#   графики читают сохранённую модель цены     → обучение раньше;
-#   HTML-отчёт читает ОБА артефакта             → и модель, и ценовой пол;
-#   оценка anomaly-rules читает clean_data и журнал вердиктов.
-# Проверку этих зависимостей стережёт test_ml_chain_order_respects_artifacts.
+
 ML_CHAIN = [
-    # Дрейф меряется ДО переобучения, и это принципиально. Вопрос звучит
-    # «разъехались ли данные с теми, на которых училась РАБОТАЮЩАЯ сейчас
-    # модель» — а после переобучения работающая модель обучена ровно на
-    # текущих данных, снимок обучающей выборки совпадает с текущей, и PSI
-    # выходит нулевым по построению. Так и было: все замеры в истории
-    # показывали 0.000 и бодрое «данные стабильны», ничего не измерив.
-    step("ML 1 · дрейф данных",      "kz.ml.monitoring"),
-    step("ML 2 · модель цены",       "kz.ml.train_price_model"),
-    step("ML 3 · стабильность MAPE", "kz.ml.mape_stability"),
-    step("ML 4 · ценовой пол",       "kz.ml.residual_detector"),
-    # Интервал цены. Отдельно от ценового пола, хотя оба квантильные: пол —
-    # это anomaly-screening («подозрительно дёшево для такой машины»), а интервал —
-    # продукт («восемь из десяти попадают внутрь»). Разные цели, разные
-    # уровни квантилей, разная калибровка; смешивать нельзя.
-    step("ML 5 · интервал цены",     "kz.ml.price_interval"),
-    step("ML 6 · графики модели",    "kz.report.ml_dashboard"),
-    step("ML 7 · HTML-отчёт",        "kz.report.ml_report"),
-    step("ML 8 · проверка anomaly-rules", "kz.report.evaluate_detector"),
-    step("ML 9 · срок жизни объявления", "kz.ml.survival"),
+    step("ML 1 · data drift", "kz.ml.monitoring"),
+    step("ML 2 · price model", "kz.ml.train_price_model"),
+    step("ML 3 · MAPE stability", "kz.ml.mape_stability"),
+    step("ML 4 · price floor", "kz.ml.residual_detector"),
+    step("ML 5 · price interval", "kz.ml.price_interval"),
+    step("ML 6 · model charts", "kz.report.ml_dashboard"),
+    step("ML 7 · HTML report", "kz.report.ml_report"),
+    step("ML 8 · anomaly-rule evaluation", "kz.report.evaluate_detector"),
+    step("ML 9 · listing lifetime", "kz.ml.survival"),
 ]
 
 
 def run_step(step) -> None:
-    """Последовательный шаг с fail-fast."""
+    """Implement `run_step`."""
     name, cmd = step
-    print(f"\n{'═'*60}\n▶ {name}\n{'═'*60}")
+    print(f"\n{'═' * 60}\n▶ {name}\n{'═' * 60}")
     t = time.time()
     rc = subprocess.run(cmd).returncode
-    print(f"  … {time.time()-t:.0f}s, код {rc}")
+    print(f"  … {time.time() - t:.0f}s, exit code {rc}")
     if rc != 0:
-        # Fail fast: упавший шаг делает следующие бессмысленными
-        # (clean без свежего raw, explore без свежего clean).
-        print(f"✖ Шаг «{name}» упал — останавливаем пайплайн.")
+        print(f"✖ Step '{name}' failed; stopping the pipeline.")
         sys.exit(rc)
 
 
 def run_parallel(step_a, step_b) -> None:
-    """Два шага одновременно (РАЗНЫЕ хосты — см. докстринг модуля).
-    Ждём обоих до конца, даже если один упал: второй-то работает и
-    его результат резюмируемый — обрывать его на середине глупо.
-    Потом fail-fast, если хоть один вернул ошибку."""
+    """Implement `run_parallel`."""
     (name_a, cmd_a), (name_b, cmd_b) = step_a, step_b
-    print(f"\n{'═'*60}\n▶ {name_a}  ∥  {name_b}  (параллельно)\n{'═'*60}")
+    print(f"\n{'═' * 60}\n▶ {name_a}  ∥  {name_b}  (parallel)\n{'═' * 60}")
     t = time.time()
     proc_a = subprocess.Popen(cmd_a)
     proc_b = subprocess.Popen(cmd_b)
     rc_a, rc_b = proc_a.wait(), proc_b.wait()
-    print(f"  … {time.time()-t:.0f}s, коды {rc_a}/{rc_b}")
+    print(f"  … {time.time() - t:.0f}s, exit codes {rc_a}/{rc_b}")
     for name, rc in ((name_a, rc_a), (name_b, rc_b)):
         if rc != 0:
-            print(f"✖ Шаг «{name}» упал — останавливаем пайплайн.")
+            print(f"✖ Step '{name}' failed; stopping the pipeline.")
             sys.exit(rc)
 
 
 def main():
     t0 = time.time()
-    ml      = "--ml" in sys.argv        # + переобучение моделей и отчёты
-    collect = "--collect" in sys.argv   # сбор под суточным лимитом
-    # ML считает по clean_data, поэтому пересборка обязательна, а в сеть
-    # ради неё ходить не нужно: --ml подразумевает офлайн-режим.
-    fast  = "--fast" in sys.argv or ml
-    light = "--light" in sys.argv       # только новый листинг, без per-ad сети
+    ml = "--ml" in sys.argv
+    collect = "--collect" in sys.argv
 
-    # Default больше не имеет скрытого небезопасного пути. Раньше он запускал
-    # status/enrich напрямую вне catch_up и мог пробить суточный потолок,
-    # несмотря на новый общий счётчик parser. Теперь обычный запуск — алиас
-    # безопасного --collect; --light по-прежнему означает только листинг.
+    fast = "--fast" in sys.argv or ml
+    light = "--light" in sys.argv
+
     if collect or (not fast and not light):
-        for s in COLLECT_CHAIN:                    # листинг + пробелы по бюджету
+        for s in COLLECT_CHAIN:
             run_step(s)
     else:
         if not fast:
-            run_step(STEP_PARSER)                  # свежий листинг (новьё)
+            run_step(STEP_PARSER)
 
-    for s in OFFLINE_CHAIN:                        # чистка → отчёт → карточки
+    for s in OFFLINE_CHAIN:
         run_step(s)
     if ml:
         for s in ML_CHAIN:
             run_step(s)
 
-    mode = ("--ml" if ml else
-            "--collect" if collect else
-            "--fast" if fast else
-            "--light" if light else "полный")
-    print(f"\n✔ Пайплайн ({mode}) завершён за {(time.time()-t0)/60:.1f} мин")
+    mode = (
+        "--ml"
+        if ml
+        else "--collect"
+        if collect
+        else "--fast"
+        if fast
+        else "--light"
+        if light
+        else "full"
+    )
+    print(f"\n✔ Pipeline ({mode}) completed in {(time.time() - t0) / 60:.1f} min")
     if ml:
-        print("  Смотреть: data/eda/ml_report.html, data/eda/ml_dashboard.png")
+        print("  Review: data/eda/ml_report.html, data/eda/ml_dashboard.png")
     else:
-        print("  Смотреть: data/eda/label_cards.html, data/eda/dashboard.png")
+        print("  Review: data/eda/label_cards.html, data/eda/dashboard.png")
 
 
 if __name__ == "__main__":

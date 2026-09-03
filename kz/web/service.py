@@ -1,22 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Логика оценки для веб-интерфейса, без единой строчки HTTP.
+"""Price-estimation logic for the web interface, independent of HTTP.
 
-Разделение намеренное: здесь чистые функции, которые можно вызвать из тестов
-и из консоли, а FastAPI в app.py остаётся тонкой обёрткой. Иначе проверить
-логику можно было бы только подняв сервер.
+The split is intentional: these pure functions are callable from tests and
+the console, while FastAPI remains a thin adapter in ``app.py``.
 
-Что отдаётся по одной машине:
-  estimate        точечная оценка справедливой цены;
-  range_low/high  диапазон с ИЗМЕРЕННЫМ покрытием: восемь машин из десяти
-                  попадают внутрь, и это проверено, а не обещано. Раньше
-                  здесь стоял один коридор ±12/15% на все машины — для
-                  свежей Camry честный, для Delica 1993 года фикция;
-  drivers         разложение прогноза по вкладам признаков (SHAP), чтобы
-                  человек видел, ПОЧЕМУ столько, а не верил чёрному ящику;
-  position        позиция цены продавца среди похожих машин;
-  warnings        предупреждения тех же anomaly-rules, что строят очередь —
-                  честному продавцу полезно узнать, что его объявление
-                  выглядит как приманка, ДО публикации.
+One estimate contains:
+  estimate        point estimate of a fair advertised price;
+  range_low/high  a range with measured coverage: about eight out of ten
+                  validation vehicles fall inside it;
+  drivers         SHAP contributions explaining the individual prediction;
+  position        the seller's price among comparable live listings;
+  warnings        the same anomaly signals used to build the review queue,
+                  reframed as useful pre-publication checks for honest sellers.
 """
 
 from __future__ import annotations
@@ -28,13 +23,12 @@ from kz.core.db import get_engine
 from kz.ml.predict_price import make_row
 from kz.ml.train_price_model import CAT_FEATURES, FEATURES, load_artifact
 
-# Резервный коридор — только если артефакта интервала нет (например, его не
-# успели переобучить после смены схемы признаков). Это заведомо грубая
-# замена: один и тот же диапазон для всех машин. Настоящий интервал считает
-# kz/ml/price_interval.py, и его покрытие измерено, а не обещано.
+# Use this coarse, fixed range only when the calibrated interval artifact is
+# missing, for example immediately after a feature-schema change. The normal
+# interval comes from kz/ml/price_interval.py and has measured coverage.
 FALLBACK_LOW, FALLBACK_HIGH = 0.88, 1.15
 
-# Минимум похожих машин, чтобы говорить о позиции среди конкурентов.
+# Minimum sample size required for a comparable-market position.
 MIN_SIMILAR = 8
 
 _model = None
@@ -45,31 +39,30 @@ _db_warned = False
 
 
 def query(sql: str, params: dict) -> pd.DataFrame | None:
-    """Запрос к базе, который НЕ обязан удаться.
+    """Run an optional database query.
 
-    Оценка цены целиком живёт в артефакте модели, а база нужна только для
-    приятных дополнений: списка похожих машин и позиции среди них. В
-    контейнере, выложенном наружу, базы рядом нет — и это нормально: сервис
-    должен отдать оценку, а не пятисотку. Поэтому недоступность базы здесь
-    ожидаемое состояние, а не ошибка.
+    Core estimation lives entirely in the model artifact. The database only
+    provides enhancements such as comparable listings and price position. The
+    public container intentionally has no database, so connection failure must
+    degrade gracefully instead of turning an estimate into an HTTP 500.
 
-    Предупреждение печатается один раз на процесс: иначе каждый запрос
-    засорял бы логи одним и тем же сообщением.
+    Log the warning once per process to avoid repeating it on every request.
     """
     global _db_warned
     try:
         return pd.read_sql(sql, get_engine(), params=params)
-    except Exception as e:                      # noqa: BLE001 — любая проблема связи
+    except Exception as e:  # noqa: BLE001 — any connection failure
         if not _db_warned:
-            print(f"[web] база недоступна ({type(e).__name__}), "
-                  f"оценка работает, похожие машины отключены")
+            print(
+                f"[web] database unavailable ({type(e).__name__}); "
+                f"estimation works, comparable listings are disabled"
+            )
             _db_warned = True
         return None
 
 
 def get_model():
-    """Артефакт грузится один раз на процесс: он весит мегабайты, а запросов
-    к сервису много."""
+    """Load the multi-megabyte model artifact once per process."""
     global _model, _meta
     if _model is None:
         _model, _meta = load_artifact()
@@ -77,86 +70,89 @@ def get_model():
 
 
 def get_interval_models():
-    """Артефакт интервала, если он есть. Отсутствие — не авария.
+    """Load the interval artifact when available.
 
-    Оценка цены живёт в основной модели и без интервала работает; грубеет
-    только диапазон. Ронять запрос из-за украшения нельзя, поэтому промах
-    запоминается и в лог пишется один раз на процесс.
+    Point estimation remains valid without it; only the range becomes coarser.
+    Cache a missing artifact and log once instead of failing every request.
     """
     global _interval, _interval_missing
     if _interval is None and not _interval_missing:
         try:
             from kz.ml.price_interval import load_artifact as load_interval
+
             _interval = load_interval()
-        except Exception as e:              # noqa: BLE001 — артефакта может не быть
+        except Exception as e:  # noqa: BLE001 — optional artifact
             _interval_missing = True
-            print(f"[web] интервал недоступен ({type(e).__name__}), "
-                  f"диапазон считается грубым коридором")
+            print(
+                f"[web] interval artifact unavailable ({type(e).__name__}); "
+                f"using a coarse fallback range"
+            )
     return _interval
 
 
 def price_range(car: dict, fair: float) -> tuple[float, float, dict]:
-    """Границы диапазона и то, чем они получены.
+    """Return interval bounds and the method used to produce them.
 
-    Третьим элементом идёт описание метода. Человеку важно знать, что
-    означает диапазон: измеренное покрытие «8 из 10 машин попадают внутрь»
-    или прикидку по средней ошибке.
+    Method metadata distinguishes measured conformal coverage from a fallback
+    range based on average error.
     """
     models = get_interval_models()
     if models is None:
-        return (fair * FALLBACK_LOW, fair * FALLBACK_HIGH,
-                {"method": "fallback", "coverage": None})
+        return (fair * FALLBACK_LOW, fair * FALLBACK_HIGH, {"method": "fallback", "coverage": None})
 
     from kz.ml.price_interval import predict_interval
 
     low, high = predict_interval(make_row(**car), models=models)
     meta = models[2]
-    return (float(low[0]), float(high[0]), {
-        "method": "conformal",
-        "coverage": meta.get("oof", {}).get("coverage"),
-        "target_coverage": meta.get("target_coverage"),
-    })
+    return (
+        float(low[0]),
+        float(high[0]),
+        {
+            "method": "conformal",
+            "coverage": meta.get("oof", {}).get("coverage"),
+            "target_coverage": meta.get("target_coverage"),
+        },
+    )
 
 
 def estimate_price(car: dict) -> float:
-    """Справедливая цена в тенге по характеристикам машины."""
+    """Estimate a fair advertised price in tenge from vehicle attributes."""
     model, _ = get_model()
     return float(np.exp(model.predict(make_row(**car))[0]))
 
 
 def price_drivers(car: dict, top: int = 6) -> list[dict]:
-    """Что подняло и что опустило цену именно этой машины.
+    """Explain which features raised or lowered this vehicle's estimate.
 
-    CatBoost раскладывает конкретный прогноз на вклады признаков (SHAP).
-    Вклады считаются в логарифме цены, поэтому переводим их в множители:
-    +0.1 в логарифме — это «дороже примерно на 10%», что человек понимает,
-    в отличие от «плюс 0.1 логарифма».
+    CatBoost returns SHAP contributions in log-price space. Convert them to
+    percentage multipliers because “about 10% higher” is easier to interpret
+    than “plus 0.1 log units.”
     """
     from catboost import Pool
 
     model, _ = get_model()
     row = make_row(**car)
     active = model.model_for(row) if hasattr(model, "model_for") else model
-    shap = active.get_feature_importance(
-        Pool(row, cat_features=CAT_FEATURES), type="ShapValues")[0]
-    contribs = shap[:-1]                    # последний элемент — базовое значение
+    shap = active.get_feature_importance(Pool(row, cat_features=CAT_FEATURES), type="ShapValues")[0]
+    contribs = shap[:-1]  # final element is the expected value
     order = np.argsort(-np.abs(contribs))[:top]
     out = []
     for i in order:
         c = float(contribs[i])
-        out.append({
-            "feature": FEATURES[i],
-            "value": row.iloc[0][FEATURES[i]],
-            "effect_pct": (np.exp(c) - 1) * 100,   # «дороже/дешевле на N%»
-        })
+        out.append(
+            {
+                "feature": FEATURES[i],
+                "value": row.iloc[0][FEATURES[i]],
+                "effect_pct": (np.exp(c) - 1) * 100,
+            }
+        )
     return out
 
 
 def similar_cars(car: dict, limit: int = 5) -> pd.DataFrame:
-    """Похожие живые объявления: та же марка и модель, близкий возраст.
+    """Find live listings with the same make/model and similar age.
 
-    Нужны для доверия: одно дело «модель считает 6 млн», другое — увидеть
-    пять реальных машин рядом.
+    Concrete market examples make a model estimate easier to validate.
     """
     brand, model_name = car.get("brand"), car.get("model")
     age = car.get("age")
@@ -175,13 +171,11 @@ def similar_cars(car: dict, limit: int = 5) -> pd.DataFrame:
 
 
 def price_position(car: dict, asking_price: float | None) -> dict | None:
-    """Где цена продавца среди похожих машин.
+    """Place the seller's price among comparable advertised prices.
 
-    ВАЖНО про формулировки: это позиция среди ВЫСТАВЛЕННЫХ цен, а не прогноз
-    срока продажи. Сказать «продашь за день» мы пока не можем — истории
-    наблюдений слишком мало, и в ней видны только быстрые продажи
-    (правое цензурирование). Поэтому здесь честное «дешевле/дороже
-    большинства», без обещаний по срокам.
+    This is deliberately not a time-to-sale forecast. The observation history
+    is short and right-censored, so the result only says whether the asking
+    price is low, central, or high relative to comparable listings.
     """
     if not asking_price or asking_price <= 0:
         return None
@@ -197,22 +191,27 @@ def price_position(car: dict, asking_price: float | None) -> dict | None:
     p = prices.price_tenge.to_numpy()
     pct = float((p < asking_price).mean() * 100)
     if pct <= 25:
-        label = "дешевле большинства похожих"
+        label = "Below most comparable listings"
     elif pct >= 75:
-        label = "дороже большинства похожих"
+        label = "Above most comparable listings"
     else:
-        label = "в середине рынка"
-    return {"percentile": pct, "label": label, "n_similar": int(len(p)),
-            "p25": float(np.percentile(p, 25)), "p75": float(np.percentile(p, 75))}
+        label = "Near the middle of the market"
+    return {
+        "percentile": pct,
+        "label": label,
+        "n_similar": int(len(p)),
+        "p25": float(np.percentile(p, 25)),
+        "p75": float(np.percentile(p, 75)),
+    }
 
 
-def listing_warnings(car: dict, asking_price: float | None,
-                     fair: float, text: str = "") -> list[str]:
-    """Проверка объявления теми же сигналами, что и anomaly-review.
+def listing_warnings(
+    car: dict, asking_price: float | None, fair: float, text: str = ""
+) -> list[str]:
+    """Check a draft listing with the same signals used in anomaly review.
 
-    Смысл не в том, чтобы обвинить продавца, а наоборот: честному человеку
-    полезно узнать, что его объявление выглядит подозрительно, и объяснить
-    дешевизну заранее.
+    The purpose is not to accuse a seller. It helps an honest seller notice
+    when a listing resembles a bait ad and explain an unusual price upfront.
     """
     out = []
     if asking_price and fair > 0:
@@ -220,41 +219,51 @@ def listing_warnings(car: dict, asking_price: float | None,
         if ratio < 0.6:
             has_reason = bool(text and text.strip())
             out.append(
-                "Цена примерно на {:.0f}% ниже похожих машин. ".format((1 - ratio) * 100)
-                + ("Опишите причину — покупатели принимают необъяснимо дешёвые "
-                   "объявления за приманку." if not has_reason else
-                   "В описании есть текст — убедитесь, что причина названа прямо."))
+                "The asking price is about {:.0f}% below comparable vehicles. ".format(
+                    (1 - ratio) * 100
+                )
+                + (
+                    "Explain why: buyers may treat an unexplained low price as bait."
+                    if not has_reason
+                    else "The description is present; make sure it states the reason explicitly."
+                )
+            )
         elif ratio > 1.5:
-            out.append("Цена примерно на {:.0f}% выше похожих машин — "
-                       "объявление может провисеть долго."
-                       .format((ratio - 1) * 100))
+            out.append(
+                "The asking price is about {:.0f}% above comparable vehicles; "
+                "the listing may take longer to sell.".format((ratio - 1) * 100)
+            )
+
     def num(key, default=0.0):
-        """Число из поля, каким бы оно ни пришло. Функция публичная, и падать
-        от строки в поле она не должна — вызвать её могут не только из формы."""
+        """Coerce a public input field to a number without trusting its type."""
         try:
             return float(car.get(key))
         except (TypeError, ValueError):
             return default
 
     if not num("mileage_km"):
-        out.append("Не указан пробег. Объявления с пробегом смотрят примерно "
-                   "на 16% чаще.")
+        out.append(
+            "Mileage is missing. Listings with mileage receive about "
+            "16% more views in this dataset."
+        )
     if num("photos_count") < 5:
-        out.append("Меньше пяти фотографий. Объявления с пятью и более "
-                   "смотрят примерно на 77% чаще.")
+        out.append(
+            "Fewer than five photos. Listings with at least five photos "
+            "receive about 77% more views in this dataset."
+        )
     if len(text.strip()) < 50:
-        out.append("Описание короче 50 символов. Объявления с описанием от "
-                   "200 символов смотрят примерно на 36% чаще.")
+        out.append(
+            "The description is shorter than 50 characters. Listings "
+            "with at least 200 characters receive about 36% more views."
+        )
     return out
 
 
 def jsonable(obj):
-    """numpy/pandas-типы → обычные python-типы.
+    """Convert NumPy/Pandas scalars to plain Python values.
 
-    pandas отдаёт int64 и float64, а json.dumps их не умеет: без этой
-    конверсии ответ падал с «Object of type int64 is not JSON serializable».
-    NaN тоже превращаем в None — в JSON нет NaN, и браузер получил бы
-    невалидный ответ.
+    ``json.dumps`` cannot serialize ``int64`` and ``float64`` directly. NaN
+    also becomes ``None`` because JSON has no portable NaN representation.
     """
     if isinstance(obj, dict):
         return {k: jsonable(v) for k, v in obj.items()}
@@ -272,22 +281,23 @@ def jsonable(obj):
     return obj
 
 
-def full_estimate(car: dict, asking_price: float | None = None,
-                  text: str = "") -> dict:
-    """Всё, что сервис знает про одну машину, одним вызовом."""
+def full_estimate(car: dict, asking_price: float | None = None, text: str = "") -> dict:
+    """Return the service's complete estimate for one vehicle."""
     fair = estimate_price(car)
     _, meta = get_model()
     val = meta.get("validation", {}).get("grouped_cv", {}).get("model", {})
     low, high, how = price_range(car, fair)
-    return jsonable({
-        "fair_price": fair,
-        "range_low": low,
-        "range_high": high,
-        "range_method": how,
-        "model_mape_pct": val.get("mape_pct"),
-        "trained_rows": meta.get("training_rows"),
-        "drivers": price_drivers(car),
-        "position": price_position(car, asking_price),
-        "warnings": listing_warnings(car, asking_price, fair, text),
-        "similar": similar_cars(car).to_dict("records"),
-    })
+    return jsonable(
+        {
+            "fair_price": fair,
+            "range_low": low,
+            "range_high": high,
+            "range_method": how,
+            "model_mape_pct": val.get("mape_pct"),
+            "trained_rows": meta.get("training_rows"),
+            "drivers": price_drivers(car),
+            "position": price_position(car, asking_price),
+            "warnings": listing_warnings(car, asking_price, fair, text),
+            "similar": similar_cars(car).to_dict("records"),
+        }
+    )

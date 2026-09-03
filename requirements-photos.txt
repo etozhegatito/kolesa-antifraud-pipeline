@@ -1,19 +1,7 @@
-# Тяжёлые зависимости для работы с изображениями — ОТДЕЛЬНО от requirements.txt.
-#
-# Почему отдельно: torch с torchvision весят около двух гигабайт. Ставить их
-# всем, кто просто хочет собрать данные или обучить модель цены, — это долгая
-# установка и такой же долгий CI ради кода, который в основном конвейере не
-# выполняется ни разу.
-#
-# Что без них не работает:
-#   kz/ml/photo_features.py   эмбеддинги ResNet50 и снижение размерности
-#   kz/ml/photo_clip.py       zero-shot оценка состояния по фотографии
-#
-# Обе вещи — исследовательские, в run_all не входят. Замер показал, что
-# признаки из фотографий цену не улучшают (см. README, «Что выяснилось про
-# фотографии»), поэтому они и остались за пределами конвейера.
-#
-# Установка, когда понадобится:  pip install -r requirements-photos.txt
+# Heavy image dependencies stay separate from the tabular environment because
+# PyTorch and torchvision add roughly two gigabytes. These packages support
+# experimental ResNet/CLIP work and are not part of the main pipeline.
+# Install only when needed: `pip install -r requirements-photos.txt`.
 
 torch==2.13.0
 torchvision==0.28.0

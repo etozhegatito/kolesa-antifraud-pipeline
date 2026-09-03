@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Запуск веб-интерфейса: python -m kz.web
+"""Start the web interface with ``python -m kz.web``.
 
-Слушаем только 127.0.0.1 — приложение локальное, в нём нет ни аутентификации,
-ни ограничения частоты запросов, наружу его открывать нельзя.
+The local entry point binds to 127.0.0.1. Manual labelling has no
+authentication and must never be exposed directly to the internet.
 """
 
 import sys
@@ -17,7 +17,7 @@ def main():
     port = DEFAULT_PORT
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
-    print(f"Открой: http://{HOST}:{port}")
+    print(f"Open: http://{HOST}:{port}")
     uvicorn.run("kz.web.app:app", host=HOST, port=port, log_level="warning")
 
 

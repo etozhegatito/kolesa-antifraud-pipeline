@@ -1,16 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Калиброванный детектор «цена ниже справедливого пола».
-
-CatBoost обучается на нижний квантиль, но номинальный alpha не гарантирует,
-что на новых данных ровно alpha наблюдений окажутся ниже пола. Поэтому:
-
-  1. Для чистых строк считаются out-of-fold предсказания без leakage дублей.
-  2. По OOF-остаткам вычисляется поправка к полу.
-  3. Финальная квантильная модель и поправка сохраняются как артефакт.
-
-Это калибрует порог, но НЕ доказывает fraud: кандидат становится детекцией
-только после ручной разметки precision/recall.
-"""
+"""Implementation for the `kz.ml.residual_detector` module."""
 
 from __future__ import annotations
 
@@ -49,7 +38,7 @@ FLOOR_SCHEMA_VERSION = 1
 
 
 def calibration_offset(y_log, raw_floor_log, alpha: float = ALPHA) -> float:
-    """Сдвиг пола: доля y ниже (raw_floor + offset) становится ≈ alpha."""
+    """Implement `calibration_offset`."""
     residual = np.asarray(y_log, dtype=float) - np.asarray(raw_floor_log, dtype=float)
     try:
         return float(np.quantile(residual, alpha, method="lower"))
@@ -58,11 +47,11 @@ def calibration_offset(y_log, raw_floor_log, alpha: float = ALPHA) -> float:
 
 
 def oof_quantile_floor(clean: pd.DataFrame) -> np.ndarray:
-    """Out-of-fold сырой пол: строка не участвует в модели, которая её оценивает."""
+    """Implement `oof_quantile_floor`."""
     groups = duplicate_groups(clean)
     n = min(N_SPLITS, groups.nunique())
     if n < 2:
-        raise ValueError("Недостаточно независимых групп для residual CV")
+        raise ValueError("Not enough independent groups for residual CV")
     oof = np.full(len(clean), np.nan)
     X, y = clean[FEATURES], clean["log_price"]
     for tr, te in GroupKFold(n_splits=n).split(X, y, groups):
@@ -73,7 +62,7 @@ def oof_quantile_floor(clean: pd.DataFrame) -> np.ndarray:
 
 
 def fit_calibrated_floor(clean: pd.DataFrame):
-    """Финальная модель + OOF-поправка + диагностические OOF-предикты."""
+    """Implement `fit_calibrated_floor`."""
     oof_raw = oof_quantile_floor(clean)
     offset = calibration_offset(clean["log_price"], oof_raw)
     model = new_model(loss_function=f"Quantile:alpha={ALPHA}")
@@ -104,13 +93,13 @@ def save_floor_artifact(model: CatBoostRegressor, metadata: dict) -> None:
 def load_floor_artifact():
     if not FLOOR_MODEL_PATH.exists() or not FLOOR_METADATA_PATH.exists():
         raise FileNotFoundError(
-            "Нет артефакта ценового пола. Сначала: python -m kz.ml.residual_detector"
+            "Price-floor artifact is missing. Run: python -m kz.ml.residual_detector"
         )
     metadata = json.loads(FLOOR_METADATA_PATH.read_text(encoding="utf-8"))
     if metadata.get("schema_version") != FLOOR_SCHEMA_VERSION:
-        raise ValueError("Несовместимая версия артефакта ценового пола")
+        raise ValueError("Incompatible price-floor artifact version")
     if metadata.get("features") != FEATURES:
-        raise ValueError("Схема признаков ценового пола не совпадает с кодом")
+        raise ValueError("Price-floor feature schema does not match the code")
     model = CatBoostRegressor()
     model.load_model(str(FLOOR_MODEL_PATH))
     return model, metadata
@@ -130,12 +119,9 @@ def main():
 
     model, offset, oof_floor = fit_calibrated_floor(clean)
     frac_below = float((clean["log_price"].to_numpy() < oof_floor).mean())
-    print(f"OOF-калибровка: доля ниже пола={frac_below:.3f}, цель alpha={ALPHA:.3f}")
-    print(f"Поправка к log-полу={offset:+.4f} "
-          f"(множитель цены ×{np.exp(offset):.3f})")
+    print(f"OOF calibration: fraction below floor={frac_below:.3f}, target alpha={ALPHA:.3f}")
+    print(f"Log-floor correction={offset:+.4f} (price multiplier ×{np.exp(offset):.3f})")
 
-    # Для чистых строк — строго OOF-пол. Для уже правилово подозрительных,
-    # которых не было в train, — предикт финальной модели.
     df["floor_log"] = model.predict(df[FEATURES]) + offset
     df.loc[clean["index"], "floor_log"] = oof_floor
     df["below_floor"] = df["log_price"] < df["floor_log"]
@@ -144,32 +130,24 @@ def main():
     support = clean.groupby(["brand", "model"]).size().rename("support").reset_index()
     df = df.merge(support, on=["brand", "model"], how="left")
     df["support"] = df["support"].fillna(0).astype(int)
-    # Оправдание из clean-слоя действует и здесь. Иначе получается разнобой:
-    # правила снимают подозрение с честно битой машины («Машина аварийная» в
-    # тексте, бейдж сайта, «Растаможен: Нет»), а модельный детектор о причине
-    # не знает и тащит ту же машину в кандидаты на разметку.
+
     #
-    # Реальный случай: Camry 2019 за 5.3 млн с разбитым передом. Правила её
-    # оправдали, а квантильный пол всё равно счёл подозрительно дешёвой —
-    # разумеется, ведь дёшево она стоит именно потому, что разбита.
+
     #
-    # Берём готовый признак из clean.py, а не повторяем логику: источник
-    # правды должен быть один.
-    explained = df.get("info_flags", pd.Series("", index=df.index)) \
-                  .fillna("").str.contains("low_price_explained")
+
+    explained = (
+        df.get("info_flags", pd.Series("", index=df.index))
+        .fillna("")
+        .str.contains("low_price_explained")
+    )
     df["flag"] = (
-        df["below_floor"]
-        & (df["support"] >= MIN_SUPPORT)
-        & (df["age"] <= AGE_MAX)
-        & ~explained
+        df["below_floor"] & (df["support"] >= MIN_SUPPORT) & (df["age"] <= AGE_MAX) & ~explained
     )
 
     metadata = {
         "schema_version": FLOOR_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "training_code_sha256": code_fingerprint(
-            __file__, _tpm.__file__, data_quality.__file__
-        ),
+        "training_code_sha256": code_fingerprint(__file__, _tpm.__file__, data_quality.__file__),
         "features": FEATURES,
         "alpha": ALPHA,
         "calibration": "grouped_out_of_fold",
@@ -182,21 +160,30 @@ def main():
     save_floor_artifact(model, metadata)
 
     n_below, n_flag = int(df["below_floor"].sum()), int(df["flag"].sum())
-    print(f"\nНиже калиброванного пола: {n_below}/{len(df)}; "
-          f"после support/age gates: {n_flag}")
+    print(f"\nBelow calibrated floor: {n_below}/{len(df)}; after support/age gates: {n_flag}")
     rb = df["is_suspicious"] == 1
     agree = int((df["flag"] & rb).sum())
-    print(f"Согласие с правиловым детектором: {agree}/{int(rb.sum())}")
+    print(f"Agreement with rule-based detector: {agree}/{int(rb.sum())}")
 
     top = df[df["flag"]].nlargest(12, "gap").copy()
-    top["факт_М"] = (top["price_tenge"] / 1e6).round(1)
-    top["пол_М"] = (np.exp(top["floor_log"]) / 1e6).round(1)
-    print("\nТоп-12 кандидатов (это очередь на разметку, не доказанный fraud):")
-    print(top[[
-        "ad_id", "brand", "model", "year", "факт_М", "пол_М",
-        "gap", "is_suspicious",
-    ]].to_string(index=False))
-    print(f"\nАртефакт пола → {FLOOR_MODEL_PATH}")
+    top["actual_M"] = (top["price_tenge"] / 1e6).round(1)
+    top["floor_M"] = (np.exp(top["floor_log"]) / 1e6).round(1)
+    print("\nTop 12 candidates (a review queue, not confirmed fraud):")
+    print(
+        top[
+            [
+                "ad_id",
+                "brand",
+                "model",
+                "year",
+                "actual_M",
+                "floor_M",
+                "gap",
+                "is_suspicious",
+            ]
+        ].to_string(index=False)
+    )
+    print(f"\nPrice-floor artifact → {FLOOR_MODEL_PATH}")
 
 
 if __name__ == "__main__":

@@ -1,145 +1,142 @@
-# Model card — оценка цены автомобиля
+# Model card: vehicle listing-price estimator
 
-## Назначение
+## Intended use
 
-CatBoost оценивает справедливую цену объявления в Алматы по характеристикам
-автомобиля. Предсказание используется как подсказка пользователю и как один из
-сигналов для очереди ручного review аномалий. Это не подтверждение мошенничества.
+The model estimates the first observed advertised price of a passenger vehicle
+in Almaty, Kazakhstan. It is designed for exploratory seller guidance,
+market-monitoring research, and a portfolio demonstration of leakage-aware
+machine learning.
 
-## Данные
+It is not a dealer appraisal, loan decision, mechanical inspection, final sale
+price, or guarantee that a vehicle will sell inside the displayed range.
 
-- Источник: публичные объявления kolesa.kz, Алматы.
-- Текущий измеренный срез: 12 306 строк после rule-based очистки.
-- Target: логарифм цены при первом сохранении объявления в `raw_ads`.
-- Более поздние цены сохраняются в `sightings`, но пока не подменяют target.
-- Это выставленная цена, а не неизвестная проекту сумма фактической сделки.
-- Сырой слой append-only; clean-слой воспроизводимо пересобирается.
-- `kolesa_avg_price` не используется как признак из-за target leakage.
+## Data
 
-Каждый артефакт содержит SHA-256 fingerprint конкретного обучающего среза,
-commit кода, время обучения и точную схему признаков.
+- Source market: kolesa.kz listings scoped to Almaty.
+- Collected listings: 12,639.
+- Rows used by the current trained artifact: 12,455.
+- Target: first observed listing price in KZT.
+- Training timestamp: 3 September 2026.
+- Raw listings, seller descriptions, photos, and manual labels are private and
+  are not included in the public repository.
 
-## Валидация на срезе 2026-09-02 (12 306 строк)
+Duplicate and relist groups are derived without using price. Complete groups
+remain on one side of validation to prevent the same physical vehicle from
+appearing in both training and evaluation.
 
-| Проверка | Routed CatBoost | Одна общая модель | Baseline |
+## Model
+
+The production route contains two CatBoost regressors trained on log price:
+
+1. a general model for every request;
+2. a cheap-vehicle specialist trained on actual prices below 8M tenge.
+
+The general model predicts first. If that prediction is below 5M tenge, the
+specialist answers. This rule uses only inference-time information; routing on
+the unknown actual price would leak the target.
+
+Features:
+
+- numeric: age, mileage, engine displacement, and photo count;
+- missing/listing flags: mileage missing, VIP status, monthly-price display;
+- categorical: make, model, fuel, transmission, body style, and condition.
+
+Kolesa's own average price and listing category are excluded because they are
+target-derived. Text and photo features are excluded from the current price
+artifact because coverage and train/serve parity are not yet sufficient.
+
+## Validation results
+
+Measured on the 3 September 2026 artifact:
+
+| Validation view | MAPE | Median APE | R-squared on log price |
 |---|---:|---:|---:|
-| Grouped 5-fold MAPE | **21.44%** | 21.58% | 30.73% |
-| Grouped 5-fold R²(log) | **0.935** | 0.935 | 0.852 |
-| Grouped median APE | **13.92%** | 13.99% | 14.29% |
-| Out-of-time MAPE, 2 462 новых строки | **23.36%** | 23.57% | 34.97% |
+| Grouped OOF, routed | **21.36%** | **13.81%** | **0.935** |
+| Grouped OOF, general only | 21.38% | 13.94% | — |
+| Grouped OOF, make/model/year baseline | 30.70% | 14.21% | — |
+| Out-of-time, routed | **23.24%** | 14.82% | — |
+| Out-of-time, baseline | 35.01% | 15.25% | — |
 
-После свежего сбора и одной порции enrichment в train прошло 149 строк:
-11 991 → 12 140. Grouped MAPE практически не изменилась: 21.3927% →
-21.3951% (+0.0024 п.п.), а OOT ухудшился на 0.20 п.п. Дешёвый сегмент,
-наоборот, улучшился 29.17% → 28.90%. Grouped разница routed−base равна
-−0.05 п.п., 95% bootstrap ДИ [−0.18; +0.10] и всё ещё не доказана.
-На OOT специалист впервые доказан: −0.53 п.п. с ДИ [−0.88; −0.20].
+Grouped bootstrap for routed MAPE:
 
-2 сентября точечное обогащение добавило 20 страниц и дозаполнило 20 старых
-строк. Оно сняло шесть правиловых тревог; после включения свежего листинга
-train вырос 12 140 → 12 306. Grouped MAPE изменилась 21.3951% → 21.4390%
-(+0.0439 п.п.) — это в несколько раз меньше bootstrap SD 0.25 п.п., поэтому
-качество статистически не изменилось. OOT вырос 22.57% → 23.36%, а дешёвый
-сегмент — 28.90% → 29.16%; это колебание состава временного хвоста, не
-доказанное ухудшение алгоритма. На новом срезе routed−base: grouped −0.14
-п.п., ДИ [−0.28; −0.01]; OOT −0.21 п.п., ДИ [−0.63; +0.21].
+- standard deviation: about 0.25 percentage points;
+- 95% interval: **20.87%–21.87%**.
 
-Routed-модель сначала получает прогноз общей модели. Если он ниже 5 млн ₸,
-ответ заменяет специалист, обученный на реальных ценах до 8 млн ₸. Порог
-маршрутизации использует только доступный в inference прогноз, не неизвестную
-настоящую цену. Специалист обучается и проверяется заново внутри каждого
-CV-фолда. Grouped CV не разрешает точным перезаливам одной машины попасть
-одновременно в train и validation. Baseline — иерархическая медиана по
-brand/model/year, рассчитанная только на train-фолде.
+The routed model improves grouped MAPE over the general model by only 0.03
+percentage points on this snapshot, and the paired confidence interval crosses
+zero. Routing is operationally supported, but the current result does not prove
+a meaningful overall gain.
 
-У routed-модели средняя ошибка и типичная различаются в полтора раза: MAPE
-21.44% против медианной APE 13.92%. Среднее тянет вверх хвост крупных
-промахов из дешёвого сегмента.
+## Segment behavior
 
-**Ограничение, которое нужно знать при использовании артефакта.** По
-медианной ошибке baseline близок к общей модели: 14.29% против 13.99%.
-Специалист улучшил медиану до 13.92%, но разрыв всё ещё невелик. Выигрыш
-routed-модели в 9.3 п.п. по среднему набирается на хвостах —
-редкие комплектации, повреждённые машины, нетипичные пробеги. Если задача
-сводится к массовым моделям, модель здесь избыточна.
-
-MAPE модели по цене:
-
-- до 5 млн ₸: 29.16% (5 025 строк);
-- 5–10 млн ₸: 15.49% (2 888);
-- 10–20 млн ₸: 15.27% (2 344);
-- от 20 млн ₸: 17.94% (2 049).
-
-## Чем ограничено качество
-
-Кривая обучения **вышла на плато**: пять замеров от 4 777 до 11 496 строк
-дали 22.66 → 22.19 → 21.60 → 21.60 → 21.41%, последние два шага прибавляли
-по 18% данных каждый. Подгонка `a + b·n^(-c)` даёт асимптоту около 20.1%.
-
-Более ранняя редакция этой карточки утверждала обратное — «кривая не вышла
-на плато, модель ограничена объёмом данных». Это оказалось неверным, и
-утверждение отозвано.
-
-Признаками модель тоже не ограничена: четыре группы новых, посчитанные на
-одних и тех же разбиениях, дали изменения в пределах шума (±1.05 п.п.
-между фолдами):
-
-| добавленные признаки | MAPE | Δ |
+| Segment | Rows | MAPE |
 |---|---:|---:|
-| базовый набор | 22.96% | — |
-| пробег за год владения | 23.12% | +0.16 |
-| метки листинга (дилер, «История авто») | 23.01% | +0.05 |
-| привод, руль, растаможка, цвет, поколение | 22.98% | +0.02 |
-| текст объявления (CatBoost text features) | 23.53% | +0.56 |
+| Price below 5M tenge | 5,089 | **29.01%** |
+| Price at least 5M tenge | 7,366 | **16.07%** |
+| Age 0–5 years | 3,350 | 16.72% |
+| Age 6–10 years | 1,581 | 15.74% |
+| Age 11–20 years | 3,353 | 18.37% |
+| Age 21+ years | 4,171 | **29.62%** |
 
-Признаки из фотографий проверялись отдельно и тоже не помогли. Историческая
-supervised grouped OOF-проверка дешёвого сегмента давала AUC 0.658 для
-full-frame CLIP, 0.739 для возраста+цены и 0.635 для объединения. Эти цифры
-**отозваны** после обнаружения definition drift и не являются актуальной
-оценкой detector. Фотографии никогда не входили в текущую модель цены.
+The intersection age 21+ and price below 5M contains 3,518 rows, has 31.05%
+MAPE, and creates approximately 41.1% of all percentage error. Performance
+claims should therefore always include segment metrics.
 
-Ограничение на сегодня — **дешёвый сегмент**: 40% выборки и почти вся
-ошибка. Там цену определяет состояние машины, которого в объявлении нет.
-Измеренный путь туда один: признаки со страницы объявления (текст продавца,
-список опций) дают −3.4 п.п. по этому сегменту при полном покрытии
-обогащением. Ручная разметка повреждений по фотографиям пока даёт только
-отрицательные результаты — внутри дешёвого сегмента фотографии не
-превосходят цены с возрастом.
+## Prediction intervals
 
-## Известные ограничения
+The main interval is conformally calibrated on out-of-fold residuals and
+targeted at approximately 80% coverage. Mondrian adjustments use predicted
+price groups, which are available during inference. A coarse fixed range is
+used only if the interval artifact is unavailable.
 
-- Данные только из Алматы и одного сайта; перенос в другой город/источник не
-  проверен.
-- Цена объявления не равна цене фактической сделки.
-- Самый дешёвый сегмент предсказывается заметно хуже среднего.
-- Rule-based фильтр обучающей выборки ещё не подтверждён достаточным числом
-  ручных verdict; возможна остаточная contamination.
-- Временной диапазон пока короткий, поэтому out-of-time результат нужно
-  пересчитывать после накопления нескольких недель и месяцев.
-- Модель не видит состояние по фото, историю ДТП, комплектацию и полный текст
-  для большинства объявлений. Предыдущая оценка supervised photo-CV отозвана
-  после аудита definition drift: 38 из 47 `damaged`-кадров по комментариям
-  похожи на ржавчину, грязь, потёртости или дефекты краски. Консервативно все
-  47 legacy-меток получили `needs_review` и исключены из обучения/метрик до
-  повторного сохранения человеком.
+Coverage describes repeated held-out listing prices. It is not the probability
+that one particular final transaction occurs inside the range.
 
-## Артефакты и воспроизведение
+## Known limitations
+
+- The target is advertised price, not transaction price.
+- Training covers one city and should not be presented as a national model.
+- Older inexpensive vehicles have much higher error.
+- Detail-page text/options cover only a minority of rows.
+- Comparable listings require a local PostgreSQL database and are absent from
+  the stateless public demo.
+- The live service does not inspect uploaded text or photos as model features.
+- Market behavior and prices can drift after the training period.
+- MAPE heavily penalizes absolute errors on inexpensive vehicles.
+
+## Computer vision
+
+CV is experimental and excluded from production inference. Historical
+`damaged` annotations mixed impact with cosmetic conditions. All 47 affected
+legacy frames are quarantined as `needs_review`; prior supervised CV metrics
+are withdrawn until manual relabeling and an independent audit are complete.
+
+## Reproducibility
+
+The metadata artifact records the target policy, feature schema, data
+fingerprint, code hash, Git commit, dirty-worktree flag, training row count,
+validation metrics, and routing contract. Reproduce the offline chain with:
 
 ```bash
-python -m kz.ml.train_price_model
-python -m kz.ml.residual_detector
-python -m kz.ml.predict_price
+source .venv/bin/activate
+python -m kz.ops.run_all --ml
+python -m kz.ops.pipeline_status
 ```
 
-Генерируются `data/models/price_model.*`,
-`data/models/price_cheap_specialist.cbm` и `data/models/price_floor.*`.
-Артефакты являются локальными runtime-данными и не публикуются в Git.
+Tests and lint:
 
-## Условия перехода к продуктовой оценке
+```bash
+python -m pytest tests/ -q
+ruff check kz/ tests/ airflow/
+```
 
-1. Не менее 20–50 однозначных `fraud/legit` verdict для первичной оценки
-   детектора; далее расширять и считать доверительные интервалы.
-2. Повторить out-of-time validation после накопления минимум месяца истории.
-3. Сохранять работающий drift-monitoring признаков; после появления
-   фактических цен/прокси продажи добавить мониторинг ошибок.
-4. Не использовать residual-кандидата как автоматический fraud-вердикт.
+## Product gate
+
+The 18% MAPE objective is a research gate, not a published promise. A defensible
+release improvement requires:
+
+1. better evidence for physical condition in the under-5M segment;
+2. a statistically supported grouped and temporal improvement;
+3. unchanged or improved calibration;
+4. no train/serve skew;
+5. a fresh model card and artifact metadata produced by the same run.

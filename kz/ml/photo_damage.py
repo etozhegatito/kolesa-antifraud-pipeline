@@ -1,22 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Честная supervised-проверка детектора повреждений на ручных метках.
-
-`photo_clip --rank` специально является только поисковиком для очереди и
-обучается на всех метках. По его цифре нельзя судить о качестве детектора.
-Этот модуль отвечает на другой вопрос: видит ли фотография повреждение на
-НОВОМ объявлении лучше, чем простая подсказка «машина старая и дешёвая».
-
-Защита от трёх распространённых самообманов:
-
-1. Все кадры одного ad_id лежат в одном фолде (`StratifiedGroupKFold`).
-2. Метрика считается по ОБЪЯВЛЕНИЯМ: максимум по кадрам, а не будто пять
-   фотографий одной машины — пять независимых машин.
-3. Рядом всегда печатается baseline из возраста и log(цены). Высокий AUC
-   фото ничего не доказывает, если те же классы разделяет таблица.
-
-Запуск: python -m kz.ml.photo_damage
-Сети не касается; читает сохранённые CLIP-векторы и ручной CSV-журнал.
-"""
+"""Implementation for the `kz.ml.photo_damage` module."""
 
 from __future__ import annotations
 
@@ -44,13 +27,7 @@ USED = POSITIVE | {"intact"}
 
 
 def groups_from_hashes(ad_ids, hashes) -> np.ndarray:
-    """Компоненты объявлений, связанных одинаковой локальной фотографией.
-
-    Одной группировки по ``ad_id`` мало: продавец может переопубликовать ту
-    же машину под новым номером объявления. Если одинаковый кадр окажется в
-    train и test, CV измерит запоминание картинки. Объединяем такие ad_id
-    консервативно — только по ТОЧНО равному perceptual hash.
-    """
+    """Implement `groups_from_hashes`."""
     ads = np.asarray([str(x) for x in ad_ids])
     hs = np.asarray([str(x) if x is not None else "" for x in hashes])
     parent = {ad: ad for ad in np.unique(ads)}
@@ -78,7 +55,7 @@ def groups_from_hashes(ad_ids, hashes) -> np.ndarray:
 
 
 def visual_groups(d: pd.DataFrame) -> np.ndarray:
-    """Группы CV: ad_id плюс точные pHash-дубли между объявлениями."""
+    """Implement `visual_groups`."""
     import imagehash
     from PIL import Image, ImageOps
 
@@ -97,11 +74,11 @@ def visual_groups(d: pd.DataFrame) -> np.ndarray:
 
 
 def load_labelled() -> tuple[pd.DataFrame, np.ndarray]:
-    """Метки + индекс сохранённых эмбеддингов + цена/возраст."""
+    """Implement `load_labelled`."""
     _, rows = read_journal()
     labels = pd.DataFrame(rows)
     if labels.empty:
-        raise RuntimeError("Журнал photo_labels пуст")
+        raise RuntimeError("photo_labels journal is empty")
     labels = labels.drop_duplicates(["ad_id", "position"], keep="last")
     if "review_status" in labels:
         labels = labels[labels.review_status.fillna("") != NEEDS_REVIEW]
@@ -119,11 +96,13 @@ def load_labelled() -> tuple[pd.DataFrame, np.ndarray]:
     idx["embedding_row"] = idx.index
     idx["ad_id"] = idx.ad_id.astype(str)
     idx["position"] = idx.position.astype(int)
-    d = labels.merge(idx[["ad_id", "position", "embedding_row"]],
-                     on=["ad_id", "position"], how="inner")
+    d = labels.merge(
+        idx[["ad_id", "position", "embedding_row"]], on=["ad_id", "position"], how="inner"
+    )
 
     cars = pd.read_sql(
-        "SELECT ad_id, age, price_tenge FROM clean_data", get_engine(),
+        "SELECT ad_id, age, price_tenge FROM clean_data",
+        get_engine(),
         dtype={"ad_id": str},
     )
     d = d.merge(cars, on="ad_id", how="left")
@@ -136,26 +115,27 @@ def load_labelled() -> tuple[pd.DataFrame, np.ndarray]:
 
 def _splits(d: pd.DataFrame):
     groups = visual_groups(d)
-    independent = pd.DataFrame({"group": groups, "target": d.target}) \
-        .groupby("group").target.max()
+    independent = pd.DataFrame({"group": groups, "target": d.target}).groupby("group").target.max()
     positive_groups = int(independent.sum())
     negative_groups = int((independent == 0).sum())
     n = min(N_SPLITS, positive_groups, negative_groups)
     if n < 2:
-        raise RuntimeError("Нужно хотя бы по две независимые визуальные группы класса")
+        raise RuntimeError("At least two independent visual groups per class are required")
     cv = StratifiedGroupKFold(n_splits=n, shuffle=True, random_state=SEED)
     dummy = np.zeros((len(d), 1))
     return list(cv.split(dummy, d.target.to_numpy(), groups))
 
 
 def oof_scores(d: pd.DataFrame, emb: np.ndarray) -> pd.DataFrame:
-    """OOF-счёты таблицы, фото и их объединения для каждого кадра."""
+    """Implement `oof_scores`."""
     y = d.target.to_numpy()
     photo = emb[d.embedding_row.to_numpy()]
-    table = np.column_stack([
-        d.age.to_numpy(dtype=float),
-        np.log(d.price_tenge.to_numpy(dtype=float)),
-    ])
+    table = np.column_stack(
+        [
+            d.age.to_numpy(dtype=float),
+            np.log(d.price_tenge.to_numpy(dtype=float)),
+        ]
+    )
     out = d[["ad_id", "target"]].copy()
     out["table"] = np.nan
     out["photo"] = np.nan
@@ -166,9 +146,7 @@ def oof_scores(d: pd.DataFrame, emb: np.ndarray) -> pd.DataFrame:
             StandardScaler(),
             LogisticRegression(max_iter=3000, class_weight="balanced"),
         )
-        photo_model = LogisticRegression(
-            C=0.003, max_iter=3000, class_weight="balanced"
-        )
+        photo_model = LogisticRegression(C=0.003, max_iter=3000, class_weight="balanced")
         combined_model = make_pipeline(
             StandardScaler(),
             LogisticRegression(C=0.01, max_iter=3000, class_weight="balanced"),
@@ -184,7 +162,7 @@ def oof_scores(d: pd.DataFrame, emb: np.ndarray) -> pd.DataFrame:
 
 
 def per_ad(frame_scores: pd.DataFrame) -> pd.DataFrame:
-    """Одна строка на машину: повреждена, если повреждён любой кадр."""
+    """Implement `per_ad`."""
     return frame_scores.groupby("ad_id", as_index=False).agg(
         target=("target", "max"),
         table=("table", "max"),
@@ -194,7 +172,7 @@ def per_ad(frame_scores: pd.DataFrame) -> pd.DataFrame:
 
 
 def auc_ci(y, score, n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
-    """AUC и percentile bootstrap CI; ресэмплинг уже идёт по объявлениям."""
+    """Implement `auc_ci`."""
     y = np.asarray(y, dtype=int)
     score = np.asarray(score, dtype=float)
     auc = float(roc_auc_score(y, score))
@@ -208,9 +186,8 @@ def auc_ci(y, score, n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
     return auc, float(lo), float(hi)
 
 
-def average_precision_ci(y, score,
-                         n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
-    """PR-AUC (average precision) и bootstrap CI по объявлениям."""
+def average_precision_ci(y, score, n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
+    """Implement `average_precision_ci`."""
     y = np.asarray(y, dtype=int)
     score = np.asarray(score, dtype=float)
     value = float(average_precision_score(y, score))
@@ -224,14 +201,8 @@ def average_precision_ci(y, score,
     return value, float(lo), float(hi)
 
 
-def auc_delta_ci(y, candidate, baseline,
-                 n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
-    """Парный bootstrap для AUC(candidate) − AUC(baseline).
-
-    Отдельные интервалы двух AUC не отвечают на вопрос, значима ли разница.
-    Ресэмплируем одни и те же объявления для обеих моделей, сохраняя их
-    корреляцию — это и есть продуктовый gate, описанный в выводе.
-    """
+def auc_delta_ci(y, candidate, baseline, n_boot: int = BOOTSTRAPS) -> tuple[float, float, float]:
+    """Implement `auc_delta_ci`."""
     y = np.asarray(y, dtype=int)
     candidate = np.asarray(candidate, dtype=float)
     baseline = np.asarray(baseline, dtype=float)
@@ -242,8 +213,7 @@ def auc_delta_ci(y, candidate, baseline,
         idx = rng.integers(0, len(y), len(y))
         if np.unique(y[idx]).size == 2:
             values.append(
-                roc_auc_score(y[idx], candidate[idx])
-                - roc_auc_score(y[idx], baseline[idx])
+                roc_auc_score(y[idx], candidate[idx]) - roc_auc_score(y[idx], baseline[idx])
             )
     lo, hi = np.percentile(values, [2.5, 97.5])
     return delta, float(lo), float(hi)
@@ -253,9 +223,7 @@ def zero_shot_per_ad(d: pd.DataFrame) -> pd.DataFrame:
     scores = load_clip_scores()[["ad_id", "position", "clip_damaged"]].copy()
     scores["ad_id"] = scores.ad_id.astype(str)
     scores["position"] = scores.position.astype(int)
-    keys = d[["ad_id", "position", "target"]].merge(
-        scores, on=["ad_id", "position"], how="inner"
-    )
+    keys = d[["ad_id", "position", "target"]].merge(scores, on=["ad_id", "position"], how="inner")
     return keys.groupby("ad_id", as_index=False).agg(
         target=("target", "max"), zero_shot=("clip_damaged", "max")
     )
@@ -268,35 +236,39 @@ def main() -> None:
     d = d[d.dataset_split != "audit"].reset_index(drop=True)
     n_pos_ads = d.loc[d.target == 1, "ad_id"].nunique()
     n_neg_ads = d.loc[d.target == 0, "ad_id"].nunique()
-    print(f"Дешёвый сегмент: {len(d)} кадров, {n_pos_ads} повреждённых и "
-          f"{n_neg_ads} целых объявлений")
+    print(f"Cheap segment: {len(d)} frames, {n_pos_ads} damaged and {n_neg_ads} intact listings")
     if audit_ads:
-        print(f"Audit holdout: {audit_ads} новых объявлений исключены из "
-              "обучения/CV; отдельная оценка включится после набора классов")
+        print(
+            f"Audit holdout: {audit_ads} new listings excluded from "
+            "training/CV; separate evaluation starts once both classes are present"
+        )
 
     ads = per_ad(oof_scores(d, emb))
     zero = zero_shot_per_ad(d)
     ads = ads.merge(zero[["ad_id", "zero_shot"]], on="ad_id", how="left")
-    print("\nOOF метрики по независимым объявлениям (95% bootstrap CI):")
+    print("\nOOF metrics by independent listing (95% bootstrap CI):")
     for col, name in [
-        ("table", "возраст + цена"),
+        ("table", "age + price"),
         ("zero_shot", "CLIP zero-shot"),
-        ("photo", "CLIP-вектор, наши метки"),
-        ("combined", "таблица + CLIP-вектор"),
+        ("photo", "CLIP vector, manual labels"),
+        ("combined", "tabular + CLIP vector"),
     ]:
         work = ads[["target", col]].dropna()
         auc, lo, hi = auc_ci(work.target, work[col])
         ap, ap_lo, ap_hi = average_precision_ci(work.target, work[col])
-        print(f"  {name:27} ROC-AUC {auc:.3f} [{lo:.3f}; {hi:.3f}]  "
-              f"PR-AUC {ap:.3f} [{ap_lo:.3f}; {ap_hi:.3f}]")
-    print("\nПарная разница против возраста+цены:")
-    for col, name in [("photo", "CLIP-вектор"),
-                      ("combined", "таблица + CLIP")]:
+        print(
+            f"  {name:27} ROC-AUC {auc:.3f} [{lo:.3f}; {hi:.3f}]  "
+            f"PR-AUC {ap:.3f} [{ap_lo:.3f}; {ap_hi:.3f}]"
+        )
+    print("\nPaired difference versus age + price:")
+    for col, name in [("photo", "CLIP vector"), ("combined", "tabular + CLIP")]:
         work = ads[["target", "table", col]].dropna()
         delta, lo, hi = auc_delta_ci(work.target, work[col], work.table)
         print(f"  {name:27} ΔAUC {delta:+.3f}  [{lo:+.3f}; {hi:+.3f}]")
-    print("\nКритерий перехода в продукт: фото или combined должны обгонять "
-          "возраст+цену, а доверительный интервал разницы не должен накрывать ноль.")
+    print(
+        "\nProduct gate: the photo or combined model must beat age + price, "
+        "and the confidence interval for the difference must exclude zero."
+    )
 
 
 if __name__ == "__main__":

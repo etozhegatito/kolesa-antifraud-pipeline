@@ -1,35 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Сколько объявление проживёт на рынке — анализ выживаемости.
-
-ЗАЧЕМ ОТДЕЛЬНЫЙ МЕТОД, А НЕ ОБЫЧНАЯ РЕГРЕССИЯ. Наивный подход — взять
-проданные машины и предсказывать «дней до продажи» — даёт систематически
-заниженный ответ. Причина в том, что мы наблюдаем рынок ограниченное время:
-объявление, которое продаётся сорок дней, в выборку «проданных» ещё не
-попало, а то, что ушло за три дня, попало сразу.
-
-Это называется **правым цензурированием**: для части объектов событие ещё не
-случилось, и мы знаем только, что оно случится не раньше, чем через
-наблюдённое время. Выбрасывать такие объекты нельзя (потеряем медленные
-продажи), приравнивать их к «продалось сегодня» — тоже.
-
-Анализ выживаемости работает именно с такими данными.
-
-  Оценка Каплана-Мейера — доля объявлений, ещё живых через t дней. Каждый
-    цензурированный объект участвует ровно до момента, пока наблюдался, и
-    дальше корректно исключается из знаменателя.
-
-  Модель Кокса — какие факторы ускоряют уход с рынка. Коэффициент читается
-    как отношение рисков: 1,5 означает, что при прочих равных объявление
-    уходит в полтора раза быстрее.
-
-ЧЕСТНАЯ ГРАНИЦА. Окно наблюдения около трёх недель, событий 183. Этого
-достаточно, чтобы увидеть форму кривой на коротких сроках, и НЕ достаточно,
-чтобы говорить о сроках больше трёх недель: там просто нет данных. Все
-выводы за пределами окна — экстраполяция, и в отчёте это сказано прямо.
-
-Запуск: python -m kz.ml.survival
-Выход:  консоль + data/eda/survival.png
-"""
+"""Implementation for the `kz.ml.survival` module."""
 
 from __future__ import annotations
 
@@ -43,27 +13,29 @@ import pandas as pd
 from kz.core.db import get_engine
 
 OUT_PNG = Path("data/eda/survival.png")
-HORIZON = 21          # дней: дальше данных почти нет, экстраполировать нечестно
-MIN_EVENTS_PER_FEATURE = 10   # общепринятое правило для модели Кокса
+HORIZON = 21
+MIN_EVENTS_PER_FEATURE = 10
 EVENT_STATUSES = ("archived", "deleted")
 
-_MON = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
-        "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
+_MON = {
+    "янв": 1,
+    "фев": 2,
+    "мар": 3,
+    "апр": 4,
+    "май": 5,
+    "мая": 5,
+    "июн": 6,
+    "июл": 7,
+    "авг": 8,
+    "сен": 9,
+    "окт": 10,
+    "ноя": 11,
+    "дек": 12,
+}
 
 
 def parse_posted(s, today: date | None = None):
-    """'18 июля' / '18 июл.' → date. Иначе None.
-
-    Kolesa пишет дату публикации без года, поэтому год приходится
-    домысливать. Наивное «текущий год» ломается на стыке: объявление от
-    28 декабря, разобранное 3 января, получило бы дату на год вперёд, срок
-    жизни вышел бы отрицательным и строка молча выпала бы из анализа. Здесь
-    дата из будущего трактуется как прошлогодняя — единственное прочтение,
-    которое имеет смысл для уже опубликованного объявления.
-
-    today параметром, а не через date.today() внутри: иначе тест на этот
-    самый стык года пришлось бы запускать 1 января.
-    """
+    """Implement `parse_posted`."""
     m = re.match(r"\s*(\d{1,2})\s+([а-яё]+)", str(s).lower())
     if not m:
         return None
@@ -78,52 +50,35 @@ def parse_posted(s, today: date | None = None):
     return date(today.year - 1, mon, day) if parsed > today else parsed
 
 
-def build_lifespans(cd: pd.DataFrame, st: pd.DataFrame,
-                    sg: pd.DataFrame) -> pd.DataFrame:
-    """Три таблицы → «сколько прожило и случилось ли событие».
-
-    Вынесено из load_survival отдельной чистой функцией: вся логика
-    цензурирования живёт здесь, и её можно проверить без базы. Ошибка
-    именно тут самая дорогая — если цензурированное объявление посчитать
-    ушедшим, кривая выживания поедет вниз, и метод соврёт ровно в том, ради
-    чего его брали.
-
-    Начало отсчёта — дата публикации из карточки, а не дата, когда мы
-    впервые увидели объявление: сбор начался позже, чем часть объявлений
-    появилась, и от нашего расписания срок жизни зависеть не должен.
-    """
+def build_lifespans(cd: pd.DataFrame, st: pd.DataFrame, sg: pd.DataFrame) -> pd.DataFrame:
+    """Implement `build_lifespans`."""
     d = cd.merge(st, on="ad_id", how="left").merge(sg, on="ad_id", how="left")
     d["start"] = pd.to_datetime(d["posted_date"].map(parse_posted))
     d["event"] = d["status"].isin(EVENT_STATUSES).astype(int)
-    # конец наблюдения: дата проверки для ушедших, последняя встреча для живых
-    d["end"] = pd.to_datetime(
-        np.where(d["event"] == 1, d["checked_at"], d["last_seen"]))
+
+    d["end"] = pd.to_datetime(np.where(d["event"] == 1, d["checked_at"], d["last_seen"]))
     d["days"] = (d["end"] - d["start"]).dt.days
     d = d[d["days"].notna() & (d["days"] >= 0) & d["price_tenge"].notna()]
     return d.reset_index(drop=True)
 
 
 def load_survival() -> pd.DataFrame:
-    """То же самое, но с чтением из базы."""
+    """Implement `load_survival`."""
     eng = get_engine()
-    # Берём все колонки: дальше по этой же таблице считается справедливая цена
-    # моделью, а ей нужен полный набор признаков.
+
     cd = pd.read_sql("SELECT * FROM clean_data", eng, dtype={"ad_id": str})
-    # status в clean_data уже есть — из ad_status берём только дату проверки,
-    # иначе слияние раздвоило бы колонку в status_x/status_y.
-    st = pd.read_sql("SELECT ad_id, checked_at FROM ad_status", eng,
-                     dtype={"ad_id": str})
-    sg = pd.read_sql("SELECT ad_id, MAX(seen_date) AS last_seen FROM sightings "
-                     "GROUP BY ad_id", eng, dtype={"ad_id": str})
+
+    st = pd.read_sql("SELECT ad_id, checked_at FROM ad_status", eng, dtype={"ad_id": str})
+    sg = pd.read_sql(
+        "SELECT ad_id, MAX(seen_date) AS last_seen FROM sightings GROUP BY ad_id",
+        eng,
+        dtype={"ad_id": str},
+    )
     return build_lifespans(cd, st, sg)
 
 
 def add_price_position(d: pd.DataFrame) -> pd.DataFrame:
-    """Насколько цена отличается от справедливой по модели.
-
-    Это и есть переменная, ради которой всё затевалось: продавец хочет знать,
-    ускорит ли скидка продажу.
-    """
+    """Implement `add_price_position`."""
     from kz.ml.train_price_model import coerce_features, FEATURES, load_artifact
 
     model, _ = load_artifact()
@@ -132,134 +87,136 @@ def add_price_position(d: pd.DataFrame) -> pd.DataFrame:
     d = d.copy()
     d["fair_price"] = fair
     d["price_ratio"] = d["price_tenge"] / fair
-    # три группы вместо непрерывной величины: событий мало, и дробить сильнее
-    # значит получить доверительные интервалы шире самого эффекта
+
     d["price_group"] = pd.cut(
-        d["price_ratio"], [0, 0.9, 1.1, np.inf],
-        labels=["дешевле рынка", "по рынку", "дороже рынка"])
+        d["price_ratio"],
+        [0, 0.9, 1.1, np.inf],
+        labels=["below market", "near market", "above market"],
+    )
     return d
 
 
 def kaplan_meier(d: pd.DataFrame, log=print):
-    """Кривая выживания: доля объявлений, ещё висящих через t дней."""
+    """Implement `kaplan_meier`."""
     from lifelines import KaplanMeierFitter
 
     km = KaplanMeierFitter()
-    km.fit(d["days"], d["event"], label="все объявления")
-    log("\nДоля объявлений, ещё не ушедших с рынка:")
+    km.fit(d["days"], d["event"], label="all listings")
+    log("\nShare of listings still on the market:")
     for t in (3, 7, 14, HORIZON):
         s = float(km.survival_function_at_times(t).iloc[0])
-        log(f"  через {t:2d} дн. — {s*100:5.1f}%   (то есть ушло {100-s*100:.1f}%)")
+        log(f"  after {t:2d} days — {s * 100:5.1f}%   ({100 - s * 100:.1f}% left the market)")
     med = km.median_survival_time_
-    log("\nМедианный срок жизни: "
-        + (f"{med:.0f} дн." if np.isfinite(med) else
-           "не достигнут — за окно наблюдения ушла меньше половины объявлений"))
+    log(
+        "\nMedian listing lifetime: "
+        + (
+            f"{med:.0f} days"
+            if np.isfinite(med)
+            else "not reached; fewer than half the listings left during observation"
+        )
+    )
     return km
 
 
 def by_price_group(d: pd.DataFrame, log=print):
-    """Продаются ли дешёвые быстрее — главный продуктовый вопрос."""
+    """Implement `by_price_group`."""
     from lifelines import KaplanMeierFitter
     from lifelines.statistics import multivariate_logrank_test
 
-    log("\nУход с рынка по группам цены (доля ушедших к 14-му дню):")
+    log("\nMarket exit by price group (share gone by day 14):")
     curves = {}
     for name, g in d.groupby("price_group", observed=True):
         if g["event"].sum() < 5:
-            log(f"  {name:16} событий {int(g['event'].sum())} — слишком мало")
+            log(f"  {name:16} events {int(g['event'].sum())}; too few")
             continue
         km = KaplanMeierFitter().fit(g["days"], g["event"], label=str(name))
         s14 = float(km.survival_function_at_times(14).iloc[0])
-        log(f"  {str(name):16} n={len(g):5d}  событий={int(g['event'].sum()):4d}  "
-            f"ушло к 14 дню {100-s14*100:5.1f}%")
+        log(
+            f"  {str(name):16} n={len(g):5d}  events={int(g['event'].sum()):4d}  "
+            f"gone by day 14 {100 - s14 * 100:5.1f}%"
+        )
         curves[str(name)] = km
 
     res = multivariate_logrank_test(d["days"], d["price_group"], d["event"])
-    log(f"\nЛогранговый тест различия кривых: p = {res.p_value:.4f}"
-        + ("  — различие значимо" if res.p_value < 0.05
-           else "  — различие НЕ значимо"))
+    log(
+        f"\nLog-rank test across curves: p = {res.p_value:.4f}"
+        + (
+            "  — statistically significant"
+            if res.p_value < 0.05
+            else "  — not statistically significant"
+        )
+    )
     return curves
 
 
 def cox_model(d: pd.DataFrame, log=print):
-    """Какие факторы ускоряют уход с рынка."""
+    """Implement `cox_model`."""
     from lifelines import CoxPHFitter
 
     feats = ["price_ratio", "age", "photos_count", "is_vip"]
     n_events = int(d["event"].sum())
     allowed = n_events // MIN_EVENTS_PER_FEATURE
     if allowed < len(feats):
-        feats = feats[:max(1, allowed)]
-        log(f"\n(признаков ограничено до {len(feats)}: событий {n_events}, "
-            f"правило — не меньше {MIN_EVENTS_PER_FEATURE} событий на признак)")
+        feats = feats[: max(1, allowed)]
+        log(
+            f"\n(features limited to {len(feats)}: {n_events} events; "
+            f"require at least {MIN_EVENTS_PER_FEATURE} events per feature)"
+        )
 
     work = d[feats + ["days", "event"]].dropna().copy()
     cph = CoxPHFitter().fit(work, duration_col="days", event_col="event")
-    log("\nМодель Кокса — отношение рисков (больше 1 = уходит быстрее):")
+    log("\nCox model hazard ratios (above 1 means a faster market exit):")
     s = cph.summary
     for name in s.index:
         hr, p = s.loc[name, "exp(coef)"], s.loc[name, "p"]
-        mark = "  ← значимо" if p < 0.05 else ""
+        mark = "  ← significant" if p < 0.05 else ""
         log(f"  {name:16} HR={hr:5.2f}   p={p:.4f}{mark}")
     return cph
 
 
 def plot(km, curves, path: Path = OUT_PNG) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.2), dpi=130)
     km.plot_survival_function(ax=ax[0], color="#2563c9")
-    ax[0].set_title("Доля объявлений на рынке")
-    ax[0].set_xlabel("дней с публикации"); ax[0].set_ylabel("ещё не ушли")
-    ax[0].set_xlim(0, HORIZON); ax[0].grid(alpha=.3)
+    ax[0].set_title("Share of listings still on market")
+    ax[0].set_xlabel("days since publication")
+    ax[0].set_ylabel("still listed")
+    ax[0].set_xlim(0, HORIZON)
+    ax[0].grid(alpha=0.3)
     for _label, c in curves.items():
         c.plot_survival_function(ax=ax[1])
-    ax[1].set_title("По группам цены")
-    ax[1].set_xlabel("дней с публикации"); ax[1].set_xlim(0, HORIZON)
-    ax[1].grid(alpha=.3)
+    ax[1].set_title("By price group")
+    ax[1].set_xlabel("days since publication")
+    ax[1].set_xlim(0, HORIZON)
+    ax[1].grid(alpha=0.3)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path)
-    print(f"\nГрафик → {path}")
+    print(f"\nChart → {path}")
 
 
 def verified_bracket(d: pd.DataFrame, log=print) -> None:
-    """Одно число здесь было бы обманом — печатаем вилку.
-
-    Оценка сильно зависит от того, кого считать живым, а у нас статус
-    проверялся лишь у части объявлений (остальным clean.py ставит active по
-    умолчанию, а не по проверке). Отсюда две границы, и обе смещены, но в
-    РАЗНЫЕ стороны:
-
-      по всем — вниз по доле ушедших: тысячи непроверенных записаны живыми,
-        хотя мы просто не смотрели;
-
-      только по проверенным — вверх: check_status в первую очередь идёт к
-        тем, кто пропал из листинга, то есть выборка обогащена ушедшими.
-
-    Правда между границами. Сузить вилку может только проверка статусов, а
-    не новый парсинг.
-    """
+    """Implement `verified_bracket`."""
     from lifelines import KaplanMeierFitter
 
     from kz.core.db import get_engine
 
-    st = pd.read_sql("SELECT ad_id FROM ad_status", get_engine(),
-                     dtype={"ad_id": str})
+    st = pd.read_sql("SELECT ad_id FROM ad_status", get_engine(), dtype={"ad_id": str})
     checked = d[d["ad_id"].isin(set(st["ad_id"]))]
     if len(checked) < 50 or len(checked) == len(d):
         return
 
-    log("\nДоля ушедших к 14-му дню — вилка, а не число:")
-    for name, sub in [("по всем объявлениям", d),
-                      ("только по проверенным", checked)]:
+    log("\nShare gone by day 14 is a bracket, not a point estimate:")
+    for name, sub in [("all listings", d), ("checked listings only", checked)]:
         km = KaplanMeierFitter().fit(sub["days"], sub["event"])
         s14 = float(km.survival_function_at_times(14).iloc[0])
-        log(f"  {name:24} n={len(sub):5}  ушло {100-s14*100:5.1f}%")
-    log("  Первая граница занижена (непроверенные записаны живыми),")
-    log("  вторая завышена (проверяли в первую очередь пропавших).")
+        log(f"  {name:24} n={len(sub):5}  gone {100 - s14 * 100:5.1f}%")
+    log("  The first bound is low because unchecked rows count as active;")
+    log("  the second is high because missing listings were checked first.")
 
 
 def main():
@@ -267,18 +224,19 @@ def main():
 
     d = load_survival()
 
-    # Свежесть печатается ПЕРЕД числами, а не после: этот метод опирается на
-    # статус объявления сильнее любого другого в проекте, и устаревшие
-    # статусы искажают его напрямую.
     state = fr.measure()
     fr.report(state)
     for w in fr.stale_warnings(state):
         print(f"  ⚠ {w}")
 
-    print(f"\nОбъявлений: {len(d)}   событий: {int(d.event.sum())}   "
-          f"цензурировано: {int((1-d.event).sum())}")
-    print(f"Доля событий {d.event.mean()*100:.1f}% — большинство ещё висит, "
-          "и именно поэтому нужен анализ выживаемости, а не регрессия.")
+    print(
+        f"\nListings: {len(d)}   events: {int(d.event.sum())}   "
+        f"censored: {int((1 - d.event).sum())}"
+    )
+    print(
+        f"Event share {d.event.mean() * 100:.1f}% — most listings remain active, "
+        "which is why survival analysis is required instead of ordinary regression."
+    )
 
     km = kaplan_meier(d)
     verified_bracket(d)
@@ -286,11 +244,13 @@ def main():
     curves = by_price_group(d)
     try:
         cox_model(d)
-    except Exception as e:                       # noqa: BLE001 — данных может не хватить
-        print(f"\nМодель Кокса не сошлась: {e}")
+    except Exception as e:  # noqa: BLE001 -- intentional exception
+        print(f"\nCox model did not converge: {e}")
     plot(km, curves)
-    print(f"\nГраница честности: окно наблюдения около {int(d.days.max())} дней. "
-          f"Выводы о сроках дольше {HORIZON} дней данными не обеспечены.")
+    print(
+        f"\nEvidence boundary: the observation window is about {int(d.days.max())} days. "
+        f"The data do not support conclusions beyond {HORIZON} days."
+    )
 
 
 if __name__ == "__main__":

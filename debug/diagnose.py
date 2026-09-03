@@ -1,28 +1,13 @@
 # -*- coding: utf-8 -*-
-"""
-diagnose.py — ответ на вопрос «почему у объявления X пустое поле Y?»
-одной командой. Кодифицирует трёхшаговый диагноз:
+"""Explain why one listing has missing enriched fields."""
 
-  шаг 1: что лежит в наших файлах (raw / enriched / clean)?
-  шаг 2: если пусто в enriched — оно вообще обогащалось, или очередь не дошла?
-  шаг 3: живой запрос страницы + прогон через parse_ad_page:
-         отдаёт ли ИСТОЧНИК это поле, и берёт ли его НАШ парсер?
-
-Вердикты:
-  «очередь не дошла»   — не баг: enrich доберётся, страница восстановима
-  «нет в источнике»    — не баг: продавец не указал (MNAR)
-  «есть в другой колонке» — не баг: смотри text_full / seller_comment
-  «парсер теряет»      — вот ЭТО баг: неси ad_id разработчику (себе)
-
-Запуск: python debug/diagnose.py 210229611
-"""
-
-# ─── Самопроверка файла (защита от путаницы при копировании) ────────────────
 import pathlib as _p
+
 _expected = "diagnose.py"
 if _p.Path(__file__).name != _expected:
-    raise SystemExit(f"ОШИБКА: этот код — {_expected}, а файл называется "
-                     f"{_p.Path(__file__).name}.")
+    raise SystemExit(
+        f"ERROR: this code belongs to {_expected}, but the file is named {_p.Path(__file__).name}."
+    )
 
 import sys
 import time
@@ -31,72 +16,84 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-# enrich.py лежит в корне репозитория, на уровень выше debug/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from kz.collect.enrich import parse_ad_page, HEADERS
+from kz.collect.enrich import HEADERS, parse_ad_page
 
 
-def read_if_exists(path, **kw):
-    return pd.read_csv(path, dtype={"ad_id": str}, **kw) if Path(path).exists() else None
+def read_if_exists(path, **kwargs):
+    """Read a CSV when present and otherwise return ``None``."""
+    if not Path(path).exists():
+        return None
+    return pd.read_csv(path, dtype={"ad_id": str}, **kwargs)
 
 
 def main():
+    """Print local evidence and one live detail-page comparison."""
     if len(sys.argv) < 2:
-        raise SystemExit("Использование: python diagnose.py <ad_id>")
-    ad = sys.argv[1].strip()
-    print(f"═══ Диагноз объявления {ad} ═══\n")
+        raise SystemExit("Usage: python diagnose.py <ad_id>")
+    ad_id = sys.argv[1].strip()
+    print(f"═══ Listing diagnosis: {ad_id} ═══\n")
 
-    # ── шаг 1: наши файлы ────────────────────────────────────────────────
     raw = read_if_exists("data/raw/raw_data.csv")
-    enr = read_if_exists("data/enriched/enriched.csv")
-    cl  = read_if_exists("data/clean/clean_data.csv")
+    enriched_data = read_if_exists("data/enriched/enriched.csv")
+    clean = read_if_exists("data/clean/clean_data.csv")
 
-    r = raw[raw.ad_id == ad] if raw is not None else pd.DataFrame()
-    if len(r) == 0:
-        print("• В raw_data объявления НЕТ — листинг его ещё не встречал")
+    raw_rows = raw[raw.ad_id == ad_id] if raw is not None else pd.DataFrame()
+    if raw_rows.empty:
+        print("• The listing is absent from raw_data; collection has not seen it")
     else:
-        row = r.iloc[-1]
-        print(f"• raw: is_vip={row.get('is_vip')}, "
-              f"mileage={row.get('mileage_km')}, "
-              f"description={str(row.get('description'))[:60]!r}")
+        row = raw_rows.iloc[-1]
+        print(
+            f"• raw: is_vip={row.get('is_vip')}, "
+            f"mileage={row.get('mileage_km')}, "
+            f"description={str(row.get('description'))[:60]!r}"
+        )
 
-    enriched = enr is not None and ad in set(enr.ad_id)
-    print(f"• enriched: {'ДА' if enriched else 'нет — очередь не дошла (не баг)'}")
-    if enriched:
-        e = enr[enr.ad_id == ad].iloc[-1]
-        print(f"    page_mileage={e.get('page_mileage_km')}, "
-              f"seller_comment={str(e.get('seller_comment'))[:70]!r}")
-    if cl is not None and "text_full" in cl.columns:
-        c = cl[cl.ad_id == ad]
-        if len(c):
-            print(f"• clean.text_full: {str(c.iloc[-1]['text_full'])[:70]!r}")
+    is_enriched = enriched_data is not None and ad_id in set(enriched_data.ad_id)
+    status = "YES" if is_enriched else "no — still waiting in queue, not a bug"
+    print(f"• enriched: {status}")
+    if is_enriched:
+        row = enriched_data[enriched_data.ad_id == ad_id].iloc[-1]
+        print(
+            f"    page_mileage={row.get('page_mileage_km')}, "
+            f"seller_comment={str(row.get('seller_comment'))[:70]!r}"
+        )
+    if clean is not None and "text_full" in clean.columns:
+        rows = clean[clean.ad_id == ad_id]
+        if len(rows):
+            print(f"• clean.text_full: {str(rows.iloc[-1]['text_full'])[:70]!r}")
 
-    # ── шаг 3: живой источник + наш парсер ───────────────────────────────
-    print("\n• Живой запрос страницы...")
+    print("\n• Live page request...")
     time.sleep(2)
-    resp = requests.get(f"https://kolesa.kz/a/show/{ad}",
-                        headers=HEADERS, timeout=20)
-    print(f"    HTTP {resp.status_code}")
-    if resp.status_code != 200:
-        print("    Страница недоступна (404 = удалено) — вердикт: нет в источнике")
+    response = requests.get(f"https://kolesa.kz/a/show/{ad_id}", headers=HEADERS, timeout=20)
+    print(f"    HTTP {response.status_code}")
+    if response.status_code != 200:
+        print("    Page unavailable (404 means deleted); the source no longer has it")
         return
-    parsed = parse_ad_page(resp.text)
-    print(f"    парсер видит: пробег={parsed.get('page_mileage_km')}, "
-          f"комментарий={parsed.get('seller_comment','')[:70]!r}, "
-          f"растаможка={parsed.get('customs_cleared')}")
+    parsed = parse_ad_page(response.text)
+    print(
+        f"    parser sees: mileage={parsed.get('page_mileage_km')}, "
+        f"comment={parsed.get('seller_comment', '')[:70]!r}, "
+        f"customs_clearance={parsed.get('customs_cleared')}"
+    )
 
-    # ── вердикт ──────────────────────────────────────────────────────────
-    print("\n═══ Вердикт ═══")
-    if not enriched:
-        print("Поля пусты, потому что обогащение ещё не дошло (приоритетная "
-              "очередь, бюджет 120/день). Парсер страницы поле берёт — "
-              "см. строку выше. Данные восстановимы, багов нет.")
+    print("\n═══ Verdict ═══")
+    if not is_enriched:
+        print(
+            "Fields are empty because enrichment has not reached this row yet "
+            "(priority queue with a daily budget). The page parser did extract "
+            "the field above. The data are recoverable; this is not a bug."
+        )
     elif parsed.get("page_mileage_km") is None:
-        print("Пробега нет на самой странице (обычно новая машина или "
-              "продавец не указал) — MNAR, парсить нечего.")
+        print(
+            "The detail page itself has no mileage, usually because the vehicle "
+            "is new or the seller omitted it. This is MNAR; nothing can be parsed."
+        )
     else:
-        print("Страница отдаёт данные, объявление обогащено — сверь колонки: "
-              "полный текст живёт в seller_comment/text_full, а не в description.")
+        print(
+            "The page returns data and the listing is enriched. Check the columns: "
+            "full text lives in seller_comment/text_full, not description."
+        )
 
 
 if __name__ == "__main__":

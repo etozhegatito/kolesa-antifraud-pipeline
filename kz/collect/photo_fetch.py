@@ -1,40 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Скачивание фотографий на диск — сырьё для работы с изображениями.
-
-Зачем отдельно от photo_dedup: тот считает перцептивный хэш и картинку
-выбрасывает, потому что для поиска дублей достаточно отпечатка. Для двух
-следующих задач нужны сами пиксели:
-
-  качество снимка — резкость, яркость, разрешение: отсюда рекомендации
-                    продавцу «третье фото смазано», «нет снимка салона»;
-  признаки цены   — эмбеддинг изображения как вход модели. Это прямая
-                    проверка гипотезы, ради которой всё затевалось: на
-                    дешёвых и старых машинах цену определяет состояние,
-                    а в табличных признаках его нет.
-
-ХОСТ И БЮДЖЕТ. Фото лежат на CDN kcdn.kz — это НЕ kolesa.kz, у него свой
-суточный лимит (см. catch_up.DAILY_BUDGET). Скачивание фотографий не расходует
-квоту, из-за которой берегли основной сайт. Расход всё равно записывается в
-общий счётчик, иначе два потребителя CDN считали бы каждый своё.
-
-ХРАНЕНИЕ. Картинка ужимается до MAX_SIDE по длинной стороне и пишется JPEG.
-Оригиналы держать незачем: и для эмбеддингов, и для оценки резкости этого с
-запасом, а место экономится в разы.
-
-РЕЗЮМИРУЕМОСТЬ. Уже скачанное пропускается по наличию файла, неудачи
-записываются в манифест, чтобы мёртвые ссылки не перекачивались вечно.
-
-Запуск:
-    python -m kz.collect.photo_fetch                 обложки, порция по умолчанию
-    python -m kz.collect.photo_fetch --limit 500     сколько скачать за раз
-    python -m kz.collect.photo_fetch --all-positions не только обложки
-"""
+"""Implementation for the `kz.collect.photo_fetch` module."""
 
 import pathlib as _p
+
 _expected = "photo_fetch.py"
 if _p.Path(__file__).name != _expected:
-    raise SystemExit(f"ОШИБКА: этот код — {_expected}, а файл называется "
-                     f"{_p.Path(__file__).name}.")
+    raise SystemExit(
+        f"ERROR: this code belongs to {_expected}, but the file is named {_p.Path(__file__).name}."
+    )
 
 import csv
 import io
@@ -56,29 +29,37 @@ PHOTO_DIR = Path("data/photos")
 MANIFEST = PHOTO_DIR / "manifest.csv"
 LOG_FILE = "logs/photo_fetch.log"
 
-MAX_PER_RUN = 300            # порция; CDN терпимее сайта, но меру знаем
-MAX_SIDE = 768               # длинная сторона после сжатия, пикселей
+MAX_PER_RUN = 300
+MAX_SIDE = 768
 JPEG_QUALITY = 85
-DELAY_RANGE = (0.8, 2.0)     # картинки легче страниц — пауза меньше
-BREAK_EVERY = 120            # перерыв реже, чем у страниц: CDN раздаёт
-                             # статику, и пауза каждые 15 файлов означала бы,
-                             # что job три четверти времени просто спит
+DELAY_RANGE = (0.8, 2.0)
+BREAK_EVERY = 120
+
+
 MAX_CONSECUTIVE_FAILS = 10
 
-MANIFEST_COLS = ["ad_id", "position", "url", "path", "http_status",
-                 "width", "height", "bytes", "fetched_at"]
+MANIFEST_COLS = [
+    "ad_id",
+    "position",
+    "url",
+    "path",
+    "http_status",
+    "width",
+    "height",
+    "bytes",
+    "fetched_at",
+]
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"),
-              logging.StreamHandler()])
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)s  %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
+)
 log = logging.getLogger(__name__)
 
 
 def local_path(ad_id: str, position: int) -> Path:
-    """Путь к файлу. Раскладываем по подпапкам с двумя первыми символами
-    ad_id: тысячи файлов в одном каталоге тормозят и файловую систему, и
-    любой ls."""
+    """Implement `local_path`."""
     return PHOTO_DIR / str(ad_id)[:2] / f"{ad_id}_{position}.jpg"
 
 
@@ -89,8 +70,7 @@ def load_manifest() -> pd.DataFrame:
 
 
 def append_manifest(rows: list[dict]) -> None:
-    """Дописываем csv-модулем: pandas превращает целые в «50.0» при
-    round-trip (правило проекта №4)."""
+    """Implement `append_manifest`."""
     if not rows:
         return
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
@@ -103,22 +83,13 @@ def append_manifest(rows: list[dict]) -> None:
             w.writerow({c: r.get(c, "") for c in MANIFEST_COLS})
 
 
-# Коды, после которых повторять бессмысленно: файла нет и не будет.
-# Всё остальное (таймаут, обрыв, 5xx) — временное, и такие ссылки должны
-# оставаться в очереди. Иначе одна сетевая икота навсегда теряла бы фото.
 PERMANENT_STATUSES = {200, 404, 410}
 
 
 def live_hosts(urls) -> set[str]:
-    """Хосты, которые сейчас резолвятся.
-
-    Нужно потому, что 2026-08-09 обнаружилось: kolesa вывел из эксплуатации
-    один из двух CDN-хостов, и 37% наших ссылок стали недостижимы. Проверять
-    DNS по одному разу на хост вместо тысячи одинаковых падений — и быстрее,
-    и в логе видно причину. Мёртвые ссылки при этом НЕ помечаются навсегда:
-    если хост вернётся, они снова попадут в очередь.
-    """
+    """Implement `live_hosts`."""
     import socket
+
     hosts = {u.split("/")[2] for u in urls}
     alive = set()
     for h in sorted(hosts):
@@ -126,16 +97,13 @@ def live_hosts(urls) -> set[str]:
             socket.getaddrinfo(h, 443)
             alive.add(h)
         except OSError:
-            log.warning(f"хост {h} не резолвится — пропускаю его ссылки")
+            log.warning(f"Host {h} does not resolve; skipping its URLs")
     return alive
 
 
-def pick_targets(limit: int, covers_only: bool = True,
-                 complete_only: bool = False) -> pd.DataFrame:
-    """Что качать: сначала обложки — они есть у всех объявлений, и по одной
-    на каждое даёт максимальный охват на единицу трафика."""
-    ph = pd.read_sql("SELECT ad_id, position, url FROM photos", get_engine(),
-                     dtype={"ad_id": str})
+def pick_targets(limit: int, covers_only: bool = True, complete_only: bool = False) -> pd.DataFrame:
+    """Implement `pick_targets`."""
+    ph = pd.read_sql("SELECT ad_id, position, url FROM photos", get_engine(), dtype={"ad_id": str})
     ph = ph[ph["url"].fillna("").str.startswith("http")]
     if covers_only:
         ph = ph[ph["position"] == ph.groupby("ad_id")["position"].transform("min")]
@@ -155,11 +123,7 @@ def pick_targets(limit: int, covers_only: bool = True,
 
 
 def save_image(content: bytes, dest: Path) -> tuple[int, int, int]:
-    """Ужать и сохранить. Возвращает (ширина, высота, байт на диске).
-
-    Приводим к RGB: часть картинок приходит в webp с альфа-каналом, а JPEG
-    прозрачность не умеет и падает на сохранении.
-    """
+    """Implement `save_image`."""
     img = ImageOps.exif_transpose(Image.open(io.BytesIO(content)))
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
@@ -174,9 +138,7 @@ def main():
     if "--limit" in sys.argv:
         limit = int(sys.argv[sys.argv.index("--limit") + 1])
     covers_only = "--all-positions" not in sys.argv
-    # Дополнить уже начатые объявления: позиции 2-5 там, где обложка есть.
-    # Полный комплект по части машин полезнее, чем по одной картинке у всех:
-    # гипотеза о видимых повреждениях проверяется только на комплектах.
+
     complete_only = "--complete" in sys.argv
     if complete_only:
         covers_only = False
@@ -184,18 +146,22 @@ def main():
     used = load_budget_used()
     left = DAILY_BUDGET["cdn"] - used["cdn"]
     if left <= 0:
-        log.info(f"Суточный лимит CDN выбран ({used['cdn']}/{DAILY_BUDGET['cdn']}), "
-                 "продолжим завтра.")
+        log.info(
+            f"The rolling CDN budget is exhausted ({used['cdn']}/{DAILY_BUDGET['cdn']}); "
+            "resume when the window frees up."
+        )
         return
     limit = min(limit, left)
 
     targets = pick_targets(limit, covers_only, complete_only)
     if targets.empty:
-        log.info("Нечего качать: всё скачано или помечено как недоступное.")
+        log.info("Nothing to download: every image is present or marked unavailable.")
         return
-    log.info(f"К скачиванию {len(targets)} "
-             f"({'обложки' if covers_only else 'все позиции'}); "
-             f"лимит CDN {used['cdn']}/{DAILY_BUDGET['cdn']}")
+    log.info(
+        f"Queued {len(targets)} images "
+        f"({'cover photos' if covers_only else 'all positions'}); "
+        f"CDN budget {used['cdn']}/{DAILY_BUDGET['cdn']}"
+    )
 
     session = requests.Session()
     rows, ok, fails, streak = [], 0, 0, 0
@@ -206,40 +172,71 @@ def main():
             status = resp.status_code
             if status == 200:
                 w, h, size = save_image(resp.content, dest)
-                rows.append(dict(ad_id=r.ad_id, position=r.position, url=r.url,
-                                 path=str(dest), http_status=200, width=w,
-                                 height=h, bytes=size,
-                                 fetched_at=datetime.now().isoformat(timespec="seconds")))
+                rows.append(
+                    dict(
+                        ad_id=r.ad_id,
+                        position=r.position,
+                        url=r.url,
+                        path=str(dest),
+                        http_status=200,
+                        width=w,
+                        height=h,
+                        bytes=size,
+                        fetched_at=datetime.now().isoformat(timespec="seconds"),
+                    )
+                )
                 ok += 1
                 streak = 0
             else:
-                rows.append(dict(ad_id=r.ad_id, position=r.position, url=r.url,
-                                 path="", http_status=status, width="", height="",
-                                 bytes="",
-                                 fetched_at=datetime.now().isoformat(timespec="seconds")))
+                rows.append(
+                    dict(
+                        ad_id=r.ad_id,
+                        position=r.position,
+                        url=r.url,
+                        path="",
+                        http_status=status,
+                        width="",
+                        height="",
+                        bytes="",
+                        fetched_at=datetime.now().isoformat(timespec="seconds"),
+                    )
+                )
                 fails += 1
                 streak += 1
-        except Exception as e:                    # noqa: BLE001 — сеть и битые файлы
+        except Exception as e:  # noqa: BLE001 -- intentional exception
             log.warning(f"{r.ad_id}/{r.position}: {e}")
-            rows.append(dict(ad_id=r.ad_id, position=r.position, url=r.url,
-                             path="", http_status=-1, width="", height="", bytes="",
-                             fetched_at=datetime.now().isoformat(timespec="seconds")))
+            rows.append(
+                dict(
+                    ad_id=r.ad_id,
+                    position=r.position,
+                    url=r.url,
+                    path="",
+                    http_status=-1,
+                    width="",
+                    height="",
+                    bytes="",
+                    fetched_at=datetime.now().isoformat(timespec="seconds"),
+                )
+            )
             fails += 1
             streak += 1
 
         if streak >= MAX_CONSECUTIVE_FAILS:
-            log.error("Стоп: подряд слишком много сбоев — продолжим позже.")
+            log.error("Stopped after too many consecutive failures; resume later.")
             break
         if i % 50 == 0:
-            append_manifest(rows); rows = []      # пишем порциями, чтобы не терять при обрыве
-            log.info(f"  {i}/{len(targets)}: скачано {ok}, ошибок {fails}")
+            append_manifest(rows)
+            rows = []
+            log.info(f"  {i}/{len(targets)}: downloaded {ok}, failures {fails}")
         pacing.polite_sleep(i, DELAY_RANGE, log, break_every=BREAK_EVERY)
 
     append_manifest(rows)
     charge_budget("cdn", ok + fails)
     mb = sum(int(x["bytes"]) for x in rows if x.get("bytes")) / 1e6
-    log.info(f"Готово: скачано {ok} ({mb:.1f} МБ), ошибок {fails}. "
-             f"Всего на диске: {sum(1 for _ in PHOTO_DIR.rglob('*.jpg'))} файлов")
+    log.info(
+        f"Completed: downloaded {ok} ({mb:.1f} MB), failures {fails}. "
+        f"Files currently on disk: {sum(1 for _ in PHOTO_DIR.rglob('*.jpg'))}"
+    )
 
 
 if __name__ == "__main__":

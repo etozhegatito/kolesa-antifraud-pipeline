@@ -1,27 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Точка входа: python -m kz.report.label_cards"""
+"""Command-line entry point for ``python -m kz.report.label_cards``."""
 
 import sys
 from pathlib import Path
 
-from kz.report.label_cards.journal import (LABELS_CSV, LABELS_PREV,
-                                           dedupe_journal)
+from kz.report.label_cards.journal import LABELS_CSV, LABELS_PREV, dedupe_journal
 from kz.report.label_cards.queue import load_rows
 from kz.report.label_cards.render import OUT_HTML, build
 
 
 def run_unified_web() -> None:
-    """Совместимый алиас старого ``--serve`` на единое приложение.
+    """Redirect the legacy ``--serve`` option to the canonical application.
 
-    Отдельный сервер на :8765 раньше формировал только правиловую часть
-    очереди, а ``kz.web`` — полную очередь со случайным контролем. Два
-    интерфейса к одному журналу давали разные числа и разный статистический
-    смысл. Теперь сервер и точка записи ровно одни.
+    The former :8765 server used only rule positives, while ``kz.web`` used the
+    statistically complete queue with random controls. One journal must have
+    one queue definition and one write endpoint.
     """
     from kz.web.__main__ import main as web_main
 
-    print("Режим --serve перенесён в единое приложение.")
-    print("Открой /label для вердиктов и /damage для разметки фотографий.")
+    print("The legacy --serve mode now starts the unified application.")
+    print("Open /label for verdicts and /damage for photo labelling.")
     web_main()
 
 
@@ -30,21 +28,20 @@ def main():
         run_unified_web()
         return
 
-    # Полная очередь — единственный корректный default: random_control нужен
-    # для оценки пропусков (recall), residual_candidate — для второго
-    # детектора. Узкий набор оставлен только для явной диагностики правил.
+    # The full queue is the only statistically valid default. Random controls
+    # estimate misses, while residual candidates evaluate the second detector.
     include_queue = "--rule-only" not in sys.argv
 
     if "--dedupe" in sys.argv:
         before, after = dedupe_journal()
-        print(f"Журнал: {before} строк → {after} (одна на объявление).")
-        print(f"Предыдущая версия сохранена в {LABELS_PREV}.")
-        print("Дальше пересобери clean-слой: python -m kz.transform.clean")
+        print(f"Journal: {before} rows → {after} (one per listing).")
+        print(f"The previous version was saved to {LABELS_PREV}.")
+        print("Next, rebuild the clean layer: python -m kz.transform.clean")
         return
 
     rows = load_rows(include_queue)
     if rows.empty:
-        print("Нечего размечать: подозрительных нет.")
+        print("There is nothing to label: no candidates were found.")
         return
     page = build(rows, serve_mode=False)
     Path(OUT_HTML).parent.mkdir(parents=True, exist_ok=True)
@@ -52,16 +49,15 @@ def main():
 
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
     n_photo = int(rows["photos"].apply(bool).sum())
-    print(f"Карточек: {len(rows)} (мёртвых страниц: {n_dead}, "
-          f"с фото: {n_photo})")
+    print(f"Cards: {len(rows)} (closed pages: {n_dead}, with photos: {n_photo})")
     print(f"→ {OUT_HTML}")
-    print("kolesa.kz не запрашивается — лимит не тратится.")
+    print("No kolesa.kz requests are made; the collection budget is unchanged.")
 
-    print("\nВыборы сохраняются в браузере и переживают перезагрузку, но в "
-          f"журнал ({LABELS_CSV}) отсюда не попадут: страница, открытая как "
-          "file://, писать на диск не может.")
-    print("Чтобы вердикты дописывались в журнал сразу: python -m kz.web, "
-          "затем открой http://127.0.0.1:8000/label")
+    print(
+        "\nSelections persist in the browser, but this file:// export cannot "
+        f"write the journal ({LABELS_CSV})."
+    )
+    print("For immediate journal writes, run python -m kz.web and open http://127.0.0.1:8000/label")
 
 
 if __name__ == "__main__":

@@ -1,704 +1,292 @@
-# Гайд: что тут происходит и что делать
+# Guide: understanding and operating the project
 
-Написано так, чтобы можно было вернуться через месяц и всё вспомнить.
-Каждый термин объясняется при первом появлении. Все числа — настоящие,
-замеренные 2026-08-01 на 4365 объявлениях.
+## Start here
 
----
-
-## 0. Что делать прямо сейчас
-
-Три шага, ничего больше:
+For a quick review:
 
 ```bash
-# 1. поднять базу (она в Docker; без неё всё падает с Connection refused)
+source .venv/bin/activate
+docker compose up -d
+python -m kz.web
+```
+
+Open:
+
+- `http://127.0.0.1:8000/estimate` for a vehicle estimate;
+- `http://127.0.0.1:8000/label` for anomaly verdicts;
+- `http://127.0.0.1:8000/damage` for photo labels.
+
+After manual labels change, run:
+
+```bash
+python -m kz.ops.run_all --ml
+```
+
+Then inspect `data/eda/ml_report.html` and the metadata JSON. Labelling pages
+are local-only because they write manual ground truth.
+
+## What the project does
+
+The system turns noisy used-car advertisements into an auditable price model:
+
+```text
+collect evidence → enrich selected rows → rebuild clean data
+→ group relists → validate honestly → train → calibrate
+→ explain predictions → review anomalies
+```
+
+The estimator answers “What is a plausible first advertised price for this
+vehicle in Almaty?” It does not know the final negotiated sale price.
+
+## Data flow in plain language
+
+1. The parser reads listing cards and stores their original facts.
+2. A sighting table records that the same ad was observed on another day.
+3. Controlled jobs inspect detail pages, status, and photos.
+4. Cleaning rebuilds one analytical table from those durable layers.
+5. Relisted copies of one physical vehicle receive one group ID.
+6. Models train on log price with group-safe folds.
+7. Every training row gets an honest out-of-fold prediction.
+8. Those residuals calibrate intervals and anomaly thresholds.
+9. Humans review uncertain listing and photo cases.
+
+Raw evidence is not overwritten when logic changes. Only derived tables and
+reports are rebuilt.
+
+## The essential mathematics
+
+### Log-price target
+
+Instead of predicting price `p` directly, the model predicts:
+
+```text
+z = ln(p)
+```
+
+The final output is:
+
+```text
+p_hat = exp(z_hat)
+```
+
+Why? A 20% pricing error has a comparable meaning for a cheap and expensive
+vehicle in log space, and multiplicative effects become approximately additive.
+
+### MAPE
+
+For one row:
+
+```text
+APE = |actual - predicted| / actual
+```
+
+For `n` rows:
+
+```text
+MAPE = (APE_1 + ... + APE_n) / n × 100%
+```
+
+Example: actual price is 10M tenge and prediction is 8M. The absolute error is
+2M and APE is `2 / 10 = 0.20 = 20%`.
+
+MAPE is easy to explain but strongly penalizes errors on inexpensive cars. The
+project therefore reports price segments and median APE as well.
+
+### Median APE
+
+Sort all row-level APE values and select the middle one. This describes the
+typical listing. The current median is 13.81%, much lower than 21.36% MAPE,
+which tells us that a smaller tail of difficult rows raises the mean.
+
+### MAE
+
+```text
+MAE = mean(|actual - predicted|)
+```
+
+MAE is measured in tenge and emphasizes expensive vehicles. It answers a
+different business question from MAPE.
+
+### R-squared
+
+```text
+R² = 1 - model_squared_error / mean_baseline_squared_error
+```
+
+The project calculates it on log price. The current value, about 0.935, means
+the model explains most log-price variation, but R-squared alone does not tell a
+seller the typical percentage error.
+
+### Baseline
+
+A baseline is the simplest credible alternative. Here it predicts a robust
+make/model/year group price. If CatBoost cannot beat it on the same split, the
+extra complexity is not justified.
+
+### Grouped cross-validation
+
+Suppose one Camry is removed and reposted under a new ad ID. Random splitting
+might train on the first copy and validate on the second. The metric would look
+better because the model has effectively seen the answer.
+
+Grouped CV treats every relist group as indivisible:
+
+```text
+vehicle group A → train or validation, never both
+```
+
+OOF means each row was predicted by a fold that did not train on its group.
+
+### Out-of-time evaluation
+
+The last period is held out. Training uses earlier listings and evaluation uses
+later ones. This is closer to deployment and exposes market drift.
+
+### Bootstrap uncertainty
+
+One MAPE value is an estimate from one dataset. Grouped bootstrap repeatedly
+resamples vehicle groups and recomputes MAPE. The distribution gives a standard
+deviation and confidence interval.
+
+The current 95% interval is 20.87%–21.87%. A change from 21.40% to 21.44% is
+well inside ordinary variation and should not be called degradation.
+
+## Model logic
+
+### Feature contract
+
+The model uses fields available both in training and at prediction time. The
+marketplace's own average price is excluded because it derives from the target.
+Partially enriched text/options are excluded until the estimator accepts and
+validates the same inputs.
+
+### General model and cheap specialist
+
+The general model predicts first. A prediction below 5M tenge is routed to a
+specialist trained on actual prices below 8M. The wider training band smooths
+the boundary. Actual price is never used to choose the route.
+
+### Price interval
+
+The interval is calibrated from honest OOF residuals. Roughly 80% empirical
+coverage means that about eight out of ten held-out listing prices fell inside
+their intervals. It is not a promise about a negotiated transaction.
+
+### Explanation
+
+SHAP decomposes one log-price prediction into a base value plus feature
+contributions:
+
+```text
+prediction = base + contribution_1 + ... + contribution_k
+```
+
+The web service converts log contributions into approximate percentage changes
+so the result is readable.
+
+## Anomaly layers
+
+### Deterministic rules
+
+Rules catch known suspicious patterns such as unexplained extreme cheapness,
+inconsistent relists, or exact photos reused across different vehicles. Rules
+are explainable but incomplete.
+
+### Residual detector
+
+A quantile model estimates a plausible lower price boundary. A listing below it
+becomes a candidate unless detail-page evidence explains the price.
+
+### Unsupervised diagnostics
+
+Isolation Forest and similar tools can rank unusual feature combinations, but
+“unusual” is not “fraud.” They are diagnostic layers rather than a final judge.
+
+### Human ground truth
+
+The `/label` queue includes detector positives, residual candidates, and random
+controls. Controls are required to estimate misses. The final fraud/legit/unknown
+verdict lives in an append-preserving CSV journal.
+
+## Computer vision logic
+
+The current task is not “Does the car look old?” It is “Is there localized
+impact or deformation?” The protocol separates:
+
+- `damaged`: a local impact/dent that can be boxed;
+- `wreck`: a destroyed assembly where a local box is meaningless;
+- `parts`: a dismantled vehicle or removed component;
+- `intact`: no impact/dent, even if rust or scuffs are present;
+- `unclear`: insufficient visual evidence.
+
+Rust belongs to `intact` only for this impact task and should be recorded in the
+comment. Earlier wording mixed these meanings, so 47 legacy `damaged` frames are
+quarantined until manual review.
+
+CV must be evaluated by independent listings and exact-photo components, not by
+frames. ROC-AUC and PR-AUC are both required because positive damage examples
+are rare. Active-learning rows cannot double as the final random test set.
+
+## Why 18% MAPE is difficult
+
+Vehicles at 5M tenge and above already sit near 16% MAPE. Vehicles below 5M are
+near 29% and create most total percentage error. The 21+-year, below-5M segment
+is the sharpest concentration.
+
+Repeated collection of the same listing-card fields reached a plateau. The
+remaining signal is likely condition evidence from detail-page descriptions,
+options, and photos. To reach roughly 18% overall while the stronger segment
+stays constant, the cheap segment must move toward about 20.5%.
+
+## What has already been rejected
+
+Do not repeat these ideas without new evidence or a different experimental
+design:
+
+- extra listing-table feature groups;
+- title/description text on sparse or inconsistent coverage;
+- ResNet50 embeddings for price;
+- full-frame CLIP as a damage shortcut;
+- routing by actual price;
+- global prediction multiplier that improves MAPE through systematic bias;
+- wider pHash thresholds that merge common studio photos;
+- mixing other cities without a validated geographic product contract.
+
+See [FINDINGS.md](FINDINGS.md) for measurements and failure reasons.
+
+## Command reference
+
+```bash
+source .venv/bin/activate
 docker compose up -d
 
-# 2. запустить единое приложение и разметить вердикты
-python -m kz.web
-#    открыть http://127.0.0.1:8000/label, жать F / L / U
-
-# 3. пересчитать всё после разметки
+python -m kz.ops.pipeline_status
+python -m kz.ops.run_all --collect
 python -m kz.ops.run_all --ml
-#    смотреть data/eda/ml_report.html
+python -m kz.web
+
+python -m pytest tests/ -q
+ruff check kz/ tests/ airflow/
 ```
 
-**Почему разметка — блокер.** Подтверждённых мошенников пока нет. Это не
-означает, что точность равна нулю: просто данных недостаточно, чтобы честно
-оценить precision и recall и понять, в чём причина:
-
-- детектор ловит «странное», а не обман — тогда правила надо переделывать;
-- или в базе действительно почти нет фрода — тогда всё в порядке.
-
-Различить можно только одним способом: разметить **контрольную группу** —
-случайные обычные объявления, которые детектор не помечал. Они уже включены
-в полную очередь `/label`; отдельный флаг `--all` больше не нужен.
-
-Если и среди случайных фрода нет — значит база чистая, и это нормальный
-результат, а не провал.
-
----
-
-## 1. Что вообще делает проект
-
-Две задачи, и вторая обслуживает первую.
-
-**Главная — оценка справедливой цены.** Человек описывает машину, система
-говорит, за сколько такие обычно продают.
-
-**Вспомогательная — антифрод.** Нужен не сам по себе, а чтобы не отравить
-обучающую выборку. Если в данные попадут объявления-приманки по 1 млн ₸,
-модель решит, что это нормальная цена, и начнёт занижать оценку честным
-продавцам.
-
-Аналогия: модель — ученик, объявления — учебник, антифрод — редактор,
-который вычёркивает бракованные страницы, ручная разметка — преподаватель,
-который проверяет редактора.
-
----
-
-## 2. Как данные проходят через систему
-
-```
-kolesa.kz
-   │  parser.py            собирает карточки из списка объявлений
-   ▼
-raw_ads                    СЫРЬЁ. Никогда не меняется, только дополняется
-   │  enrich.py            заходит на страницу каждого объявления
-   │  check_status.py      жив ли ещё объявление
-   │  photo_dedup.py       отпечатки фотографий
-   ▼
-enriched, ad_status, photo_hashes
-   │  clean.py             ПЕРЕСОБИРАЕТСЯ ЗАНОВО каждый прогон
-   ▼
-clean_data                 таблица, готовая к обучению
-   │  train_price_model.py
-   ▼
-модель цены + отчёты
-```
-
-**Главный принцип: сырьё неизменяемо, выводы пересобираются.**
-`raw_ads` только дополняется, а `clean_data` каждый раз строится заново.
-Поэтому если поправить правило детектора, оно применится задним числом ко
-всем 4365 объявлениям — ничего перекачивать не нужно.
-
----
-
-## 3. Метрики: что это и как считается
-
-### 3.1. Почему модель предсказывает логарифм цены
-
-Модель учится предсказывать не цену, а `log(цена)`. Причина простая.
-
-Цены в базе от 200 тысяч до 300 миллионов. Если учить напрямую на тенге,
-ошибка в 1 млн на машине за 30 млн (3%) и та же ошибка на машине за 1 млн
-(100%) для модели одинаково плохи. Она станет вылизывать дорогие машины и
-забьёт на дешёвые.
-
-Логарифм превращает **разы в расстояния**: ошибиться вдвое стоит одинаково
-и для дешёвой, и для дорогой машины.
-
-```python
-# kz/ml/train_price_model.py
-out["log_price"] = np.log(out["price_tenge"])
-```
-
-Обратно в тенге переводим через экспоненту:
-
-```python
-predicted_price = np.exp(model.predict(X))
-```
-
-### 3.2. MAPE — главная метрика
-
-**Mean Absolute Percentage Error**, средняя относительная ошибка в процентах.
-
-```
-для каждой машины:  ошибка = |прогноз − факт| / факт
-MAPE = среднее этих ошибок × 100%
-```
-
-Пример: машина стоит 10 млн, модель сказала 8 млн.
-`|8 − 10| / 10 = 0.2` → ошибка 20%.
-
-```python
-# kz/ml/train_price_model.py
-def regression_metrics(y_log, pred_log):
-    actual = np.exp(np.asarray(y_log, dtype=float))
-    pred   = np.exp(np.asarray(pred_log, dtype=float))
-    return {
-        "mape_pct": float(np.mean(np.abs(pred - actual) / actual) * 100),
-        ...
-    }
-```
-
-**Наше значение: 22.96%.**
-
-Что это НЕ значит: «модель права на 77%». Это значит, что в среднем прогноз
-отличается от заявленной цены примерно на 23%.
-
-### 3.3. Медианная ошибка — и почему она важнее, чем кажется
-
-MAPE — это **среднее**, а среднее ломается от выбросов. Один прогноз с
-ошибкой 600% перевешивает десяток хороших.
-
-**Медиана** — значение ровно посередине: половина машин предсказана лучше,
-половина хуже.
-
-| | MAPE (среднее) | Медиана |
-|---|---:|---:|
-| Все машины | 23.0% | **15.2%** |
-
-То есть по **типичному** объявлению модель уже ошибается на 15%, а среднее
-задирает хвост катастрофических промахов. Конкретно: **3.5% строк дают 21%
-всей ошибки**.
-
-### 3.4. R² на логарифме цены
-
-**Коэффициент детерминации.** Отвечает на вопрос: насколько модель лучше,
-чем «всегда называть среднюю цену»?
-
-```
-R² = 1 − (ошибка модели) / (ошибка тупого прогноза средним)
-```
-
-- `R² = 0` — модель не лучше, чем называть среднее всегда;
-- `R² = 1` — идеальные предсказания;
-- `R² = 0.917` — наше значение.
-
-**Осторожно:** наш R² считается по `log(price)`, поэтому читать его как
-«точность 91.7%» нельзя. Это доля объяснённого разброса логарифма.
-
-### 3.5. MAE
-
-**Mean Absolute Error**, средняя ошибка в тенге. У нас **2.75 млн ₸**.
-
-Цифра пугает, но это артефакт разброса цен: медианная машина стоит 7.7 млн,
-а средняя 13.4 млн, потому что есть машины по 300 млн. 2.75 млн от 13.4 млн —
-те же ~20%.
-
-MAE полезна для одного: понять порядок ошибки в деньгах.
-
-### 3.6. Baseline — без него метрики ничего не значат
-
-**Baseline** — намеренно тупой способ решения. Если модель не бьёт его
-заметно, вся сложность ни к чему.
-
-Наш baseline: медианная цена по группе «марка + модель + год», с откатом на
-«марка + модель», затем «марка», затем общую медиану.
-
-```python
-# kz/ml/train_price_model.py
-tiers = [
-    ["brand", "model", "year"],
-    ["brand", "model", "age_bucket"],
-    ["brand", "model"],
-    ["brand"],
-]
-for keys in tiers:
-    med = work.groupby(keys, dropna=False)["_target"].median()
-    ...
-    pred = pred.fillna(pd.Series(values, index=test.index))
-```
-
-| | MAPE |
-|---|---:|
-| Baseline (медиана по группе) | 39.1% |
-| CatBoost | **23.0%** |
-| Выигрыш | **16.2 п.п.** |
-
-Вот это и есть доказательство, что машинное обучение здесь оправдано.
-
-### 3.7. Grouped cross-validation — почему обычная CV врёт
-
-**Кросс-валидация (CV)**: делим данные на 5 частей, обучаемся на 4,
-проверяемся на 5-й, повторяем 5 раз. Так каждая строка проверяется моделью,
-которая её не видела.
-
-**Проблема.** В базе есть перезаливы — одна и та же машина выложена дважды.
-При обычном случайном разбиении один дубль попадёт в обучение, второй в
-проверку. Модель просто вспомнит ответ, и метрика окажется завышенной. Это
-называется **утечка (leakage)**.
-
-Решение: считать дубли одной **группой** и не разрывать группы между
-частями.
-
-```python
-# kz/ml/train_price_model.py
-def duplicate_groups(df):
-    """Группа точного перезалива для защиты CV от leakage."""
-    # ключ: марка+модель+год+пробег+объём+кузов+цвет + нормализованный текст
-    ...
-    return pd.util.hash_pandas_object(key, index=False).astype(str)
-
-for tr, te in GroupKFold(n_splits=n).split(X, y, groups):
-    ...
-```
-
-Важная деталь: **цена в ключ группы НЕ входит.** Если продавец изменил цену,
-это та же машина, а не новый объект.
-
-### 3.8. Out-of-time проверка — самая честная
-
-CV перемешивает данные во времени: модель может учиться на завтрашних
-объявлениях и предсказывать вчерашние. В жизни так не бывает.
-
-**Out-of-time**: обучаемся на старых 80%, проверяемся на новых 20%.
-
-| Проверка | MAPE |
-|---|---:|
-| Grouped CV | 23.0% |
-| Out-of-time | **20.5%** |
-
-### 3.9. Разброс метрики — почему 23.0 и 23.2 это одно и то же
-
-Замер по фолдам на наших данных:
-
-```
-MAPE по фолдам: [22.67  23.42  23.02  24.61  25.13]
-среднее 23.77   стандартное отклонение 1.05 п.п.
-```
-
-**Любое изменение меньше 1 п.п. — шум.** Если после парсинга MAPE поменялся
-с 23.8% на 24.0%, ничего не сломалось. Сравнивать имеет смысл только на
-одних и тех же разбиениях (paired comparison) — именно так подбирались
-гиперпараметры.
-
-### 3.10. Метрики антифрода
-
-**Precision (точность)**: из помеченных детектором — сколько реально фрод.
-
-```
-precision = подтверждённый фрод / все помеченные
-```
-
-**Recall (полнота)**: из всего фрода — сколько детектор нашёл.
-
-```
-recall = найденный фрод / весь фрод
-```
-
-Precision меряется по помеченным. Recall **невозможно** посчитать без
-контрольной группы: чтобы узнать, сколько фрода пропущено, нужно проверить
-объявления, которые детектор не помечал. Поэтому в очереди разметки лежат
-50 случайных.
-
-**Наши значения: precision = 0%, recall не определён.** Причина не в
-детекторе, а в разметке: 29 вердиктов, все `legit`.
-
----
-
-## 4. Цель и как её достичь
-
-**Цель: MAPE 18%.** Сейчас routed MAPE 21,52%; одна общая модель даёт
-21,66%.
-
-Обещание «17 000 объявлений → 18%» **отозвано** 28 августа. Оно опиралось
-на экстраполяцию кривой обучения, а кривая вышла на плато: пять замеров от
-4 777 до 11 496 строк дали 22.66 → 22.19 → 21.60 → 21.60 → 21.41%.
-Асимптота подгонки — около 20.1%, то есть объёмом 18% не берутся вовсе.
-
-Цель осталась, дорога к ней сменилась. Вся ошибка сидит в одном сегменте:
-
-| сегмент до 5 млн | общий MAPE |
-|---|---|
-| 29,2% (сейчас, со специалистом) | 21,52% |
-| 26% | 20,2% |
-| 24% | 19,4% |
-| **20,5%** | **18,0%** |
-
-Дешёвый сегмент — 40% выборки. Без него общий MAPE был бы около 16%.
-Табличными признаками он не лечится: там цену определяет состояние машины,
-которого в объявлении нет.
-
-Замеренные рычаги, не предположенные:
-
-| Что сделать | эффект |
-|---|---|
-| обогатить дешёвый сегмент (текст продавца, опции) | −3.4 п.п. по сегменту |
-| состояние по фотографиям | current full-frame CV хуже таблицы, см. FINDINGS §19-23 |
-| ограничить машинами моложе 20 лет | 18.3%, но это сужение задачи, а не решение |
-
-### 4.0. Что НЕ работает — проверено, не переоткрывать
-
-Четыре группы новых признаков, посчитанные на одних и тех же разбиениях
-(2026-08-10). Разброс между фолдами ±1.05 п.п., поэтому всё это — шум:
-
-| добавили | MAPE | Δ |
-|---|---:|---:|
-| базовый набор | 22.96% | — |
-| пробег за год владения | 23.12% | +0.16 |
-| метки листинга (дилер, «История авто») | 23.01% | +0.05 |
-| привод, руль, растаможка, цвет, поколение | 22.98% | +0.02 |
-| текст объявления (CatBoost text features) | 23.53% | +0.56 |
-
-Плюс два отрицательных результата по фотографиям: эмбеддинги ResNet50 и
-zero-shot CLIP цену не улучшают.
-
-Вывод у всех шести замеров: новые признаки на том же материале ничего не
-дают. Раньше отсюда следовало «модель ограничена объёмом данных», и это
-оказалось неверно — **объём тоже исчерпан**. Пять замеров от 4 777 до
-11 496 строк сдвинули MAPE с 22.66% до 21.41%, последние два шага почти
-никуда.
-
-Прежний вывод этого раздела — «главный рычаг: расширить сбор за пределы
-Алматы» — **отозван дважды**. Во-первых, объём не помогает. Во-вторых,
-города различаются уровнем цен, и модель без признака города училась бы
-усреднять разные рынки (FINDINGS §14).
-
-Настоящий блокер — дешёвый сегмент: 40% выборки, routed MAPE 29,2%, и там цену
-определяет состояние машины, которого в объявлении нет. См. раздел 4.
-
-### 4.1. Почему возраст даёт так много
-
-Разбор хвоста ошибок:
-
-```
-Mitsubishi Delica 1995        факт 0.20М   прогноз 1.50М   ошибка 649%
-Land Rover Range Rover 1997   факт 1.10М   прогноз 5.84М   ошибка 431%
-Mercedes-Benz E 300 1988      факт 0.55М   прогноз 2.34М   ошибка 325%
-```
-
-Портрет хвоста против остальных:
-
-| | Хвост | Остальные |
-|---|---:|---:|
-| Медианный возраст | **28 лет** | 13 лет |
-| Медианная цена | 1.1 млн | 7.9 млн |
-| Редкая модель (<10 штук) | **64%** | 39% |
-
-Модель видит «Range Rover 1997» и предсказывает 5.8 млн по марке. А он
-стоит 1.1 млн, потому что убитый. **Признака состояния у нас нет** — вот вся
-причина. Для тридцатилетней машины состояние важнее года и пробега вместе
-взятых.
-
-### 4.2. Кривая обучения — окупается ли сбор данных
+Optional research:
 
 ```bash
-python -m kz.ml.learning_curve
+python -m kz.ml.mape_stability
+python -m kz.ml.photo_clip --validate
+python -m kz.ml.photo_damage
+python -m kz.ml.photo_dataset
+python -m kz.report.photo_labels --stats
 ```
 
-| Строк | MAPE |
-|---:|---:|
-| 1013 | 30.3% |
-| 2023 | 25.7% |
-| 3034 | 24.4% |
-| 4045 | 23.2% |
-
-Ошибка ещё падает, но отдача замедлилась вчетверо. По наклону кривой
-удвоение базы даст примерно −2.7 п.п.
-
-### 4.3. Что НЕ помогает — проверено
-
-Чтобы не тратить время повторно:
-
-| Идея | Результат |
-|---|---|
-| Текстовые признаки из описания | ≈0, шум |
-| Растаможен / руль / привод / цвет / поколение | **+0.31 п.п.**, шум |
-| Регуляризация `l2_leaf_reg=10` | хуже на 0.8 п.п. |
-| Эмбеддинг обложки (ResNet50) | **хуже на 1–3.5 п.п.**, монотонно по числу компонент |
-| Метрики качества снимка | +0.69 п.п., шум |
-| CLIP zero-shot (ржавость, грязь) | видит состояние (AUC до 0.89), но −0.42 п.п. — внутри шума: коррелирует с возрастом 0.54 |
-
-Особенно поучителен привод: по важности он занял второе место (15.1), а
-качество не изменилось вообще. **Важность признака ≠ его польза.** Привод
-почти полностью выводится из марки и кузова, независимой информации не даёт.
-
-### 4.4. Реалистичный план до 15%
-
-```
-23.0%  сейчас (гиперпараметры уже подобраны)
-−4.0   ограничить возраст 20-25 годами     ← продуктовое решение
-−2.7   удвоить данные                       ← парсинг, недели
-─────
-≈16%   без новых источников сигнала
-```
-
-Дальше нужен **сигнал о состоянии**, а он есть только в фотографиях. Это
-третий уровень проекта: компьютерное зрение по снимкам.
-
----
-
-## 5. Логика машинного обучения
-
-### 5.1. Какие признаки видит модель
-
-13 штук:
-
-```python
-NUM_FEATURES = ["age", "mileage_km", "engine_volume", "photos_count",
-                "is_mileage_missing", "is_vip", "has_monthly_price"]
-CAT_FEATURES = ["brand", "model", "engine_type", "transmission",
-                "body_type", "condition"]
-FEATURES = NUM_FEATURES + CAT_FEATURES
-```
-
-**Категориальные** (марка, модель) — текстовые. CatBoost работает с ними
-напрямую, поэтому его и выбрали: не нужно вручную превращать 200 марок в
-числа.
-
-**`is_mileage_missing`** — отдельный признак «пробег не указан». Пропуск сам
-по себе несёт информацию: у трети объявлений пробега нет, и это не случайно.
-
-### 5.2. Чего модель НЕ видит и почему
-
-```python
-# tests/test_pipeline.py
-banned = {"price_tenge", "log_price", "price_z", "kolesa_avg_price",
-          "is_suspicious", "suspicion_reasons", "city", "views_count"}
-leak = set(m.FEATURES) & banned
-assert not leak, f"утечка цели в фичах модели: {leak}"
-```
-
-**Утечка цели (target leakage)** — когда в признаки попадает то, что
-производно от ответа. Модель начинает списывать вместо того, чтобы учиться.
-
-- `kolesa_avg_price` — оценка самого kolesa. Дай её модели, и она просто
-  скопирует чужой ответ. Мы используем её только как независимый проверочный
-  сигнал в антифроде;
-- `price_z` — считается из цены, то есть из ответа;
-- `city` — в базе только Алматы, константа;
-- `views_count` — известно уже после публикации, при оценке новой машины его
-  нет.
-
-### 5.3. Как обучается модель
-
-```python
-def new_model(loss_function="RMSE"):
-    return CatBoostRegressor(
-        iterations=2000,       # подобрано замером, было 600
-        learning_rate=0.03,    # подобрано замером, было 0.05
-        depth=8,
-        loss_function=loss_function,
-        random_seed=42,        # чтобы результат воспроизводился
-        verbose=False,
-    )
-```
-
-**CatBoost** — градиентный бустинг: строит много маленьких деревьев решений,
-каждое исправляет ошибки предыдущих. `iterations` — сколько деревьев,
-`learning_rate` — насколько сильно каждое влияет, `depth` — глубина дерева.
-
-### 5.4. Артефакт модели — почему её не переобучают на каждый прогноз
-
-После обучения модель сохраняется на диск вместе с паспортом:
-
-```python
-metadata = {
-    "created_at_utc": ...,
-    "git_commit": _git_commit(),
-    "training_code_sha256": code_fingerprint(__file__, data_quality.__file__),
-    "data_fingerprint_sha256": _data_fingerprint(clean),
-    "training_rows": int(len(clean)),
-    "features": FEATURES,
-    "validation": {...},
-}
-```
-
-Зачем отпечатки: через месяц можно точно сказать, каким кодом и на каких
-данных получены цифры. Иначе «у нас было 23%» превращается в легенду.
-
-Предсказание берёт готовый артефакт:
-
-```python
-# kz/ml/predict_price.py
-def estimate(mdl, **car) -> float:
-    return float(np.exp(mdl.predict(make_row(**car))[0]))
-```
-
----
-
-## 6. Антифрод: три независимых слоя
-
-### 6.1. Слой 1 — правила
-
-Прямые проверки, написанные руками. Сейчас срабатывают:
-
-| Флаг | Сколько | Что значит |
-|---|---:|---|
-| `possible_repost` | 22 | та же машина выложена ещё раз |
-| `price_anomaly_low` | 4 | цена сильно ниже похожих |
-| `shared_photo_diff_car` | 2 | одно фото у разных машин |
-| `used_but_zero_mileage` | 2 | у б/у пробег 0 |
-| `cheap_and_urgent` | 1 | дёшево + давление срочностью |
-| `km_per_year_extreme` | 1 | невозможный пробег в год |
-
-**Модифицированный z-score** — как ищется аномальная цена:
-
-```
-z = 0.6745 × (значение − медиана) / MAD
-```
-
-`MAD` (median absolute deviation) — медиана отклонений от медианы. Обычное
-стандартное отклонение само портится от выбросов, а MAD устойчив. Порог
-`z < −3.5` считается аномалией.
-
-Считается внутри групп «модель × возрастная корзина», минимум 8 машин в
-группе — иначе сравнивать не с чем.
-
-**Оправдание (exculpation).** Дешевизна часто объяснима, и тогда флаг
-снимается:
-
-```python
-# kz/transform/clean.py
-explained = df["text_full"].fillna("").map(has_damage)       # «бит», «на ходу нет»
-explained |= df["customs_cleared"].eq("Нет")                 # нерастаможенная
-explained |= df["verdict"].eq("legit")                       # вердикт человека
-explained |= badge.str.contains("аварийн|не на ходу|заложен")  # бейдж сайта
-```
-
-Главный принцип: **fraud — это обман, а не плохая машина.** Честно проданный
-хлам — `legit`. Завышенная цена — плохая сделка, а не мошенничество.
-
-### 6.2. Слой 2 — модель (квантильная регрессия)
-
-Правила смотрят на цену в отрыве от машины. Модель умеет лучше: она знает,
-сколько стоит **именно такая** машина, и может сказать, ниже какого порога
-цена выглядит подозрительно.
-
-**Квантильная регрессия** предсказывает не среднее, а нижнюю границу. При
-`alpha=0.10` модель учится так, чтобы ниже её прогноза оказывалось около 10%
-нормальных объявлений.
-
-```python
-# kz/ml/residual_detector.py
-model = new_model(loss_function=f"Quantile:alpha={ALPHA}")
-```
-
-**Калибровка.** Заявленные 10% не гарантированы на новых данных, поэтому
-порог поправляется по честным out-of-fold остаткам:
-
-```python
-def calibration_offset(y_log, raw_floor_log, alpha=ALPHA):
-    residual = np.asarray(y_log) - np.asarray(raw_floor_log)
-    return float(np.quantile(residual, alpha, method="lower"))
-```
-
-Результат: доля ниже пола = 0.100 при цели 0.10. Поправка −0.1437 в
-логарифме, то есть множитель 0.87.
-
-Плюс два ограничителя: минимум 8 похожих машин и возраст до 10 лет —
-иначе в кандидаты лезли редкие и очень старые, где пол ничего не значит.
-
-### 6.3. Слой 3 — Isolation Forest (та самая «библиотека для аномалий»)
-
-**Isolation Forest** из `scikit-learn` — алгоритм поиска выбросов без
-разметки. Идея: строит случайные деревья, и точки, которые отсекаются от
-остальных за мало разрезов, считает аномальными. Нормальные точки сидят в
-гуще и «изолируются» долго.
-
-```python
-# kz/transform/data_quality.py
-from sklearn.ensemble import IsolationForest
-```
-
-**Важно, что он у нас НЕ детектор фрода, а санитар данных.** Причина:
-iForest ищет **глобально** необычные строки, а мошенничество —
-**условная** аномалия. Ferrari за 200 млн для iForest выброс, хотя это
-абсолютно честное объявление. А приманка «Camry 2019 за 3 млн» для него
-обычная строка: и Camry обычная, и 3 млн обычная сумма — ненормально только
-их сочетание.
-
-Поэтому iForest используется для мусора в данных:
-
-```python
-def is_junk_mileage(m):
-    """Репдигит >300k («забитое» поле 777777) — плейсхолдер, а не пробег."""
-```
-
-Условные аномалии ловит квантильный пол из 6.2 — он сравнивает машину с
-похожими, а не со всей базой.
-
-### 6.4. Слой 4 — человек
-
-Финальный арбитр. Вердикты лежат в `data/manual_labels.csv`, одна строка на
-объявление, файл только дополняется и правится на месте.
-
-Вердикт `legit` снимает ценовые флаги, `fraud` ставит флаг намертво.
-
----
-
-## 6-бис. Что делает каждый шаг `--ml`
-
-| Шаг | Что считает | Метод |
-|---|---|---|
-| clean | пересборка с вердиктами | правила, модифицированный z-score |
-| explore | очередь разметки | три слоя, стратифицированная выборка |
-| label_cards | карточки | — |
-| train_price_model | модель цены | CatBoost на логарифме, grouped CV |
-| residual_detector | ценовой пол | квантильная регрессия α=0.10 |
-| ml_dashboard / ml_report | отчёты | читают сохранённые артефакты |
-| evaluate_detector | precision/recall | матрица ошибок, правило трёх |
-| monitoring | дрейф данных | PSI, пороги 0.10 / 0.25 |
-| survival | срок жизни объявления | Каплан-Мейер, модель Кокса |
-
-Два последних шага отвечают на вопросы, которых модель цены не покрывает.
-
-**Мониторинг** — можно ли ещё доверять модели. Она обучена один раз, а рынок
-меняется; без проверки метрики поедут молча. PSI сравнивает сегодняшнее
-распределение каждого признака с обучающим.
-
-**Выживаемость** — за сколько продастся. Обычная регрессия по проданным здесь
-врёт: медленные продажи в выборку ещё не попали, поэтому срок систематически
-занижается. Каплан-Мейер учитывает незавершённые наблюдения корректно.
-
-## 7. Шпаргалка команд
-
-```bash
-docker compose up -d                        # поднять базу
-
-python -m kz.ops.pipeline_status            # что где недозаполнено
-python -m kz.web                            # оценка, /label и /damage
-python -m kz.ops.run_all --ml               # пересчитать всё после разметки
-python -m kz.ops.run_all --fast             # то же без обучения, секунды
-python -m kz.ops.run_all --collect          # собрать данные под лимитом
-python -m kz.ml.learning_curve              # окупается ли ещё сбор
-python -m pytest tests/ -q                  # 241 passed, 6 skipped без test-БД
-```
-
-Куда смотреть:
-
-| Файл | Что внутри |
-|---|---|
-| `data/eda/ml_report.html` | отчёт по модели + подозрительно дешёвые |
-| `data/eda/ml_dashboard.png` | качество, важность признаков, остатки |
-| `data/eda/label_cards.html` | карточки для разметки |
-| `data/models/price_model.metadata.json` | метрики и отпечатки |
-
----
-
-## 8. Текущее состояние одним экраном
-
-```
-данные            11 682 объявления, 1488 обогащено (12,7%), 5633 фото скачано
-подозрительных    152 (1,3%)
-вердиктов         111, валидных 88, из них fraud — 0
-                  → 65 случайных контролей без фрода: верхняя граница 4,6%
-разметка фото     782 кадра; 38 независимых damaged/wreck-объявлений
-
-модель цены       routed MAPE 21,52% | median APE 13,86% | R²(log) 0,935
-                  OOT MAPE 22,00%
-                  одна общая модель 21,66%; baseline 31,19%
-                  выигрыш routed над baseline 9,7 п.п.
-                  baseline близок к base по медиане: 14,41% против 14,01%
-                  routed-медиана лучше: 13,86%
-сегменты          <5М 29,2%   5-10М 15,7%   10-20М 15,5%   20М+ 18,1%
-
-сервис            контейнеризован, работает без базы,
-                  публичный режим закрывает разметку и лимитит запросы
-
-цель              MAPE 18% через дешёвый сегмент: довести его
-                  с 29,2% примерно до 20,5%
-план              обогатить дешёвый сегмент (−3.4 п.п. по сегменту,
-                  замерено), состояние машины по фотографиям (пока
-                  не доказано). Географию НЕ расширять — отвергнуто.
-
-не работает       новые табличные признаки и current full-frame CLIP
-                  проверены замером. Объём тоже исчерпан:
-                  пять замеров, кривая на плато, асимптота около 20.1%.
-
-блокер №1         дешёвый сегмент: 40% выборки, MAPE 29,2%, и вся
-                  общая ошибка сидит там. Лечится только состоянием
-                  машины, которого в объявлении нет.
-```
+## Current state at a glance
+
+- 12,639 collected listings;
+- 12,455 model rows;
+- 21.36% grouped routed MAPE;
+- 13.81% median APE;
+- 23.24% out-of-time MAPE;
+- approximately 80% interval coverage;
+- 179 anomaly candidates and 111 verdicts, with no confirmed fraud;
+- 47 legacy damaged frames awaiting definition review;
+- read-only public demo deployed on Render Free.

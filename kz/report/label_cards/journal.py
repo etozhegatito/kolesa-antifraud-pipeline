@@ -1,15 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Журнал вердиктов: единственное место, где проект пишет ручную разметку.
+"""Verdict journal: the only module that writes manual anomaly labels.
 
-Правило номер один всего проекта: журнал НИКОГДА не пересоздаётся и не
-обрезается, только дополняется и правится по строкам. Один раз разметку уже
-чуть не потеряли, пересобрав файл из очереди, — вердикт остаётся валидным,
-даже если объявление давно ушло из подозрительных.
-
-Отсюда всё остальное в этом файле: атомарная запись через временный файл,
-снимок предыдущего состояния перед первой правкой запуска, чтение и запись
-csv-модулем вместо pandas (тот превращает целые в «50.0» при round-trip —
-реальный баг, ронявший вставку в Postgres).
+The journal is never rebuilt from a changing queue or truncated. Verdicts
+remain valid after a listing leaves the candidate set. Writes are atomic, a
+single recovery snapshot is taken before the first mutation, and the standard
+``csv`` module preserves integer strings that Pandas round-trips as ``50.0``.
 """
 
 import csv
@@ -21,27 +16,32 @@ import pandas as pd
 
 _DIR = os.environ.get("KZ_LABELS_DIR", "data")
 LABELS_CSV = str(Path(_DIR) / "manual_labels.csv")
-# Состояние журнала до правок текущего запуска — точка восстановления.
-# Файл один и перезаписывается, чтобы не разводить гору бэкапов.
+# One recovery point from before the current process's first mutation.
 LABELS_PREV = str(Path(_DIR) / "manual_labels.prev.csv")
 
 VERDICTS = ("fraud", "legit", "unknown")
 
 
-# Слой выборки обязан храниться В ЖУРНАЛЕ, а не только в очереди. Очередь —
-# список работы, она пересобирается и намеренно выкидывает уже размеченное.
-# Из-за этого метаданные терялись: после разметки контрольных выяснить, что
-# они были контрольными, стало невозможно, а без этого не оценить пропуски.
+# Sampling strata belong in the journal, not only in the disposable work queue.
+# Without this metadata, completed controls cannot be used to estimate misses.
 STRATUM_COLS = ["sampling_stratum", "stratum_population"]
 
-BASE_HEADER = ["ad_id", "url", "title", "year", "price_tenge", "mileage_km",
-               "suspicion_reasons", "seller_comment", "verdict", "comment"]
+BASE_HEADER = [
+    "ad_id",
+    "url",
+    "title",
+    "year",
+    "price_tenge",
+    "mileage_km",
+    "suspicion_reasons",
+    "seller_comment",
+    "verdict",
+    "comment",
+]
 
 
 def journal_header() -> list[str]:
-    """Порядок колонок журнала берём из самого файла, а не из константы:
-    файл ведётся руками, и его схема — источник истины. Недостающие колонки
-    слоя добавляем в конец, чтобы старые журналы продолжали работать."""
+    """Use the journal's own column order and append missing stratum fields."""
     head = None
     if Path(LABELS_CSV).exists():
         with open(LABELS_CSV, newline="", encoding="utf-8") as f:
@@ -54,11 +54,7 @@ def journal_header() -> list[str]:
 
 
 def _cell(v) -> str:
-    """Значение для CSV: пропуск → пусто, целое → без «.0».
-
-    Именно из-за «.0» правило проекта запрещает писать журнал через pandas:
-    round-trip превращал 50 в "50.0" и ронял вставку в INTEGER-колонку.
-    """
+    """Format a CSV cell: missing becomes empty and integers lose ``.0``."""
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return ""
     if isinstance(v, float) and float(v).is_integer():
@@ -70,13 +66,7 @@ _snapshot_done = False
 
 
 def _snapshot_once() -> None:
-    """Один раз за запуск сохранить состояние журнала ДО правок.
-
-    Журнал — ручной ground truth, его нельзя потерять, а он не в git
-    (data/ в .gitignore). Поэтому перед первой записью кладём рядом
-    предыдущую версию: всегда есть точка восстановления, и при этом файл
-    один, а не гора бэкапов.
-    """
+    """Save one recovery snapshot before the process's first journal write."""
     global _snapshot_done
     if _snapshot_done:
         return
@@ -86,8 +76,7 @@ def _snapshot_once() -> None:
 
 
 def read_journal() -> tuple[list[str], list[dict]]:
-    """Журнал как есть, строками-словарями. Читаем csv-модулем: значения
-    остаются ровно теми строками, что в файле, ничего не переформатируется."""
+    """Read journal rows as dictionaries without reformatting stored values."""
     if not Path(LABELS_CSV).exists():
         return journal_header(), []
     with open(LABELS_CSV, newline="", encoding="utf-8") as f:
@@ -97,8 +86,7 @@ def read_journal() -> tuple[list[str], list[dict]]:
 
 
 def write_journal(header: list[str], rows: list[dict]) -> None:
-    """Атомарная запись: сначала во временный файл, потом подмена. Так
-    журнал не останется обрезанным, если процесс умрёт на середине."""
+    """Write atomically through a temporary file to prevent truncation."""
     Path(LABELS_CSV).parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(LABELS_CSV) + ".tmp")
     with open(tmp, "w", newline="", encoding="utf-8") as f:
@@ -110,31 +98,21 @@ def write_journal(header: list[str], rows: list[dict]) -> None:
 
 
 def upsert_verdict(ad_id: str, verdict: str, comment: str, facts: dict) -> None:
-    """Записать вердикт: строка по этому ad_id уже есть → ОБНОВИТЬ её на
-    месте; нет → дописать новую.
+    """Insert a verdict or update the existing row for the same ``ad_id``.
 
-    Раньше здесь был чистый append, и повторные нажатия плодили по несколько
-    строк на одно объявление с противоречивыми вердиктами (fraud, потом
-    legit, потом legit с комментарием). clean.py берёт последнюю, поэтому
-    работало верно, но журнал читался как мусор и глазами не проверялся.
-
-    Обновляется ПЕРВАЯ строка по объявлению — она стоит на своём месте из
-    очереди разметки, и порядок файла не съезжает. Лишние дубликаты того же
-    ad_id при этом убираются: файл сам приходит в порядок по мере разметки.
-
-    Смысл правила «журнал не перезаписывается» сохранён: вердикты не
-    теряются, предыдущая версия файла лежит в manual_labels.prev.csv, а
-    запись атомарна.
+    Repeated clicks must not create contradictory duplicate rows. The first
+    row keeps its position, later duplicates are removed, and the recovery
+    snapshot preserves the previous journal state.
     """
     if verdict not in VERDICTS:
-        raise ValueError(f"недопустимый вердикт: {verdict!r}")
+        raise ValueError(f"Invalid verdict: {verdict!r}")
     _snapshot_once()
     header, rows = read_journal()
     aid = str(ad_id)
     same = [r for r in rows if str(r.get("ad_id", "")) == aid]
     if same:
-        target = same[0]                       # первая — её и правим
-        keep = set(id(r) for r in same[1:])     # прочие дубликаты убираем
+        target = same[0]  # update the first row in place
+        keep = set(id(r) for r in same[1:])  # remove later duplicates
         rows = [r for r in rows if id(r) not in keep]
     else:
         target = {c: "" for c in header}
@@ -147,11 +125,10 @@ def upsert_verdict(ad_id: str, verdict: str, comment: str, facts: dict) -> None:
 
 
 def dedupe_journal() -> tuple[int, int]:
-    """Свернуть накопленные дубликаты: одна строка на объявление.
+    """Collapse duplicates to one row per listing.
 
-    Побеждает ПОСЛЕДНИЙ непустой вердикт (это и был твой финальный выбор),
-    а место в файле сохраняется за ПЕРВОЙ строкой объявления.
-    Возвращает (сколько строк было, сколько стало).
+    The last non-empty verdict wins while the first row keeps its position.
+    Return ``(rows_before, rows_after)``.
     """
     header, rows = read_journal()
     before = len(rows)
@@ -163,7 +140,7 @@ def dedupe_journal() -> tuple[int, int]:
             order.append(aid)
             best[aid] = dict(r)
             continue
-        # непустой вердикт перекрывает; пустой не затирает уже выбранный
+        # A non-empty verdict overrides; an empty value never erases a decision.
         if str(r.get("verdict", "")).strip():
             best[aid]["verdict"] = r["verdict"]
             best[aid]["comment"] = r.get("comment", "")
@@ -173,7 +150,7 @@ def dedupe_journal() -> tuple[int, int]:
 
 
 def journal_facts(rows: pd.DataFrame) -> dict:
-    """ad_id → описательные поля для строки журнала."""
+    """Map ``ad_id`` to descriptive fields stored with a journal verdict."""
     out = {}
     for _, r in rows.iterrows():
         out[str(r["ad_id"])] = {

@@ -1,53 +1,27 @@
 # -*- coding: utf-8 -*-
-"""label_cards.py — офлайн-карточки для ручной разметки вердиктов.
+"""Offline cards for manual market-anomaly verdicts.
 
-ЗАЧЕМ. Чтобы поставить вердикт, надо ВИДЕТЬ машину. Раньше это значило
-открывать kolesa.kz руками, и тут две проблемы:
-  1) У архивных/удалённых объявлений страницы больше нет — посмотреть
-     нечего, вердикт поставить нельзя.
-  2) Ручной браузинг бьёт по тому же IP, что и джобы, и в бюджет
-     catch_up НЕ попадает. Именно смесь «джобы + ручной браузинг» и
-     положила IP 2026-07-23.
+Review requires enough visual and textual evidence to understand a vehicle.
+Opening every listing on kolesa.kz is unreliable for archived pages and adds
+untracked traffic from the same IP as collection jobs. Instead, the project
+builds cards from data already stored locally and loads only image-CDN assets.
 
-РЕШЕНИЕ. Фото лежат на CDN kcdn.kz — это ДРУГОЙ хост, и они переживают
-смерть страницы (проверено: у archived и даже deleted объявлений фото
-отдаются с HTTP 200). Всё остальное (весь текст, цена, avgPrice, бейдж,
-цвет, пробег, damage-слова) у нас УЖЕ сохранено в базе. Значит карточку
-можно собрать локально и разметить, ни разу не сходив на kolesa.kz.
+Use ``python -m kz.web`` for the canonical application: verdicts live at
+``/label`` and photo damage labelling at ``/damage``. Use
+``python -m kz.report.label_cards`` only for an offline HTML export. The
+``--rule-only`` option is a narrow rule-detector diagnostic.
 
-Открытие получившегося HTML делает НОЛЬ запросов к kolesa.kz — только
-подгрузку картинок с CDN. Бюджет kolesa не тратится вообще.
+Selections have three persistence layers: the current browser session,
+``localStorage`` for reload recovery, and ``data/manual_labels.csv`` as the
+source of truth. A ``file://`` export cannot write the journal.
 
-Запуск:  python -m kz.web                            → единое приложение;
-                                            вердикты находятся на /label,
-                                            повреждения на /damage
-         python -m kz.report.label_cards            → только офлайн-экспорт
-                                            data/eda/label_cards.html
-         python -m kz.report.label_cards --rule-only → диагностический экспорт
-                                            только правиловых подозрительных
-
-КАК СОХРАНЯЮТСЯ ВЕРДИКТЫ (три уровня, каждый со своей задачей):
-  1) память страницы — показывает выборы текущей сессии и CSV-черновик;
-  2) localStorage браузера — переживает перезагрузку и закрытие
-     вкладки. Работает всегда, даже при открытии файла напрямую.
-  3) data/manual_labels.csv — источник истины, читается clean.py. Пишется
-     только единым локальным приложением на /label: страница, открытая как
-     file://, писать на диск не может.
-
-СТРУКТУРА ПАКЕТА. Файл дорос до 1239 строк и делал четыре разные вещи
-сразу: читал базу, генерировал HTML, вёл журнал вердиктов и поднимал
-HTTP-сервер. Разнесено по ответственностям, чтобы каждую можно было читать
-и проверять отдельно:
-
-    queue.py     что показывать — выборка из базы
-    render.py    как показывать — HTML, без базы и без записи на диск
-    journal.py   куда писать вердикты — единственная точка правки разметки
-
-Запись обслуживает `kz.web.app`, поэтому второй HTTP-сервер здесь не нужен.
-Имена ниже переэкспортированы для `from kz.report import label_cards`.
+The package is split by responsibility: ``queue.py`` selects rows,
+``render.py`` builds HTML without database or disk writes, and ``journal.py``
+is the only verdict-mutation layer. HTTP writes are handled by ``kz.web.app``.
+Names below are re-exported for ``from kz.report import label_cards``.
 """
 
-from kz.report.label_cards.journal import (          # noqa: F401
+from kz.report.label_cards.journal import (  # noqa: F401
     BASE_HEADER,
     LABELS_CSV,
     LABELS_PREV,
@@ -60,8 +34,8 @@ from kz.report.label_cards.journal import (          # noqa: F401
     upsert_verdict,
     write_journal,
 )
-from kz.report.label_cards.queue import QUEUE_CSV, load_rows      # noqa: F401
-from kz.report.label_cards.render import (            # noqa: F401
+from kz.report.label_cards.queue import QUEUE_CSV, load_rows  # noqa: F401
+from kz.report.label_cards.render import (  # noqa: F401
     DEAD_HOSTS,
     FLAG_HELP,
     OUT_HTML,

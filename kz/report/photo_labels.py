@@ -1,40 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Разметка повреждений по фотографиям: очередь, журнал и страница.
+"""Photo-damage labelling queue and journal.
 
-ЗАЧЕМ. Дешёвый сегмент (до 5 млн) даёт 29,8% ошибки при 15-16% у остальных
-и держит общий MAPE в одиночку. Табличными признаками он не лечится: цену
-старой машины определяет состояние, а состояния в листинге нет. Единственный
-оставшийся путь — увидеть его на фотографиях.
+The under-5M-tenge segment produces most of the price error because old-vehicle
+condition is absent from listing-table fields. Full-frame zero-shot CLIP did
+not solve the problem: local dents disappear among road and sky. Tiling raised
+damage AUC from 0.776 to 0.827 but reduced rust AUC, confirming that impact is
+a local signal. Bounding boxes therefore provide cleaner supervision.
 
-Zero-shot до этого не дотянулся: `clip_damaged` неотличим от монетки, потому
-что помятое крыло тонет в асфальте и небе. Нарезка на плитки показала, что
-дело именно в масштабе — максимум по плиткам поднимает AUC с 0,776 до 0,827,
-и при этом ПОРТИТ ржавчину, которая покрывает машину целиком. Значит рамка
-вокруг повреждения даст сети чистый сигнал.
+Coordinates are stored relative to image size in the 0..1 range, so browser
+resizing cannot invalidate them. Crops are not saved as new images: immutable
+source photos stay separate from editable annotations.
 
-Отсюда этот модуль: разметить 200-300 кадров рамками и обучить логистическую
-регрессию на векторах CLIP (они сохраняются, 5633 × 512). Это первый в
-проекте случай, когда сеть получает НАШИ метки, а не чужие предобученные.
+The journal follows the same safety rules as ``data/manual_labels.csv``:
+existing frame rows are updated in place, writes are atomic, and a recovery
+snapshot is created before the first mutation.
 
-ЧТО ВАЖНО В УСТРОЙСТВЕ
-
-Координаты хранятся ОТНОСИТЕЛЬНЫМИ (0..1), а не в пикселях: картинка в
-браузере масштабируется под окно, и абсолютные координаты сломались бы при
-другом размере экрана. Пересчёт в пиксели делается при обучении, когда
-известен реальный размер файла.
-
-Кропы НЕ сохраняются картинками. Хранится рамка и ссылка на исходник — тот
-же принцип «сырьё неизменяемо», что и во всём проекте: оригинал не трогаем,
-разметка живёт отдельным слоем. Передумал насчёт границ — поправил четыре
-числа, а не пересохранял файлы.
-
-Журнал ведёт себя как data/manual_labels.csv: только дописывается, строка на
-кадр обновляется на месте, атомарная запись, снимок перед первой правкой.
-Правило номер один распространяется и сюда — это ручной труд, который не
-восстановить пересчётом.
-
-Запуск: python -m kz.report.photo_labels          собрать очередь и открыть
-        python -m kz.report.photo_labels --stats  что уже размечено
+Run ``python -m kz.report.photo_labels`` to inspect the queue or add ``--stats``
+to print current annotation statistics. Use ``python -m kz.web`` for labelling.
 """
 
 from __future__ import annotations
@@ -51,28 +33,38 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Путь журнала переопределяется переменной окружения. Нужно не для гибкости,
-# а ради безопасности: проверять живой сервер curl-ом, когда он пишет в
-# НАСТОЯЩИЙ журнал, — прямой путь к потере разметки. Один раз так и вышло:
-# тестовые записи легли рядом с работой пользователя, а уборка `rm` унесла
-# и то и другое.
+# The environment override is a safety boundary, not just configuration.
+# Manual server tests must never write into the real annotation journal.
 #
 #     KZ_LABELS_DIR=/tmp/scratch python -m kz.web
 #
-# Проверять руками — только так.
+# Always use a scratch directory for manual or automated UI checks.
 _DIR = os.environ.get("KZ_LABELS_DIR", "data")
 LABELS_CSV = str(Path(_DIR) / "photo_labels.csv")
 LABELS_PREV = str(Path(_DIR) / "photo_labels.prev.csv")
 LABELS_REVIEW_BACKUP = str(Path(_DIR) / "photo_labels.pre_definition_review.csv")
 
-HEADER = ["ad_id", "position", "path", "label", "x1", "y1", "x2", "y2",
-          "comment", "labeled_at", "selection_source", "dataset_split",
-          "annotator", "label_version", "boxes_json", "review_status"]
+HEADER = [
+    "ad_id",
+    "position",
+    "path",
+    "label",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "comment",
+    "labeled_at",
+    "selection_source",
+    "dataset_split",
+    "annotator",
+    "label_version",
+    "boxes_json",
+    "review_status",
+]
 
-# Новые объявления получают split детерминированно по ad_id. Старые метки
-# НЕЛЬЗЯ задним числом объявить holdout: они уже участвовали в экспериментах.
-# Они остаются legacy-train, а независимый audit набирается только из новых,
-# случайно выбранных объявлений.
+# New listings receive a deterministic split from ad_id. Legacy labels cannot
+# become a holdout retroactively because they already influenced experiments.
 AUDIT_PERCENT = 20
 AUDIT_PER_QUEUE = 60
 LABEL_VERSION = "3"
@@ -82,112 +74,62 @@ REVIEWED = "reviewed"
 
 
 def split_for_ad(ad_id: str) -> str:
-    """Стабильный train/audit split, не зависящий от порядка строк."""
+    """Return a stable train/audit split independent of row order."""
     bucket = int(hashlib.sha256(str(ad_id).encode()).hexdigest()[:8], 16) % 100
     return "audit" if bucket < AUDIT_PERCENT else "train"
 
-# Метки. «unclear» нужен обязательно: без него человек вынужден выбирать
-# между двумя неверными вариантами, и в данные попадает шум под видом
-# уверенного вердикта.
+
+# ``unclear`` prevents an annotator from forcing ambiguous frames into an
+# incorrect confident class.
 LABELS = {
-    "damaged": "удар, вмятина, разбитая деталь — локально, обвести рамкой",
-    "wreck":   "серьёзная авария: перёд или зад разрушен, детали оторваны",
-    "parts":   "машина разобрана или снят агрегат (двигатель, коробка)",
-    "intact":  "ударов и вмятин нет (ржавчина и потёртости — сюда же)",
-    "unclear": "не понять (темно, ракурс, обрезано)",
+    "damaged": "local impact, dent, crease, or broken part; draw a box",
+    "wreck": "major crash with a destroyed front/rear assembly",
+    "parts": "dismantled vehicle or removed major component",
+    "intact": "no impact or dent; rust and scuffs still belong here",
+    "unclear": "cannot determine because of darkness, angle, or crop",
 }
 
-# В интерфейсе показываются именно английские ключи выше, без широкого
-# перевода «повреждение кузова». Реальный аудит поймал definition drift:
-# разметчик разумно относил ржавчину и потёртости к широкому русскому слову,
-# хотя целевой `damaged` означает только локальный удар/вмятину/слом.
-
-# Граница между «повреждением» и «аварией» — операционная, не на глаз.
+# The interface uses these exact keys. A former broad translation caused
+# definition drift by including rust and scuffs in `damaged`, although the
+# target class means local impact, dents, or broken parts.
 #
-#   можно обвести рамкой   → damaged   свидетельство в одном месте
-#   рамка бессмысленна     → wreck     свидетельство — весь кадр
+# The damaged/wreck boundary is operational rather than subjective:
 #
-# Тот же принцип, что отделил «разобрано»: рамка есть там, где повреждение
-# локально. Если у машины нет переднего бампера, решётки и фары, а детали
-# лежат на земле, обводить нечего — разрушен весь узел.
+#   one local box is meaningful  → damaged
+#   a local box is meaningless   → wreck; evidence is the whole frame
 #
-# Зачем разделять, а не звать всё «повреждением». Во-первых, однородность
-# положительного класса: вмятина на крыле и разбитый вдребезги перёд
-# выглядят по-разному, и на двухстах метках сеть, обучаясь на их смеси, не
-# выучит ни того, ни другого. Во-вторых, разделение даёт ответ на вопрос,
-# который иначе не задать: `clip_damaged` показывал AUC 0,776, и неясно
-# было, что именно он ловит. Разумно ожидать, что тяжёлые аварии он видит
-# (они контрастны и занимают кадр), а мелкие вмятины нет — но проверить
-# это можно только на раздельных метках.
+# Separate classes keep a small dataset homogeneous and preserve future
+# options: classes can be merged later, but mixed labels cannot be separated
+# after collection. `parts` also uses whole-frame evidence.
 #
-# В-третьих, для продукта это разные вещи: вмятина значит «дешевле, но
-# ездит», авария — «восстановление сопоставимо с ценой».
+# Rust is labelled `intact` for this particular impact task and recorded in the
+# comment. Zero-shot CLIP already detects rust (historical AUC 0.881), while
+# impact remains the missing signal. Tiling improves local dents but harms the
+# global rust signal, so combining them would weaken both tasks.
 #
-# И главный довод, тот же что и раньше: объединить классы потом можно
-# бесплатно, разделить — невозможно.
-
-# Почему ржавчина идёт в «целая», хотя это очевидно не идеальное состояние.
-#
-# Ржавчину мы уже умеем видеть: zero-shot CLIP даёт по ней AUC 0,881 без
-# единой ручной метки. Тратить ручной труд на то, что и так работает, —
-# потеря. Разметка нужна ровно для того, чего CLIP не видит: ударов.
-#
-# И это не вопрос вкуса, а измеренная разница. Нарезка на плитки подняла
-# AUC вмятины с 0,776 до 0,827 и УРОНИЛА ржавчину с 0,881 до 0,809:
-# вмятина локальна, ржавчина покрывает кузов целиком. Смешав их в один
-# положительный класс на двухстах метках, сеть не выучит ни того, ни
-# другого.
-#
-# Информация не теряется: ржавчина пишется в комментарий. Формулировка
-# уточнена 29 августа, на 12-м размеченном кадре из 399 — раньше «intact»
-# читалось как «повреждений не видно», и разметчик справедливо спотыкался
-# на ржавом, но не битом кузове. На двухсотом кадре такая правка означала
-# бы, что ранние и поздние метки про разное.
-
-# Почему «разбор» отдельно от «повреждения», а не вместе.
-#
-# Реальный кадр из очереди: двигатель Hyundai Sonata лежит на брусчатке,
-# в объявлении «Запчасқа болады» и бейдж «Аварийная/Не на ходу». Это не
-# вмятина, но и не целая машина.
-#
-# С двумя сотнями меток положительный класс обязан быть ОДНОРОДНЫМ. Помятое
-# крыло и двигатель на земле выглядят совершенно по-разному, и сеть, учась
-# на их смеси, не выучит ни того, ни другого. Для продукта это тоже разные
-# вещи: вмятина значит «дешевле, но ездит», разбор — «это уже не машина».
-#
-# Решающий довод: объединить метки потом можно бесплатно, разделить —
-# невозможно. Свалив всё в «повреждение» сейчас, мы бы потеряли различие
-# навсегда.
-#
-# Рамка для «разбора» не нужна: свидетельство здесь — весь кадр целиком,
-# а не участок на нём.
-
-# Сколько контрольных кадров подмешивать к «подозрительным». При доле
-# повреждённых около процента случайная выборка дала бы две-три позитивные
-# метки на три сотни — учиться было бы не на чем. Поэтому стратификация:
-# все кадры помеченных объявлений плюс контроль для отрицательного класса.
+# Pure random sampling would yield only a few positives at roughly 1% prevalence.
+# The queue therefore combines likely positives with negative controls.
 CONTROL_PER_POSITIVE = 2
 
 
 def queue(limit: int = 400) -> pd.DataFrame:
-    """Что показывать разметчику: помеченные объявления вперёд, плюс контроль.
+    """Build a queue from likely positives plus negative controls.
 
-    Сначала идут кадры объявлений, где повреждение уже заподозрено по тексту
-    или бейджу сайта — там выше шанс встретить настоящий положительный
-    пример. Контрольные подмешиваются, чтобы модель училась и на «целых»,
-    а не только на «битых».
+    Text and site badges enrich the positive yield. Random controls keep the
+    training set and evaluation from containing only flagged vehicles.
     """
     from kz.core.db import get_engine
     from kz.ml.photo_clip import load_embeddings
 
     idx, _ = load_embeddings()
     cd = pd.read_sql(
-        "SELECT ad_id, damage_keywords, page_status_badge, price_tenge, age "
-        "FROM clean_data", get_engine(), dtype={"ad_id": str})
-    cd["suspect"] = (
-        (cd.damage_keywords.fillna("").str.len() > 0)
-        | cd.page_status_badge.fillna("-").str.contains("вар|ход|залож",
-                                                        case=False))
+        "SELECT ad_id, damage_keywords, page_status_badge, price_tenge, age FROM clean_data",
+        get_engine(),
+        dtype={"ad_id": str},
+    )
+    cd["suspect"] = (cd.damage_keywords.fillna("").str.len() > 0) | cd.page_status_badge.fillna(
+        "-"
+    ).str.contains("вар|ход|залож", case=False)
     d = idx.merge(cd, on="ad_id", how="left")
     d["suspect"] = d.suspect.fillna(False)
 
@@ -195,67 +137,54 @@ def queue(limit: int = 400) -> pd.DataFrame:
     d = d[~d.apply(lambda r: (r.ad_id, str(r.position)) in done, axis=1)]
 
     d["dataset_split"] = d.ad_id.map(split_for_ad)
-    d["selection_source"] = np.where(
-        d.suspect, "text_or_badge", "random_control")
+    d["selection_source"] = np.where(d.suspect, "text_or_badge", "random_control")
 
-    # Audit выбирается ДО model-rank и текстовой приоритизации. Иначе это
-    # был бы ещё один удобный срез active learning, а не случайная проверка.
+    # Select audit rows before model ranking or text prioritization so the audit
+    # remains random rather than becoming another active-learning slice.
     audit_pool = d[d.dataset_split == "audit"].copy()
     n_audit = min(AUDIT_PER_QUEUE, limit, len(audit_pool))
-    audit = (audit_pool.sample(n=n_audit, random_state=29)
-             if n_audit else audit_pool.head(0))
+    audit = audit_pool.sample(n=n_audit, random_state=29) if n_audit else audit_pool.head(0)
     audit["selection_source"] = "random_audit"
 
     train = _mark_candidates(d[d.dataset_split == "train"].copy())
     remaining = max(0, limit - len(audit))
     pos = train[train.suspect]
-    per_pos = (CONTROL_PER_POSITIVE if _negatives_so_far() < ENOUGH_NEGATIVES
-               else 0)
-    n_ctrl = min(len(train[~train.suspect]), max(0, remaining - len(pos)),
-                 (len(pos) * per_pos) if per_pos else CONTROL_WHEN_ENOUGH)
-    ctrl = (train[~train.suspect].sample(n=n_ctrl, random_state=42)
-            if n_ctrl else train.head(0))
+    per_pos = CONTROL_PER_POSITIVE if _negatives_so_far() < ENOUGH_NEGATIVES else 0
+    n_ctrl = min(
+        len(train[~train.suspect]),
+        max(0, remaining - len(pos)),
+        (len(pos) * per_pos) if per_pos else CONTROL_WHEN_ENOUGH,
+    )
+    ctrl = train[~train.suspect].sample(n=n_ctrl, random_state=42) if n_ctrl else train.head(0)
     out = pd.concat([audit, pos, ctrl]).head(limit)
-    # перемешиваем: иначе разметчик первые сто кадров видит только битые,
-    # привыкает и начинает искать повреждения там, где их нет
+    # Mix strata to reduce annotator expectation bias.
     out = out.sample(frac=1.0, random_state=7).reset_index(drop=True)
     return _body_first(out)
 
 
-# Сколько ОБЪЯВЛЕНИЙ брать с верхушки ранжирования и по сколько кадров с
-# каждого. Считаем объявлениями, а не кадрами: grouped CV считает
-# независимыми объявления, и пять кадров одной машины дают одну точку, а не
-# пять. На 29 августа положительных кадров 24, но объявлений всего 13 —
-# узкое место именно здесь.
+# Rank and sample by independent listings rather than frames because grouped
+# validation treats multiple photos of one vehicle as one unit.
 RANK_TOP_ADS = 120
 FRAMES_PER_AD = 2
 
-# Контроль. Отрицательных примеров уже за три сотни, на обучение хватает с
-# запасом, и тратить очередь на новые «целые» смысла мало. Оставляем
-# немного, чтобы оценка доли положительных не поехала совсем.
+# Once several hundred negatives exist, reserve only a small control sample so
+# queue capacity shifts toward scarce positives without losing prevalence checks.
 CONTROL_WHEN_ENOUGH = 60
 ENOUGH_NEGATIVES = 200
 
 
 def _negatives_so_far() -> int:
-    """Сколько «целых» уже размечено — от этого зависит доля контроля."""
+    """Count verified negative frames used to size the next control sample."""
     return stats()["intact"]
 
 
 def _mark_candidates(d: pd.DataFrame) -> pd.DataFrame:
-    """Кандидаты — верхние ОБЪЯВЛЕНИЯ ранжирования, по паре кадров с каждого.
+    """Take top-ranked listings and at most a few frames from each.
 
-    До этого отбор шёл только по тексту и бейджу сайта, то есть по тому,
-    что НАПИСАНО в объявлении. Ранжирование добавляет отбор по тому, как
-    кадр ВЫГЛЯДИТ.
-
-    Берём максимум счёта по объявлению, а не сумму: одного убедительного
-    кадра достаточно, чтобы объявление стоило показать, а сумма выдвинула
-    бы вперёд просто многофотографийные.
-
-    Перемешивание в `queue` сохраняется намеренно: если показать разметчику
-    подряд сотню вероятно битых, он привыкнет и начнёт видеть повреждения
-    там, где их нет.
+    Text and badges prioritize what a seller wrote; ranking adds how the photo
+    looks. Aggregate with the maximum score so one convincing frame is enough
+    and listings with many photos do not win merely by volume. The final queue
+    remains shuffled to reduce annotator expectation bias.
     """
     from kz.ml.photo_clip import load_damage_rank
 
@@ -268,9 +197,13 @@ def _mark_candidates(d: pd.DataFrame) -> pd.DataFrame:
     m["damage_rank"] = m.damage_rank.fillna(-1.0)
 
     by_ad = m.groupby("ad_id").damage_rank.max().nlargest(RANK_TOP_ADS)
-    pick = (m[m.ad_id.isin(by_ad.index)]
-            .sort_values("damage_rank", ascending=False)
-            .groupby("ad_id").head(FRAMES_PER_AD).index)
+    pick = (
+        m[m.ad_id.isin(by_ad.index)]
+        .sort_values("damage_rank", ascending=False)
+        .groupby("ad_id")
+        .head(FRAMES_PER_AD)
+        .index
+    )
     newly_ranked = pick[~m.loc[pick, "suspect"].to_numpy()]
     m.loc[pick, "suspect"] = True
     m.loc[newly_ranked, "selection_source"] = "model_rank"
@@ -278,18 +211,12 @@ def _mark_candidates(d: pd.DataFrame) -> pd.DataFrame:
 
 
 def _body_first(q: pd.DataFrame) -> pd.DataFrame:
-    """Кадры без кузова — в конец очереди, а не прочь из неё.
+    """Move likely no-body frames to the end without discarding them.
 
-    Салон, подкапотное, колесо крупным планом и фото документов не могут
-    показать повреждение кузова, а это 12% снимков. Гонять по ним человека
-    полтора часа — впустую.
-
-    Но и выбрасывать нельзя: порог поставлен на глаз, и ошибка фильтра
-    молча унесла бы наружные кадры, среди которых мог быть битый. Поэтому
-    не выбрасываем, а откладываем: сначала кузов, потом всё остальное.
-    Дошёл до конца — размечай дальше, ничего не потеряно.
-
-    Перемешивание внутри каждой части сохраняется: сортировка стабильная.
+    Interiors, engine bays, wheel close-ups, and documents cannot show body
+    impact and account for about 12% of images. The threshold is imperfect, so
+    exclusion would risk silently losing useful exterior frames. Stable sorting
+    preserves the random order within both sections.
     """
     from kz.ml.photo_clip import NO_BODY_THRESHOLD, load_no_body
 
@@ -302,13 +229,13 @@ def _body_first(q: pd.DataFrame) -> pd.DataFrame:
     return m.drop(columns=["_tail", "clip_no_body"]).reset_index(drop=True)
 
 
-# ─── журнал ─────────────────────────────────────────────────────────────────
+# Journal
 
 _snapshot_done = False
 
 
 def _snapshot_once() -> None:
-    """Один раз за запуск сохранить журнал ДО правок — точка восстановления."""
+    """Save one recovery snapshot before the process's first mutation."""
     global _snapshot_done
     if _snapshot_done or not Path(LABELS_CSV).exists():
         _snapshot_done = True
@@ -318,8 +245,7 @@ def _snapshot_once() -> None:
 
 
 def read_journal() -> tuple[list[str], list[dict]]:
-    """Журнал как есть. csv-модулем, не pandas: тот при round-trip
-    превращает целые в «50.0» (реальный баг проекта)."""
+    """Read raw journal values with ``csv`` to preserve integer strings."""
     p = Path(LABELS_CSV)
     if not p.exists():
         return list(HEADER), []
@@ -329,7 +255,7 @@ def read_journal() -> tuple[list[str], list[dict]]:
 
 
 def write_journal(header: list[str], rows: list[dict]) -> None:
-    """Атомарная запись: сначала во временный файл, потом подмена."""
+    """Write atomically through a temporary file and replacement."""
     Path(LABELS_CSV).parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(LABELS_CSV + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="") as f:
@@ -341,22 +267,23 @@ def write_journal(header: list[str], rows: list[dict]) -> None:
 
 
 def is_training_label(row: dict) -> bool:
-    """Метка может идти в CV только после разрешения definition drift."""
+    """Return whether a label is cleared for CV training and evaluation."""
     return str(row.get("review_status") or "") != NEEDS_REVIEW
 
 
 def mark_legacy_damaged_for_review() -> int:
-    """Неразрушающе отправить старые ``damaged`` на повторную проверку.
+    """Non-destructively send legacy ``damaged`` labels back for review.
 
-    Старый интерфейс называл класс широким русским словом «повреждение», и
-    туда попали ржавчина, грязь и потёртости. Мы не угадываем правильный
-    класс и ничего не удаляем: добавляем статус, делаем отдельную резервную
-    копию и исключаем спорные строки из обучения до ручного решения.
+    A former broad class name allowed rust, dirt, and scuffs into the impact
+    class. Do not guess corrections or delete work: add a status, create a
+    dedicated backup, and exclude disputed rows until manual review.
     """
     header, rows = read_journal()
-    pending = [r for r in rows
-               if r.get("label") == "damaged"
-               and not str(r.get("review_status") or "").strip()]
+    pending = [
+        r
+        for r in rows
+        if r.get("label") == "damaged" and not str(r.get("review_status") or "").strip()
+    ]
     if not pending:
         return 0
     source = Path(LABELS_CSV)
@@ -371,81 +298,84 @@ def mark_legacy_damaged_for_review() -> int:
 
 
 def _normalise_boxes(boxes) -> list[tuple[float, float, float, float]]:
-    """Проверить список относительных рамок и вернуть числа 0..1."""
+    """Validate relative boxes and return coordinates in the 0..1 range."""
     if boxes is None:
         return []
     if not isinstance(boxes, (list, tuple)):
-        raise ValueError("boxes должен быть списком рамок")
+        raise ValueError("boxes must be a list of bounding boxes")
     if len(boxes) > MAX_BOXES_PER_FRAME:
-        raise ValueError(f"слишком много рамок: максимум {MAX_BOXES_PER_FRAME}")
+        raise ValueError(f"Too many boxes; maximum is {MAX_BOXES_PER_FRAME}")
 
     out = []
     for raw in boxes:
         if not isinstance(raw, (list, tuple)) or len(raw) != 4:
-            raise ValueError(f"рамка должна содержать четыре координаты: {raw!r}")
+            raise ValueError(f"A box must contain four coordinates: {raw!r}")
         try:
             x1, y1, x2, y2 = (float(v) for v in raw)
         except (TypeError, ValueError) as e:
-            raise ValueError(f"координаты рамки должны быть числами: {raw!r}") from e
+            raise ValueError(f"Box coordinates must be numeric: {raw!r}") from e
         if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
-            raise ValueError(f"рамка вне картинки или вывернута: {raw}")
+            raise ValueError(f"Box is outside the image or inverted: {raw}")
         out.append((x1, y1, x2, y2))
     return out
 
 
 def boxes_from_row(row: dict) -> list[tuple[float, float, float, float]]:
-    """Все рамки строки; старые x1..y2 читаются как список из одной рамки."""
+    """Read all row boxes, treating legacy x1..y2 as a one-box list."""
     payload = str(row.get("boxes_json") or "").strip()
     if payload:
         try:
             return _normalise_boxes(json.loads(payload))
         except json.JSONDecodeError as e:
-            raise ValueError(f"некорректный boxes_json у {row.get('path')}: {e}") from e
+            raise ValueError(f"Invalid boxes_json for {row.get('path')}: {e}") from e
     if row.get("x1") not in (None, ""):
         return _normalise_boxes([[row.get(k) for k in ("x1", "y1", "x2", "y2")]])
     return []
 
 
-def save_label(ad_id: str, position, path: str, label: str,
-               box=None, boxes=None, comment: str = "",
-               selection_source: str = "manual",
-               dataset_split: str = "train", annotator: str | None = None) -> None:
-    """Записать метку кадра. Повторная разметка ОБНОВЛЯЕТ строку, не плодит.
+def save_label(
+    ad_id: str,
+    position,
+    path: str,
+    label: str,
+    box=None,
+    boxes=None,
+    comment: str = "",
+    selection_source: str = "manual",
+    dataset_split: str = "train",
+    annotator: str | None = None,
+) -> None:
+    """Insert or update one frame label without creating duplicates.
 
-    ``boxes`` — список (x1, y1, x2, y2) в долях от картинки. ``box``
-    оставлен для совместимости со старыми вызовами и означает одну рамку.
-    В CSV все рамки лежат в ``boxes_json``; x1..y2 дублируют первую, чтобы
-    старые исследовательские скрипты продолжили работать.
+    ``boxes`` contains relative ``(x1, y1, x2, y2)`` tuples. ``box`` is a
+    backward-compatible single-box argument. JSON stores every box, while
+    legacy x1..y2 columns mirror the first one for older research scripts.
     """
     if label not in LABELS:
-        raise ValueError(f"неизвестная метка: {label!r}")
+        raise ValueError(f"Unknown label: {label!r}")
     if box is not None and boxes is not None:
-        raise ValueError("передайте box или boxes, но не оба сразу")
-    frame_boxes = _normalise_boxes(boxes if boxes is not None
-                                   else ([box] if box is not None else []))
+        raise ValueError("Pass either box or boxes, not both")
+    frame_boxes = _normalise_boxes(
+        boxes if boxes is not None else ([box] if box is not None else [])
+    )
     if label == "damaged" and not frame_boxes:
-        raise ValueError("для «damaged» нужна хотя бы одна рамка")
-    # Рамка РАЗРЕШЕНА при любой метке, обязательна только для «damaged».
-    #
-    # Запрещать было ошибкой. Разметчик обводил ржавчину и ставил «целая» —
-    # рамка молча отбрасывалась, оставался комментарий. Человек считал, что
-    # отмечает область, а координаты не сохранялись ни разу.
-    #
-    # Тихо терять ручной труд нельзя, даже если сейчас не знаешь, что с ним
-    # делать. Ржавчину мы и так детектим (AUC 0,881 zero-shot), но области
-    # могут пригодиться: например, чтобы проверить, смотрит ли детектор
-    # ржавчины туда же, куда человек.
+        raise ValueError("The damaged label requires at least one box")
+    # Boxes are allowed with every label and required only for `damaged`.
+    # Preserving a rust region on an `intact` frame avoids silently discarding
+    # manual work and supports future localization analysis.
     _snapshot_once()
     header, rows = read_journal()
-    # Миграция только при следующей осознанной записи: существующий журнал
-    # не переписывается при импорте модуля. Все старые поля и строки остаются.
+    # Migrate schema only on an intentional write. Importing this module never
+    # rewrites the existing journal.
     header = list(dict.fromkeys([*header, *HEADER]))
     key = (str(ad_id), str(position))
     if dataset_split not in {"train", "audit"}:
-        raise ValueError(f"неизвестный dataset_split: {dataset_split!r}")
+        raise ValueError(f"Unknown dataset_split: {dataset_split!r}")
     first = frame_boxes[0] if frame_boxes else None
     row = {
-        "ad_id": str(ad_id), "position": str(position), "path": path,
+        "ad_id": str(ad_id),
+        "position": str(position),
+        "path": path,
         "label": label,
         "x1": f"{first[0]:.4f}" if first else "",
         "y1": f"{first[1]:.4f}" if first else "",
@@ -457,11 +387,12 @@ def save_label(ad_id: str, position, path: str, label: str,
         "dataset_split": dataset_split,
         "annotator": annotator or os.environ.get("KZ_ANNOTATOR", "sanzhar"),
         "label_version": LABEL_VERSION,
-        "boxes_json": (json.dumps([[round(v, 4) for v in b] for b in frame_boxes],
-                                  separators=(",", ":"))
-                       if frame_boxes else ""),
-        # Любая новая или повторная ручная запись уже сделана по точному
-        # правилу v3 и тем самым закрывает needs_review.
+        "boxes_json": (
+            json.dumps([[round(v, 4) for v in b] for b in frame_boxes], separators=(",", ":"))
+            if frame_boxes
+            else ""
+        ),
+        # Any new or repeated manual decision follows v3 and clears review.
         "review_status": REVIEWED,
     }
     for i, r in enumerate(rows):
@@ -474,25 +405,28 @@ def save_label(ad_id: str, position, path: str, label: str,
 
 
 def labelled_frames() -> list[dict]:
-    """Уже размеченные кадры — для просмотра и правки на странице.
+    """Return completed frames for in-page review and correction.
 
-    Нужны потому, что очередь их СОЗНАТЕЛЬНО не содержит: показывать
-    заново то, что уже решено, — трата времени. Но передумать человек
-    вправе, и «повреждений 21» должно открываться по клику.
+    The work queue intentionally excludes them, but the clickable counters must
+    still make previous decisions editable.
     """
     _, rows = read_journal()
     out = []
     for r in rows:
         if r.get("label") not in LABELS:
             continue
-        rec = {"ad_id": r.get("ad_id", ""), "position": int(r.get("position") or 0),
-               "path": r.get("path", ""), "label": r["label"],
-               "comment": r.get("comment", ""),
-               "selection_source": r.get("selection_source", "legacy"),
-               "dataset_split": r.get("dataset_split", "train") or "train",
-               "annotator": r.get("annotator", ""),
-               "label_version": r.get("label_version", "1") or "1",
-               "review_status": r.get("review_status", "")}
+        rec = {
+            "ad_id": r.get("ad_id", ""),
+            "position": int(r.get("position") or 0),
+            "path": r.get("path", ""),
+            "label": r["label"],
+            "comment": r.get("comment", ""),
+            "selection_source": r.get("selection_source", "legacy"),
+            "dataset_split": r.get("dataset_split", "train") or "train",
+            "annotator": r.get("annotator", ""),
+            "label_version": r.get("label_version", "1") or "1",
+            "review_status": r.get("review_status", ""),
+        }
         boxes = boxes_from_row(r)
         if boxes:
             rec["boxes"] = [list(b) for b in boxes]
@@ -502,10 +436,10 @@ def labelled_frames() -> list[dict]:
 
 
 def stats() -> dict:
-    """Сколько кадров И независимых объявлений размечено.
+    """Count labelled frames and independent listings.
 
-    Для интерфейса полезны кадры, для grouped CV — объявления: пять снимков
-    одной машины не превращаются в пять независимых наблюдений.
+    UI progress uses frames; grouped validation uses listings because five
+    photos of one vehicle are not five independent observations.
     """
     _, rows = read_journal()
     out = dict.fromkeys(LABELS, 0)
@@ -525,7 +459,8 @@ def stats() -> dict:
     review_rows = [r for r in rows if r.get("review_status") == NEEDS_REVIEW]
     out["needs_review"] = len(review_rows)
     verified_positive = {
-        str(r.get("ad_id", "")) for r in rows
+        str(r.get("ad_id", ""))
+        for r in rows
         if r.get("label") in {"damaged", "wreck"} and is_training_label(r)
     }
     out["verified_positive_ads"] = len(verified_positive)
@@ -538,36 +473,43 @@ def stats() -> dict:
 def main():
     if "--mark-legacy-review" in sys.argv:
         changed = mark_legacy_damaged_for_review()
-        print(f"Помечено needs_review: {changed}. Ничего не удалено; "
-              f"резервная копия: {LABELS_REVIEW_BACKUP}")
+        print(
+            f"Marked needs_review: {changed}. Nothing was deleted; backup: {LABELS_REVIEW_BACKUP}"
+        )
         return
     if "--stats" in sys.argv:
         s = stats()
-        print(f"Размечено кадров: {s['total']}")
+        print(f"Labelled frames: {s['total']}")
         for k, desc in LABELS.items():
-            print(f"  {k:9} {s[k]:4} кадров, {s[f'{k}_ads']:3} объявлений   {desc}")
+            print(f"  {k:9} {s[k]:4} frames, {s[f'{k}_ads']:3} listings   {desc}")
         need = 200 - s["verified_positive_ads"]
-        print(f"\nНезависимых объявлений damaged/wreck: {s['positive_ads']} всего, "
-              f"{s['verified_positive_ads']} проверено для CV.")
+        print(
+            f"\nIndependent damaged/wreck listings: {s['positive_ads']} total, "
+            f"{s['verified_positive_ads']} verified for CV."
+        )
         if s["needs_review"]:
-            print(f"Needs review: {s['needs_review']} кадров — до повторной "
-                  "разметки они исключены из обучения и метрик.")
-        print(f"Рамок локальных повреждений: {s['damage_boxes']}")
-        print(f"Новый случайный audit holdout: {s['audit_ads']} объявлений, "
-              f"{s['audit_frames']} кадров (legacy-метки туда не переносятся).")
-        print("Ориентир для устойчивого локального замера — около 200: "
-              f"{'хватает' if need <= 0 else f'ещё {need} объявлений'}")
+            print(
+                f"Needs review: {s['needs_review']} frames are excluded from "
+                "training and metrics until relabelled."
+            )
+        print(f"Local damage boxes: {s['damage_boxes']}")
+        print(
+            f"New random audit holdout: {s['audit_ads']} listings, "
+            f"{s['audit_frames']} frames (legacy labels are never moved into it)."
+        )
+        print(
+            "Target for a stable local evaluation is about 200: "
+            f"{'enough' if need <= 0 else f'{need} more listings'}"
+        )
         for k in ("parts", "wreck"):
             if s[k]:
-                print(f"{k}: {s[k]} — отдельный класс, "
-                      f"на них учим отдельно или объединяем позже")
+                print(f"{k}: {s[k]} — keep as a separate class during training or merge later")
         return
 
     q = queue()
-    print(f"В очереди кадров: {len(q)}   (помеченных объявлений: "
-          f"{int(q.suspect.sum())})")
-    print(f"Уже размечено: {stats()['total']}")
-    print("\nОткрыть разметку:  python -m kz.web  →  http://127.0.0.1:8000/damage")
+    print(f"Frames in queue: {len(q)}   (flagged listings: {int(q.suspect.sum())})")
+    print(f"Already labelled: {stats()['total']}")
+    print("\nOpen labelling:  python -m kz.web  →  http://127.0.0.1:8000/damage")
 
 
 if __name__ == "__main__":

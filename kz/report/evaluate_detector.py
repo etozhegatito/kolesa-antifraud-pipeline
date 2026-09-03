@@ -1,29 +1,14 @@
 # -*- coding: utf-8 -*-
-"""
-evaluate_detector.py — доказательство, что детектор работает (или нет).
+"""Implementation for the `kz.report.evaluate_detector` module."""
 
-Считает precision/recall/F1 флага is_suspicious ПРОТИВ ручных вердиктов
-(ground truth из data/manual_labels.csv) + матрицу ошибок + precision
-КАЖДОГО правила по отдельности (какой флаг ловит фрод, а какой красит
-честных). Пока вердиктов нет — печатает, что и сколько разметить, и
-выходит без ошибки: харнесс готов заранее, метрика появится в тот же
-миг, когда появится разметка.
-
-Ground truth: verdict='fraud' → положительный класс, 'legit' →
-отрицательный, 'unknown' и без вердикта → исключаются из счёта.
-Предсказание модели: is_suspicious из clean_data.
-
-Запуск: python -m kz.report.evaluate_detector         (читает Postgres + CSV)
-Полностью офлайн, ни одного запроса к сайту.
-"""
-
-# ─── Самопроверка файла (защита от путаницы при копировании) ────────────────
 import pathlib as _p
+
 _expected = "evaluate_detector.py"
 if _p.Path(__file__).name != _expected:
     raise SystemExit(
-        f"ОШИБКА: этот код — {_expected}, а файл называется "
-        f"{_p.Path(__file__).name}. Файлы перепутаны при копировании!")
+        f"ERROR: this code belongs to {_expected}, but the file is named "
+        f"{_p.Path(__file__).name}. Files may have been mixed up while copying."
+    )
 
 
 import math
@@ -35,37 +20,38 @@ from kz.core.db import get_engine
 
 LABELS_CSV = "data/manual_labels.csv"
 LINE = "─" * 64
-MIN_FOR_METRICS = 20   # ниже — числа слишком шумные, чтобы им верить
+MIN_FOR_METRICS = 20
 
 
 def load_labeled() -> pd.DataFrame:
-    """clean_data (предсказания) ⋈ manual_labels (истина), только
-    строки с однозначным вердиктом fraud/legit."""
+    """Implement `load_labeled`."""
     clean = pd.read_sql(
         "SELECT ad_id, is_suspicious, suspicion_reasons FROM clean_data",
-        get_engine(), dtype={"ad_id": str})
+        get_engine(),
+        dtype={"ad_id": str},
+    )
     if not Path(LABELS_CSV).exists():
         return pd.DataFrame()
     lab = pd.read_csv(LABELS_CSV, dtype={"ad_id": str})
     lab["verdict"] = lab["verdict"].astype("string").str.strip().str.lower()
-    # manual_labels — append-only журнал. При уточнении решения один ad_id
-    # встречается повторно; последняя запись является актуальной.
+
     lab = lab.drop_duplicates("ad_id", keep="last")
     lab = lab[lab["verdict"].isin(["fraud", "legit"])]
     optional = [
-        c for c in ["sampling_stratum", "stratum_population", "stratum_sample_size"]
+        c
+        for c in ["sampling_stratum", "stratum_population", "stratum_sample_size"]
         if c in lab.columns
     ]
     out = clean.merge(lab[["ad_id", "verdict", *optional]], on="ad_id", how="inner")
 
-    # Слой выборки живёт в очереди, а не в журнале: журнал ведётся руками и
-    # его схема намеренно простая. Без слоя нельзя отличить контрольное
-    # объявление от помеченного, а значит нельзя оценить пропуски.
     queue = Path("data/eda/labeling_queue.csv")
     if queue.exists() and "sampling_stratum" not in out.columns:
         q = pd.read_csv(queue, dtype={"ad_id": str})
-        keep = [c for c in ["ad_id", "sampling_stratum", "stratum_population",
-                            "stratum_sample_size"] if c in q.columns]
+        keep = [
+            c
+            for c in ["ad_id", "sampling_stratum", "stratum_population", "stratum_sample_size"]
+            if c in q.columns
+        ]
         out = out.merge(q[keep], on="ad_id", how="left")
     return out
 
@@ -74,19 +60,15 @@ def confusion(df: pd.DataFrame) -> dict:
     is_fraud = df["verdict"] == "fraud"
     flagged = df["is_suspicious"] == 1
     return {
-        "TP": int((is_fraud & flagged).sum()),    # фрод, поймали
-        "FP": int((~is_fraud & flagged).sum()),   # честный, зря пометили
-        "FN": int((is_fraud & ~flagged).sum()),   # фрод, пропустили
-        "TN": int((~is_fraud & ~flagged).sum()),  # честный, верно пропустили
+        "TP": int((is_fraud & flagged).sum()),
+        "FP": int((~is_fraud & flagged).sum()),
+        "FN": int((is_fraud & ~flagged).sum()),
+        "TN": int((~is_fraud & ~flagged).sum()),
     }
 
 
 def weighted_confusion(df: pd.DataFrame) -> dict | None:
-    """Оценка по населению через inverse-probability weights очереди.
-
-    Возвращает None для старых ручных строк без sampling metadata: придумывать
-    им веса было бы хуже, чем честно не показывать population recall.
-    """
+    """Implement `weighted_confusion`."""
     required = {"stratum_population", "stratum_sample_size"}
     if not required.issubset(df.columns):
         return None
@@ -105,38 +87,34 @@ def weighted_confusion(df: pd.DataFrame) -> dict | None:
     }
 
 
-
 def control_bound_report(df: pd.DataFrame) -> str:
-    """Что можно сказать, когда фрода не нашлось вовсе.
-
-    Если в случайной выборке размера n не встретилось ни одного события,
-    доля событий в населении не обязана быть нулём — но она ограничена
-    сверху. Правило трёх: верхняя граница 95%-доверительного интервала
-    примерно равна 3/n. Это стандартный приём, когда наблюдений события
-    ноль, и он превращает «ничего не нашли» в измеримое утверждение.
-    """
-    ctrl = df[df.get("sampling_stratum") == "random_control"] \
-        if "sampling_stratum" in df.columns else df.iloc[0:0]
+    """Implement `control_bound_report`."""
+    ctrl = (
+        df[df.get("sampling_stratum") == "random_control"]
+        if "sampling_stratum" in df.columns
+        else df.iloc[0:0]
+    )
     n_ctrl = len(ctrl)
-    lines = ["\n► Что означает ноль фрода"]
+    lines = ["\n► What zero confirmed fraud means"]
     if n_ctrl == 0:
-        lines.append("  Контрольный слой не размечен — оценить пропуски нельзя.")
+        lines.append("  The control stratum is unlabeled, so missed cases cannot be estimated.")
         return "\n".join(lines)
 
-    bound = 3 / n_ctrl                     # правило трёх
-    pop = ctrl["stratum_population"].iloc[0] if "stratum_population" in ctrl \
-        else float("nan")
-    lines.append(f"  В контрольной выборке {n_ctrl} объявлений, фрода не найдено.")
-    lines.append(f"  Правило трёх: доля фрода в базе ниже {bound:.1%} "
-                 f"с доверием 95%.")
+    bound = 3 / n_ctrl
+    pop = ctrl["stratum_population"].iloc[0] if "stratum_population" in ctrl else float("nan")
+    lines.append(f"  The control sample contains {n_ctrl} listings and no confirmed fraud.")
+    lines.append(
+        f"  Rule of three: the population fraud rate is below {bound:.1%} "
+        f"with approximately 95% confidence."
+    )
     if pop == pop:
-        lines.append(f"  В пересчёте на {int(pop)} непомеченных объявлений это "
-                     f"не более {int(bound * pop)} случаев обмана, "
-                     f"а точечная оценка — ноль.")
-    lines.append("  Вывод: детектор нечего пропускать. Низкий precision при "
-                 "таком раскладе означает не плохие правила, а чистую базу —")
-    lines.append("  правила помечают необычное, а необычное здесь оказывается "
-                 "объяснимым, а не мошенническим.")
+        lines.append(
+            f"  Applied to {int(pop)} unflagged listings, this is at most "
+            f"{int(bound * pop)} fraud cases; the point estimate is zero."
+        )
+    lines.append("  Interpretation: the sample gives the detector little fraud to catch.")
+    lines.append("  Low precision can therefore mean the rules found explainable anomalies,")
+    lines.append("  not that the rule implementation is necessarily defective.")
     return "\n".join(lines)
 
 
@@ -145,8 +123,7 @@ def _prf(c: dict) -> tuple[float, float, float]:
     precision = tp / (tp + fp) if (tp + fp) else float("nan")
     recall = tp / (tp + fn) if (tp + fn) else float("nan")
     if math.isfinite(precision) and math.isfinite(recall):
-        f1 = (2 * precision * recall / (precision + recall)
-              if precision + recall > 0 else 0.0)
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
     else:
         f1 = float("nan")
     return precision, recall, f1
@@ -156,18 +133,20 @@ def main():
     df = load_labeled()
 
     print(LINE)
-    print("КАЧЕСТВО ДЕТЕКТОРА (is_suspicious vs ручные вердикты)")
+    print("DETECTOR QUALITY (is_suspicious versus manual verdicts)")
     print(LINE)
 
     if df.empty:
-        print("\nРазмеченных вердиктов пока нет — метрику посчитать не на чем.")
-        print("Что делать:")
-        print("  1. открой data/eda/labeling_queue.csv (очередь, худшие сверху)")
-        print("  2. пройди по url, проставь verdict = fraud / legit / unknown")
-        print("  3. скопируй размеченные строки в data/manual_labels.csv")
-        print("  4. запусти clean.py (чтобы вердикты вошли), потом снова этот скрипт")
-        print(f"\nДля устойчивой метрики нужно ≥ {MIN_FOR_METRICS} вердиктов "
-              "fraud/legit (сейчас 0).")
+        print("\nNo manual verdicts are available, so metrics cannot be computed.")
+        print("Next steps:")
+        print("  1. open data/eda/labeling_queue.csv (highest-priority rows first)")
+        print("  2. inspect each URL and set verdict = fraud / legit / unknown")
+        print("  3. copy labeled rows to data/manual_labels.csv")
+        print("  4. run clean.py to merge verdicts, then run this report again")
+        print(
+            f"\nA stable estimate requires at least {MIN_FOR_METRICS} "
+            "fraud/legit verdicts (currently 0)."
+        )
         print(LINE)
         return
 
@@ -176,50 +155,46 @@ def main():
     c = confusion(df)
     precision, recall, f1 = _prf(c)
 
-    print(f"\nРазмечено: {n} (фрод: {n_fraud}, честных: {n - n_fraud})")
+    print(f"\nLabeled: {n} (fraud: {n_fraud}, legit: {n - n_fraud})")
     if n < MIN_FOR_METRICS:
-        print(f"⚠ мало для устойчивой оценки (нужно ≥ {MIN_FOR_METRICS}) — "
-              "числа ниже ориентировочные")
-    print("  recall относится к размеченной выборке; для оценки пропусков "
-          "обязательно размечай слой random_control из labeling_queue.csv")
+        print(
+            f"WARNING: too few for a stable estimate (need at least {MIN_FOR_METRICS}); "
+            "the following values are provisional"
+        )
+    print("  Recall applies only to the labeled sample. Label random_control rows")
+    print("  from labeling_queue.csv to estimate misses in the wider population.")
 
-    print("\n► Матрица ошибок")
-    print("                 помечен   не помечен")
-    print(f"  реально фрод      {c['TP']:>4}       {c['FN']:>4}   ← FN = пропущенный фрод (опасно)")
-    print(f"  реально честный   {c['FP']:>4}       {c['TN']:>4}   ← FP = ложная тревога (шум)")
+    print("\n► Confusion matrix")
+    print("                 flagged   not flagged")
+    print(f"  actual fraud      {c['TP']:>4}       {c['FN']:>4}   ← FN = missed fraud")
+    print(f"  actual legit      {c['FP']:>4}       {c['TN']:>4}   ← FP = false alarm")
 
-    print("\n► Метрики")
-    print(f"  precision = {precision:.1%}   (из помеченных — сколько реально фрод)")
-    print(f"  recall    = {recall:.1%}   (из всего фрода — сколько поймали)")
-    print(f"  F1        = {f1:.1%}   (баланс двух)")
+    print("\n► Metrics")
+    print(f"  precision = {precision:.1%}   (share of flagged rows that are fraud)")
+    print(f"  recall    = {recall:.1%}   (share of labeled fraud that was caught)")
+    print(f"  F1        = {f1:.1%}   (harmonic balance of precision and recall)")
 
-    # Ноль фрода во всей разметке — не отсутствие результата, а результат.
-    # Метрики вырождаются в nan (0/0), и без пояснения это читается как
-    # «ничего не посчиталось», хотя на самом деле посчиталась верхняя граница
-    # доли фрода в базе.
     if n_fraud == 0:
         print(control_bound_report(df))
 
     weighted = weighted_confusion(df)
     if weighted is not None:
         wp, wr, wf = _prf(weighted)
-        print("\n► Population estimate с весами sampling strata")
+        print("\n► Population estimate weighted by sampling strata")
         print(f"  precision = {wp:.1%}   recall = {wr:.1%}   F1 = {wf:.1%}")
-        print("  Это оценка на весь срез через inverse-probability weights, "
-              "а не сырая метрика обогащённой очереди.")
+        print("  This extrapolates to the full snapshot with inverse-probability weights;")
+        print("  it is not the raw metric of an enriched review queue.")
     else:
-        print("\n  Population estimate пока недоступен: старые verdict не содержат "
-              "sampling metadata из новой трёхслойной очереди.")
+        print("\n  Population estimate is unavailable: legacy verdicts lack the sampling")
+        print("  metadata introduced by the new three-stratum queue.")
 
-    # precision каждого правила — какой флаг работает, какой шумит
-    print("\n► Precision по правилам (только среди размеченных)")
+    print("\n► Precision by rule (labeled rows only)")
     flagged = df[df["is_suspicious"] == 1].copy()
     if flagged.empty:
-        print("  (ни одно размеченное объявление не флагнуто)")
+        print("  (no labeled listing was flagged)")
     else:
         rows = []
-        reasons = (flagged.assign(r=flagged["suspicion_reasons"].str.split("|"))
-                   .explode("r"))
+        reasons = flagged.assign(r=flagged["suspicion_reasons"].str.split("|")).explode("r")
         for reason, g in reasons.groupby("r"):
             if not reason:
                 continue

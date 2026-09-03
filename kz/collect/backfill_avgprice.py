@@ -1,31 +1,13 @@
 # -*- coding: utf-8 -*-
-"""
-backfill_avgprice.py — разовое дозаполнение полей со страницы объявления
-(kolesa_avg_price И page_status_badge) у уже обогащённых объявлений.
-
-Зачем отдельно: обе колонки добавили ПОСЛЕ того, как часть объявлений уже
-обогатилась, и их страницы тогда парсились без них. Значения живут только
-на живой странице (не выводятся из наших данных), поэтому единственный
-способ дозаполнить старые строки — перекачать их страницы. Новые
-объявления enrich.py заполняет сам, бесплатно.
-
-Ничего не удаляет и заново не парсит листинг. Целится в enriched-строки,
-где пусто ЛЮБОЕ из двух полей; заполняет через COALESCE — уже заполненное
-НЕ трогает (напр. avgPrice, добранный прошлым заходом, переживёт добор
-бейджа). Подозрительные первыми. Бюджет и паузы — как у enrich.py.
-
-Запуск: python -m kz.collect.backfill_avgprice            (следующая порция ~20)
-        python -m kz.collect.backfill_avgprice --all       (все разом, ~1.5 часа, риск лимитов)
-
-Рекомендация: гоняй БЕЗ --all по паре раз в день — резюмируемо и безопасно
-по лимитам; прервать/продолжить можно в любой момент.
-"""
+"""Implementation for the `kz.collect.backfill_avgprice` module."""
 
 import pathlib as _p
+
 _expected = "backfill_avgprice.py"
 if _p.Path(__file__).name != _expected:
-    raise SystemExit(f"ОШИБКА: этот код — {_expected}, а файл называется "
-                     f"{_p.Path(__file__).name}.")
+    raise SystemExit(
+        f"ERROR: this code belongs to {_expected}, but the file is named {_p.Path(__file__).name}."
+    )
 
 import csv
 import logging
@@ -40,27 +22,29 @@ from kz.core import pacing
 from kz.core.db import get_engine
 from kz.collect.enrich import HEADERS, extract_avg_price, extract_status_badge, ENRICHED_CSV
 
-MAX_PER_RUN           = 20      # мелкая порция (анти-бан, см. catch_up DAILY_BUDGET)
-DELAY_RANGE           = (4.0, 8.0)
-MAX_CONSECUTIVE_FAILS = 3           # предохранитель: N сбоев подряд → стоп
-LOG_FILE              = "logs/enrich.log"   # тот же лог, что у обогащения
+MAX_PER_RUN = 20
+DELAY_RANGE = (4.0, 8.0)
+MAX_CONSECUTIVE_FAILS = 3
+LOG_FILE = "logs/enrich.log"
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"),
-              logging.StreamHandler()])
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)s  %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
+)
 log = logging.getLogger(__name__)
 
 
 def pick_targets() -> list[str]:
-    """enriched-строки, где пусто ЛЮБОЕ из двух полей; подозрительные вперёд."""
+    """Implement `pick_targets`."""
     engine = get_engine()
     todo = pd.read_sql(
         "SELECT ad_id FROM enriched WHERE http_status = 200 "
         "AND (kolesa_avg_price IS NULL OR page_status_badge IS NULL)",
-        engine, dtype={"ad_id": str})
-    susp = pd.read_sql("SELECT ad_id, is_suspicious FROM clean_data",
-                        engine, dtype={"ad_id": str})
+        engine,
+        dtype={"ad_id": str},
+    )
+    susp = pd.read_sql("SELECT ad_id, is_suspicious FROM clean_data", engine, dtype={"ad_id": str})
     todo = todo.merge(susp, on="ad_id", how="left")
     todo["is_suspicious"] = todo["is_suspicious"].fillna(0)
     todo = todo.sort_values("is_suspicious", ascending=False)
@@ -69,16 +53,18 @@ def pick_targets() -> list[str]:
 
 
 def update_stores(ad_id: str, avg, badge: str):
-    """Пишем в Postgres и в CSV-снимок. COALESCE/fill-if-empty: уже
-    заполненные поля НЕ трогаем — добор одного поля не затирает другое."""
+    """Implement `update_stores`."""
     with get_engine().begin() as conn:
-        conn.execute(text(
-            "UPDATE enriched SET "
-            "kolesa_avg_price = COALESCE(kolesa_avg_price, :a), "
-            "page_status_badge = COALESCE(NULLIF(page_status_badge, ''), :b) "
-            "WHERE ad_id = :id"),
-            {"a": avg, "b": badge, "id": ad_id})
-    # CSV: csv-модулем (не pandas — иначе float-порча целых колонок), только пустые
+        conn.execute(
+            text(
+                "UPDATE enriched SET "
+                "kolesa_avg_price = COALESCE(kolesa_avg_price, :a), "
+                "page_status_badge = COALESCE(NULLIF(page_status_badge, ''), :b) "
+                "WHERE ad_id = :id"
+            ),
+            {"a": avg, "b": badge, "id": ad_id},
+        )
+
     rows = list(csv.DictReader(open(ENRICHED_CSV, encoding="utf-8")))
     fields = list(rows[0].keys()) if rows else []
     for r in rows:
@@ -89,57 +75,56 @@ def update_stores(ad_id: str, avg, badge: str):
                 r["page_status_badge"] = badge
     with open(ENRICHED_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader(); w.writerows(rows)
+        w.writeheader()
+        w.writerows(rows)
 
 
 def main():
     targets = pick_targets()
-    log.info(f"бэкфилл avgPrice+бейдж: к дозаполнению {len(targets)}")
+    log.info(f"avgPrice + badge backfill: {len(targets)} rows pending")
     session = requests.Session()
     avg_filled = badge_filled = 0
     fails = 0
     for i, ad_id in enumerate(targets, 1):
         try:
-            resp = session.get(f"https://kolesa.kz/a/show/{ad_id}",
-                               headers=HEADERS, timeout=20)
+            resp = session.get(f"https://kolesa.kz/a/show/{ad_id}", headers=HEADERS, timeout=20)
         except requests.RequestException as e:
             log.warning(f"{ad_id}: {e}")
             fails += 1
             if fails >= MAX_CONSECUTIVE_FAILS:
-                log.error("Стоп: сбои подряд — продолжим в другой раз.")
+                log.error("Stopped after consecutive failures; resume later.")
                 sys.exit(1)
             time.sleep(30)
             continue
 
-        # 429 = сайт просит притормозить. Это инструкция, а не ошибка:
-        # тормозим НАДОЛГО и считаем к предохранителю (иначе --all
-        # молотил бы сотни запросов сквозь rate-limit → бан).
         if resp.status_code == 429:
-            log.warning("429: пауза 120с")
+            log.warning("HTTP 429: pausing for 120 seconds")
             time.sleep(120)
             fails += 1
             if fails >= MAX_CONSECUTIVE_FAILS:
-                log.error("Стоп: 429 подряд — сайт лимитирует, продолжим позже.")
+                log.error("Stopped after consecutive 429 responses; the site is rate-limiting us.")
                 sys.exit(1)
             continue
         fails = 0
 
         if resp.status_code == 200:
-            avg = extract_avg_price(resp.text)      # число или None
-            badge = extract_status_badge(resp.text)  # текст или "-"
+            avg = extract_avg_price(resp.text)
+            badge = extract_status_badge(resp.text)
         else:
             avg, badge = None, "-"
-        # avgPrice: -1 = «у модели нет эталона», чтобы не перекачивать снова
+
         update_stores(ad_id, avg if avg is not None else -1, badge)
         if avg:
             avg_filled += 1
         if badge and badge != "-":
             badge_filled += 1
         if i % 20 == 0:
-            log.info(f"  {i}/{len(targets)} (avgPrice: {avg_filled}, бейджей: {badge_filled})")
+            log.info(f"  {i}/{len(targets)} (avgPrice: {avg_filled}, badges: {badge_filled})")
         pacing.polite_sleep(i, DELAY_RANGE, log)
-    log.info(f"Готово из {len(targets)}: avgPrice дозаполнено {avg_filled}, "
-             f"статус-бейджей найдено {badge_filled}")
+    log.info(
+        f"Completed {len(targets)} rows: filled {avg_filled} avgPrice values and "
+        f"found {badge_filled} status badges"
+    )
 
 
 if __name__ == "__main__":

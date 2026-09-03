@@ -1,19 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Разброс MAPE и честная локализация ошибки по возрасту и цене.
-
-Модуль не обучает модель и не ходит в сеть. Он читает построчные прогнозы
-того же grouped OOF, который ``train_price_model`` использовал для основной
-метрики, и отвечает на два вопроса:
-
-1. Насколько MAPE может плавать просто из-за состава выборки?
-2. Проблема действительно в машинах старше пяти лет или прежде всего в цене?
-
-Bootstrap пересэмплирует целые группы перезаливов. Одна и та же машина под
-несколькими ad_id поэтому не притворяется несколькими независимыми объектами.
-
-Запуск: python -m kz.ml.mape_stability
-Выход: data/eda/mape_stability.json + mape_stability_segments.csv
-"""
+"""Implementation for the `kz.ml.mape_stability` module."""
 
 from __future__ import annotations
 
@@ -40,18 +26,14 @@ def grouped_bootstrap_mape(
     n_boot: int = BOOTSTRAP_REPEATS,
     seed: int = RANDOM_SEED,
 ) -> dict[str, float | int | list[float]]:
-    """MAPE и его ДИ при bootstrap целых независимых машин.
-
-    Это неопределённость состава выборки, а не случайного seed CatBoost.
-    Production CV намеренно детерминирован, чтобы новые замеры были сравнимы.
-    """
+    """Implement `grouped_bootstrap_mape`."""
     ape = np.asarray(ape_pct, dtype=float)
     group_values = pd.Series(groups, dtype="string")
     valid = np.isfinite(ape) & group_values.notna().to_numpy()
     ape = ape[valid]
     group_values = group_values[valid]
     if len(ape) == 0:
-        raise ValueError("Нельзя посчитать MAPE на пустом сегменте")
+        raise ValueError("Cannot compute MAPE for an empty segment")
 
     group_codes, _ = pd.factorize(group_values, sort=False)
     n_groups = int(group_codes.max()) + 1
@@ -94,20 +76,20 @@ def build_report(
     oof: pd.DataFrame,
     n_boot: int = BOOTSTRAP_REPEATS,
 ) -> tuple[dict, pd.DataFrame]:
-    """Строит общий, возрастной, ценовой и перекрёстный срезы."""
+    """Implement `build_report`."""
     required = {
-        "duplicate_group", "age", "actual_price_tenge",
+        "duplicate_group",
+        "age",
+        "actual_price_tenge",
         "absolute_percentage_error_pct",
     }
     missing = sorted(required - set(oof.columns))
     if missing:
-        raise ValueError(f"OOF-отчёту не хватает колонок: {', '.join(missing)}")
+        raise ValueError(f"OOF report is missing columns: {', '.join(missing)}")
 
     work = oof.copy()
     work["age"] = pd.to_numeric(work["age"], errors="coerce")
-    work["actual_price_tenge"] = pd.to_numeric(
-        work["actual_price_tenge"], errors="coerce"
-    )
+    work["actual_price_tenge"] = pd.to_numeric(work["actual_price_tenge"], errors="coerce")
     work["absolute_percentage_error_pct"] = pd.to_numeric(
         work["absolute_percentage_error_pct"], errors="coerce"
     )
@@ -117,7 +99,7 @@ def build_report(
         & work["absolute_percentage_error_pct"].notna()
     ].copy()
     if work.empty:
-        raise ValueError("После проверки типов в OOF-отчёте не осталось строк")
+        raise ValueError("No rows remain in the OOF report after type validation")
 
     work["age_segment"] = pd.cut(
         work["age"],
@@ -143,10 +125,7 @@ def build_report(
             rows.append(_metric_row(part, "price", price, n_boot))
     for age in AGE_LABELS:
         for price in PRICE_LABELS:
-            part = work[
-                (work["age_segment"] == age)
-                & (work["price_segment"] == price)
-            ]
+            part = work[(work["age_segment"] == age) & (work["price_segment"] == price)]
             if not part.empty:
                 rows.append(_metric_row(part, "age_x_price", f"{age} | {price}", n_boot))
 
@@ -154,14 +133,9 @@ def build_report(
     total_n = float(segments.iloc[0]["n"])
     total_mape = float(segments.iloc[0]["mape_pct"])
     segments["share_rows_pct"] = segments["n"] / total_n * 100
-    # MAPE — среднее всех APE. Поэтому n_segment / n_total * MAPE_segment
-    # даёт точный вклад сегмента в общую метрику, а не эвристику важности.
-    segments["mape_contribution_pct_points"] = (
-        segments["n"] / total_n * segments["mape_pct"]
-    )
-    segments["share_total_error_pct"] = (
-        segments["mape_contribution_pct_points"] / total_mape * 100
-    )
+
+    segments["mape_contribution_pct_points"] = segments["n"] / total_n * segments["mape_pct"]
+    segments["share_total_error_pct"] = segments["mape_contribution_pct_points"] / total_mape * 100
     records = segments.to_dict(orient="records")
     nested = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -177,9 +151,7 @@ def build_report(
         "overall": records[0],
         "by_age": [r for r in records if r["segment_type"] == "age"],
         "by_price": [r for r in records if r["segment_type"] == "price"],
-        "by_age_and_price": [
-            r for r in records if r["segment_type"] == "age_x_price"
-        ],
+        "by_age_and_price": [r for r in records if r["segment_type"] == "age_x_price"],
     }
     return nested, segments
 
@@ -188,9 +160,7 @@ def save_report(report: dict, segments: pd.DataFrame) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp_json = REPORT_PATH.with_suffix(".json.tmp")
     tmp_csv = SEGMENTS_PATH.with_suffix(".csv.tmp")
-    tmp_json.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    tmp_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     segments.to_csv(tmp_csv, index=False)
     os.replace(tmp_json, REPORT_PATH)
     os.replace(tmp_csv, SEGMENTS_PATH)
@@ -203,16 +173,15 @@ def _print_table(title: str, rows: pd.DataFrame) -> None:
         print(
             f"  {row.segment:<12} n={row.n:<5} "
             f"MAPE={row.mape_pct:>5.2f}%  "
-            f"95% ДИ [{lo:.2f}; {hi:.2f}]  "
-            f"доля всей ошибки={row.share_total_error_pct:>4.1f}%"
+            f"95% CI [{lo:.2f}; {hi:.2f}]  "
+            f"share of total error={row.share_total_error_pct:>4.1f}%"
         )
 
 
 def main() -> None:
     if not OOF_DIAGNOSTICS_PATH.exists():
         raise FileNotFoundError(
-            f"Нет {OOF_DIAGNOSTICS_PATH}. Сначала: "
-            "python -m kz.ml.train_price_model"
+            f"Missing {OOF_DIAGNOSTICS_PATH}. Run first: python -m kz.ml.train_price_model"
         )
     oof = pd.read_csv(OOF_DIAGNOSTICS_PATH, dtype={"duplicate_group": str})
     report, segments = build_report(oof)
@@ -220,17 +189,15 @@ def main() -> None:
 
     overall = segments.iloc[0]
     lo, hi = overall["bootstrap_95_ci"]
-    print("Изменчивость grouped OOF MAPE при смене состава выборки:")
+    print("Grouped OOF MAPE variability under resampling:")
     print(
         f"  MAPE={overall['mape_pct']:.2f}%  "
-        f"bootstrap SD={overall['bootstrap_std_pct_points']:.2f} п.п.  "
-        f"95% ДИ [{lo:.2f}; {hi:.2f}]"
+        f"bootstrap SD={overall['bootstrap_std_pct_points']:.2f} points  "
+        f"95% CI [{lo:.2f}; {hi:.2f}]"
     )
-    _print_table("По возрасту:", segments[segments.segment_type == "age"])
-    _print_table("По цене:", segments[segments.segment_type == "price"])
-    _print_table(
-        "Возраст × цена:", segments[segments.segment_type == "age_x_price"]
-    )
+    _print_table("By vehicle age:", segments[segments.segment_type == "age"])
+    _print_table("By price:", segments[segments.segment_type == "price"])
+    _print_table("Age × price:", segments[segments.segment_type == "age_x_price"])
     print(f"\nJSON → {REPORT_PATH}")
     print(f"CSV  → {SEGMENTS_PATH}")
 

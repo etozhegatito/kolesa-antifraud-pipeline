@@ -1,22 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Кривая обучения: упрётся ли качество в объём данных или в признаки.
-
-Вопрос «надо ли парсить больше» нельзя решить рассуждением — только замером.
-Модель учится на подвыборках растущего размера, и смотрим на MAPE:
-
-  ошибка ещё падает к правому краю  → данных мало, сбор поможет;
-  кривая вышла на плато            → упёрлись в ПРИЗНАКИ, а не в объём,
-                                      и новые строки того же вида ничего
-                                      не добавят.
-
-Подвыборка берётся по ГРУППАМ дублей, а не по строкам: иначе перезалив
-одной машины попал бы и в train, и в test, и кривая соврала бы в свою
-пользу. Внутри каждой доли — тот же grouped CV, что и в основном обучении,
-поэтому числа сравнимы с метриками в metadata.
-
-Запуск: python -m kz.ml.learning_curve
-Выход:  консоль + data/eda/learning_curve.png
-"""
+"""Implementation for the `kz.ml.learning_curve` module."""
 
 from __future__ import annotations
 
@@ -41,9 +24,8 @@ OUT_PNG = Path("data/eda/learning_curve.png")
 RANDOM_SEED = 42
 
 
-def subsample_by_groups(df: pd.DataFrame, groups: pd.Series, frac: float,
-                        seed: int = RANDOM_SEED):
-    """Доля данных, отобранная целыми группами дублей."""
+def subsample_by_groups(df: pd.DataFrame, groups: pd.Series, frac: float, seed: int = RANDOM_SEED):
+    """Implement `subsample_by_groups`."""
     if frac >= 1.0:
         return df, groups
     uniq = pd.Series(groups.unique())
@@ -53,13 +35,13 @@ def subsample_by_groups(df: pd.DataFrame, groups: pd.Series, frac: float,
 
 
 def cv_mape(df: pd.DataFrame, groups: pd.Series, n_splits: int = N_SPLITS) -> dict:
-    """Grouped CV на данном срезе: MAPE и R² в log-пространстве."""
+    """Implement `cv_mape`."""
     from catboost import Pool
     from sklearn.model_selection import GroupKFold
 
     n = min(n_splits, groups.nunique())
     if n < 2:
-        raise ValueError("мало независимых групп")
+        raise ValueError("Too few independent groups")
     X, y = df[FEATURES], df["log_price"]
     oof = np.full(len(df), np.nan)
     for tr, te in GroupKFold(n_splits=n).split(X, y, groups):
@@ -71,6 +53,7 @@ def cv_mape(df: pd.DataFrame, groups: pd.Series, n_splits: int = N_SPLITS) -> di
 
 def plot(rows: list[dict]) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -79,44 +62,44 @@ def plot(rows: list[dict]) -> None:
     fig, ax = plt.subplots(figsize=(7, 4.2), dpi=130)
     ax.plot(n, mape, "o-", color="#2563c9", lw=2)
     for x, y in zip(n, mape):
-        ax.annotate(f"{y:.1f}%", (x, y), textcoords="offset points",
-                    xytext=(0, 8), ha="center", fontsize=9)
-    ax.set_xlabel("строк в обучении")
+        ax.annotate(
+            f"{y:.1f}%", (x, y), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9
+        )
+    ax.set_xlabel("training rows")
     ax.set_ylabel("MAPE, % (grouped CV)")
-    ax.set_title("Кривая обучения: падает ли ошибка с ростом данных")
-    ax.grid(alpha=.3)
+    ax.set_title("Learning curve: does error fall as data grows?")
+    ax.grid(alpha=0.3)
     fig.tight_layout()
     OUT_PNG.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT_PNG)
-    print(f"\nГрафик → {OUT_PNG}")
+    print(f"\nChart → {OUT_PNG}")
 
 
 def main():
     df = prepare_training_data(load())
     groups_all = duplicate_groups(df)
-    print(f"Всего чистых строк: {len(df)}, независимых групп: "
-          f"{groups_all.nunique()}\n")
+    print(f"Total clean rows: {len(df)}, independent groups: {groups_all.nunique()}\n")
 
     rows = []
     for frac in FRACTIONS:
         part, groups = subsample_by_groups(df, groups_all, frac)
         m = cv_mape(part, groups)
         rows.append({"frac": frac, "rows": len(part), **m})
-        print(f"  {frac*100:5.0f}%  строк={len(part):5d}  "
-              f"MAPE={m['mape_pct']:5.2f}%  R²(log)={m['r2_log']:.3f}  "
-              f"MAE={m['mae_tenge']/1e6:.2f}М")
+        print(
+            f"  {frac * 100:5.0f}%  rows={len(part):5d}  "
+            f"MAPE={m['mape_pct']:5.2f}%  R²(log)={m['r2_log']:.3f}  "
+            f"MAE={m['mae_tenge'] / 1e6:.2f}M"
+        )
 
-    # Насколько ошибка снизилась на последней прибавке данных: это и есть
-    # ответ «даст ли ещё сбор». Плато = упёрлись в признаки.
     last_gain = rows[-2]["mape_pct"] - rows[-1]["mape_pct"]
     first_gain = rows[0]["mape_pct"] - rows[1]["mape_pct"]
-    print(f"\nВыигрыш от первой прибавки данных: {first_gain:+.2f} п.п. MAPE")
-    print(f"Выигрыш от последней прибавки:     {last_gain:+.2f} п.п. MAPE")
+    print(f"\nGain from the first data increase: {first_gain:+.2f} MAPE points")
+    print(f"Gain from the last data increase:   {last_gain:+.2f} MAPE points")
     if abs(last_gain) < 0.5:
-        print("→ Кривая на плато: новые строки ТОГО ЖЕ вида почти ничего не дают.")
-        print("  Улучшать надо признаки (комплектация, состояние, фото), а не объём.")
+        print("→ The curve has plateaued: more rows of the SAME kind add little.")
+        print("  Improve feature signal—trim, condition, and photos—not only volume.")
     else:
-        print("→ Ошибка ещё падает: сбор данных пока окупается.")
+        print("→ Error is still falling; additional collection remains useful.")
     plot(rows)
 
 

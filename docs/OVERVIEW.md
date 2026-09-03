@@ -1,357 +1,131 @@
-# Обзор: задача, состояние, план
+# Project overview
+
+## The problem
+
+KZ Auto Market Intelligence estimates fair advertised prices for used vehicles
+in Almaty. Marketplace data makes this harder than a normal regression exercise:
 
-Зачем проект существует, что в нём уже работает, что является результатом
-и куда он движется. Это документ «на почитать», без команд.
+- the same vehicle may be removed and relisted under a new ID;
+- prices can change while a listing remains active;
+- low prices may be genuine bargains, disclosed crash damage, incomplete data,
+  instalment down payments, or bait;
+- the final transaction price is not observable;
+- physical condition, which matters most for old inexpensive vehicles, is only
+  weakly represented by structured listing fields.
 
-Читать после [README](../README.md). Дальше:
-[архитектура](ARCHITECTURE.md), [что не сработало](FINDINGS.md).
+The project treats those limitations as part of the product contract instead of
+hiding them behind one accuracy number.
 
----
+## Product scope
 
-## Какую проблему решает проект
+The primary product is a seller-facing listing-price estimator. Given make,
+model, model year, mileage, engine, transmission, body style, condition, and
+photo count, it returns:
 
-## Проблема глазами обычного покупателя
+1. a point estimate in Kazakhstani tenge;
+2. a calibrated uncertainty range;
+3. SHAP-based drivers of the individual estimate;
+4. listing-quality and anomaly warnings;
+5. comparable listings and market position when the local database is present.
 
-Представим два объявления:
+Two internal review tools support the data system:
 
-- Toyota Camry 2019 года за 11 млн ₸;
-- Toyota Camry 2019 года за 5 млн ₸.
+- `/label` assigns fraud, legit, or unknown verdicts to anomaly candidates;
+- `/damage` assigns precise photo-condition labels and bounding boxes.
 
-Вторая машина может быть:
+The public demo is read-only. It exposes estimation but disables both manual
+labelling workflows because they modify irreplaceable ground truth.
 
-1. действительно выгодной;
-2. аварийной, и продавец честно об этом написал;
-3. нерастаможенной;
-4. объявлением с первоначальным взносом вместо полной цены;
-5. приманкой с чужими фотографиями;
-6. ошибкой в цене.
+## Meaning of “fair price”
 
-Одного правила «дешевле среднего = мошенничество» недостаточно. Система должна
-сначала понять, **почему** цена низкая, и только после этого решать, можно ли
-использовать строку для обучения модели.
+The target is the **first observed advertised price**, not a completed-sale
+price, dealer appraisal, repair-adjusted value, or guaranteed selling price.
+The distinction matters: negotiation and final-sale data are unavailable.
 
-## Главная цель
+A prediction range means that the calibration procedure covered approximately
+the target fraction of held-out listing prices. It does not mean that a sale is
+guaranteed inside the range.
 
-Главный продукт — не просто регрессор, который печатает одно число. Цель —
-помощник для человека, который хочет продать автомобиль.
+## Current measured state
 
-```text
-характеристики ─┐
-текст ──────────┼─► единый анализ объявления
-фотографии ─────┘
-                      ├─► диапазон рыночной цены
-                      ├─► видимые риски и противоречия
-                      ├─► качество и полнота текста
-                      ├─► качество и полнота фотографий
-                      └─► рекомендации продавцу
-```
+The current artifact was trained on 12,455 rows from 12,639 collected Almaty
+listings.
 
-Антифрод здесь не отдельная игрушка и не автоматический судья. Его задача —
-не дать заведомо странным ценам отравить обучающую выборку.
+| Validation view | Result |
+|---|---:|
+| Grouped out-of-fold MAPE, routed model | **21.36%** |
+| Median absolute percentage error | **13.81%** |
+| Out-of-time MAPE | **23.24%** |
+| Grouped-bootstrap 95% interval for MAPE | **20.87%–21.87%** |
+| Simple make/model/year baseline MAPE | **30.70%** |
 
-Простая аналогия:
+The average error is not evenly distributed:
 
-- модель цены — ученик;
-- объявления — учебник;
-- антифрод — редактор, который помечает подозрительные страницы учебника;
-- ручная разметка — преподаватель, который подтверждает, где редактор ошибся.
+| Segment | MAPE |
+|---|---:|
+| Below 5M tenge | **29.01%** |
+| 5M tenge and above | **16.07%** |
+| Vehicle age 21+ years | **29.62%** |
 
-Если дать ученику объявления-приманки по 1 млн ₸ как нормальные примеры, он
-начнёт занижать справедливую цену нормальных автомобилей.
+Vehicles aged 21+ years and priced below 5M tenge create roughly 41% of the
+total percentage error. The strongest practical path is therefore better
+condition evidence, not more copies of the same listing-table fields.
 
-## Два пользовательских сценария
+## What is already reliable
 
-Для покупателя система должна отвечать:
+- Raw advertisements and sightings are append-only evidence.
+- The clean table is rebuilt deterministically from raw and enriched layers.
+- Relists are grouped without using price in the grouping key.
+- Grouped folds keep every copy of a vehicle on one side of validation.
+- A later time block is held out for an out-of-time check.
+- Price ranges are calibrated from held-out residuals.
+- A specialist model is routed using the general model's prediction, never the
+  unknown actual target.
+- Anomaly flags create a review queue and do not accuse sellers automatically.
+- CI covers offline tests, PostgreSQL integration, Ruff, coverage, and Docker
+  model loading.
 
-- нормальна ли заявленная цена;
-- насколько цена отличается от похожих объявлений;
-- есть ли объяснение необычно низкой цены;
-- не встречались ли те же фотографии у другой машины;
-- какие признаки требуют дополнительной проверки.
+## Computer vision status
 
-Для продавца система должна отвечать:
+Computer vision is a research component, not a production claim. The repository
+contains photo download, perceptual duplicate grouping, CLIP embeddings, tiled
+analysis, manual bounding boxes, COCO export, grouped evaluation, and audit-split
+logic.
 
-- какой диапазон цены выглядит реалистично;
-- какие важные характеристики забыты;
-- достаточно ли честно описаны дефекты;
-- не противоречат ли текст, цена и фотографии друг другу;
-- хватает ли фотографий и обязательных ракурсов;
-- нет ли тёмных, размытых, повторяющихся или стоковых снимков;
-- что переснять или дописать;
-- как улучшение объявления потенциально связано со скоростью продажи.
-
-Последний пункт требует накопленной temporal history и не должен обещать
-гарантированный срок продажи.
+An annotation audit found definition drift: the historical `damaged` class mixed
+local impact damage with rust, dirt, scuffs, and paint defects. All 47 affected
+legacy frames were marked `needs_review` without deletion or automatic
+relabeling. Earlier supervised CV scores were withdrawn. The price model was not
+affected because photo features never passed the product gate.
 
-## Что здесь означает «справедливая цена»
+The next valid CV milestone requires 150–200 independent positive listings, a
+random holdout selected before active learning, duplicate-component grouping,
+and a positive paired-bootstrap improvement over the age-plus-price baseline.
 
-Модель предсказывает типичную **цену публикации**, а не окончательную цену
-сделки. Это разные величины:
+## Outputs
 
-- продавец мог уступить при торге;
-- объявление могло быть снято без продажи;
-- архивный статус не доказывает факт сделки;
-- фактическая сумма сделки в данных отсутствует.
-
-Поэтому корректная формулировка результата:
+The pipeline produces four classes of output:
 
-> «Похожие объявления обычно выставляют примерно за X ₸».
-
-Некорректная формулировка:
-
-> «Эта машина гарантированно будет продана за X ₸».
-
-## Что проект не делает
-
-- не принимает автоматическое решение «продавец — мошенник»;
-- не собирает телефоны и другие персональные данные;
-- не определяет техническое состояние машины без диагностики;
-- не гарантирует продажу по предсказанной цене;
-- не использует оценку `kolesa_avg_price` как вход модели;
-- пока не является публичным API или веб-сервисом для конечного пользователя.
-
----
-
-## Что работает сейчас и что является целью
-
-Эта таблица нужна, чтобы не перепутать готовый код с продуктовым roadmap.
-
-| Возможность | Состояние сейчас | Где реализовано или запланировано |
-|---|---|---|
-| Оценка цены: общая модель + специалист дешёвого сегмента | работает | `kz/ml/train_price_model.py`, `kz/ml/predict_price.py` |
-| Диапазон «подозрительно дёшево» | работает | `kz/ml/residual_detector.py` |
-| Поиск слов о повреждениях | работает | `kz/transform/damage.py`, `kz/transform/clean.py` |
-| Учёт отрицаний «не бит», «нет гнили» | работает | `kz/transform/damage.py` |
-| Полный текст продавца | частично: покрыт не весь датасет | `kz/collect/enrich.py`, `text_full` |
-| Текстовые ML-признаки цены | эксперимент проведён, в production-модель не вошли | `kz/transform/text_features.py` |
-| Причина исключения текстовых признаков | на текущем покрытии не улучшили CV | комментарии в `kz/ml/train_price_model.py` |
-| Количество фотографий как признак цены | работает | `photos_count` |
-| Поиск одинаковых/похожих фото | работает | `kz/collect/photo_dedup.py` |
-| Анализ яркости, резкости и разрешения | **работает** | `kz/ml/photo_features.py` |
-| Поиск ржавчины и грязи на фото | **работает, но цене не помогает** | `kz/ml/photo_clip.py` |
-| Поиск видимых вмятин и аварийных повреждений | grouped OOF по ad_id+pHash реализован, product gate пока провален | `kz/ml/photo_damage.py` |
-| Detector-ready набор ручных рамок | COCO train/audit экспорт и несколько bbox на кадр работают; audit набирается только из новых случайных ad_id | `kz/ml/photo_dataset.py` |
-| Проверка обязательных ракурсов | ещё нет | нужны позиции 2–5 |
-| Оценка салона и кузова по пикселям | ещё нет | CV-roadmap |
-| Совместная модель «таблица + текст + фото» | проверено, выигрыша нет | `kz/ml/photo_ablation.py` |
-| Автоматические советы, что дописать | **работает** | `kz/web/service.py` |
-| Автоматические советы, что переснять | частично: есть метрики качества | `kz/ml/photo_features.py` |
-| Прогноз времени продажи | **работает**, данных мало для сроков > 3 недель | `kz/ml/survival.py` |
-| Мониторинг дрейфа данных | **работает** | `kz/ml/monitoring.py` |
-
-## Что выяснилось про фотографии
-
-Несколько гипотез проверены замером, и результат стоит знать до того, как
-браться за продолжение.
-
-**Эмбеддинг обложки не помогает предсказывать цену.** Ошибка растёт, причём
-монотонно с числом компонент: +0,16 п.п. при четырёх, +3,47 при тридцати
-двух. Диагностика объясняет почему — эмбеддинг уверенно различает тип кузова
-(60,7% против 35,6% у случайного угадывания), а тип кузова уже есть в
-признаках модели.
-
-**CLIP видит некоторые свойства состояния, но не нужный локальный дефект.** Против бейджа сайта
-«Аварийная» ржавчина отделяется с AUC 0,893, грязь 0,855. Зато аварийные
-повреждения не отделяются вообще (AUC 0,524) — на обложку ставят удачный
-ракурс. А ржавчина коррелирует с возрастом на 0,54, и возраст модель уже
-знает.
-
-**Остаточный сигнал есть, но крошечный.** Против остатков модели ржавчина даёт
-корреляцию −0,115 при $p < 0{,}001$ — направление верное, машина выглядит хуже
-и стоит дешевле ожидаемого. Но это около одного процента необъяснённой
-изменчивости, чего не хватит, чтобы сдвинуть метрику.
-
-**Кадры 2-5 действительно добавляют — и всё равно не помогают.** Этот шаг
-и был следующим: скачали 5 633 снимка, в среднем 4,9 на объявление, и
-прогнали CLIP по всем, а не по одной обложке. Гипотеза подтвердилась —
-повреждения на парадном кадре не показывают:
-
-> Числа ниже — исторический zero-shot-анализ по текстовым proxy. Более поздние
-> supervised-метрики по ручным `damaged`-меткам отозваны: аудит комментариев
-> нашёл definition drift у 38 из 47 кадров. Все 47 legacy-меток помещены в
-> `needs_review` и физически исключены из CV до повторной ручной проверки.
-
-| ось | обложка | максимум по кадрам | среднее |
-|---|---:|---:|---:|
-| `clip_damaged` (против damage-слов) | 0,524 | 0,609 | 0,585 |
-| `clip_damaged` (против бейджа) | 0,688 | 0,781 | 0,826 |
-| `clip_rusty` (против бейджа) | 0,893 | 0,883 | 0,935 |
-
-По обложке «битая машина» была ровно монеткой (0,524), по всем кадрам стала
-0,609. Сигнал появился там, где и ожидался.
-
-Дальше — две проверки, которые всё и решили.
-
-*Бутстрэп.* Для `clip_damaged` доверительный интервал 95% равен
-[0,480; 0,731], то есть **от случайности не отличим**: 24 примера с
-damage-словами слишком мало. У бейджа их вообще 7. Значимы только ржавчина
-[0,705; 0,866] и грязь [0,653; 0,855].
-
-*Проверка на избыточность.* В честном out-of-fold замере возраст и логарифм
-цены **сами по себе** дают AUC 0,848 против damage-слов и 0,953 против
-бейджа. Добавление отдельных CLIP-осей не улучшает первый результат, а во
-втором случае выборка содержит всего семь положительных объявлений. То есть
-CLIP в основном видит «старую дешёвую машину» — это таблица уже знает.
-
-Supervised-проверка добавлена, но её прошлые цифры отозваны после аудита
-definition drift: все 47 legacy `damaged`-кадров исключены из CV до ручной
-перепроверки; у 38 комментарии явно указывают на широкий старый смысл класса.
-Все кадры одного объявления по-прежнему обязаны лежать в одном
-фолде, а финальная метрика считается по объявлениям. До исправления меток
-current full-frame подход не имеет валидного product gate. Пересчитать после
-исправления: `python -m kz.ml.photo_damage`; старые zero-shot оси:
-`python -m kz.ml.photo_clip --validate`.
-
-Почему текстовые признаки не включены в ценовую модель: замер на тех же
-разбиениях дал **ухудшение** на 0,56 п.п. (23,53% против 22,96%), причём
-обучение выросло с 34 секунд до 21 минуты. Медиана текста — 49 символов,
-у 750 объявлений текста нет вообще. Правильное решение — оставить
-проверенный baseline, а не добавлять признак потому, что он выглядит
-современно.
-
-Почему `photos_count` не равно анализу фотографий:
-
-```text
-photos_count = 12
-```
-
-сообщает модели только число снимков. Он ничего не говорит о том, что на них
-изображено, светлые ли они и видна ли царапина на двери. Для этого нужна
-отдельная computer vision модель, которая работает с пикселями.
-
----
-
-## Что является результатом
-
-После полного офлайн-прогона появляются четыре группы результатов.
-
-## 1. Чистая аналитическая таблица
-
-`clean_data` содержит:
-
-- исходные характеристики машины;
-- возраст автомобиля;
-- признаки пропусков;
-- статистическую аномальность цены;
-- причины подозрения;
-- информационные оправдания низкой цены;
-- статус объявления;
-- обогащённый текст и характеристики, если они доступны.
-
-## 2. Артефакт модели цены
-
-Файлы:
-
-```text
-data/models/price_model.cbm
-data/models/price_cheap_specialist.cbm
-data/models/price_model.metadata.json
-```
-
-Первый файл — обученный CatBoost. Второй — его паспорт:
-
-- время обучения;
-- список признаков;
-- метрики;
-- Git commit;
-- признак dirty worktree;
-- SHA-256 обучающих данных;
-- SHA-256 кода обучения.
-
-## 3. Калиброванный ценовой пол
-
-Файлы:
-
-```text
-data/models/price_floor.cbm
-data/models/price_floor.metadata.json
-```
-
-Он отвечает не на вопрос «какая средняя цена?», а на вопрос:
-
-> «Ниже какой цены объявление уже попадает в необычно дешёвые для своих
-> характеристик?»
-
-## 4. Отчёты для человека
-
-```text
-data/eda/dashboard.png
-data/eda/ml_dashboard.png
-data/eda/ml_report.html
-data/eda/suspicious_sorted.csv
-data/eda/labeling_queue.csv
-```
-
-`ml_report.html` можно открыть обычным браузером. Интернет для просмотра не
-нужен.
-
----
-
-## Ограничения и дальнейший план
-
-## Что ограничивает модель сейчас
-
-1. Цена публикации не равна цене сделки.
-2. Данные только по Алматы.
-3. Временной диапазон короткий.
-4. Полное обогащение покрывает не всю базу.
-5. Модель почти не знает комплектацию автомобиля.
-6. Содержимое текста не улучшило price-CV при текущем покрытии.
-7. `photos_count` используется, но пиксели фотографий модель цены не видит.
-8. Состояние по фото проверяется офлайн, но current full-frame CV не прошёл gate.
-9. Дешёвый сегмент неоднороден и имеет routed MAPE 29,2%.
-10. Ground truth антифрода пока слишком мал.
-
-## Следующие шаги по полезности
-
-1. Приоритетно обогатить дешёвый сегмент, не обходя ограничения источника.
-   `page_condition` не показывается как обязательное структурное поле, а
-   `has_vin` хранит только явный факт, но не сам VIN. Метка «История авто»
-   означает «да»; неизвестность нельзя подменять значением «нет».
-2. Сначала вручную пересмотреть 38 definition-drift кандидатов, затем
-   пересобрать COCO и baseline. Только после этого довести чистую CV-выборку
-   до 150–200 независимых damaged/wreck-объявлений через active ranking.
-3. Предобучить локальный детектор повреждений на законно полученном внешнем
-   detection-датасете, затем fine-tune на своих рамках. CV-окружение держать
-   отдельно от Python 3.13 табличного конвейера.
-4. Пропускать CV дальше только если парный grouped OOF `ΔAUC` против
-   возраста+цены положителен и его 95% интервал не накрывает ноль.
-5. После прохождения gate добавить condition-score в модель остатка цены и
-   повторить полный grouped CV, а не складывать эффекты разных экспериментов.
-6. Добавить загрузку фотографий и полный текст продавца в локальный seller
-   service: сейчас веб принимает только табличные поля.
-7. Продолжить случайный контроль антифрода и искать положительные примеры;
-   без fraud ground truth recall по-прежнему не определён.
-8. После накопления истории повторить out-of-time validation и только затем
-   выкладывать публичный read-only сервис.
-
-## Как должен выглядеть будущий ответ продавцу
-
-Пример целевого результата:
-
-```text
-Ожидаемый диапазон цены: 9,2–10,6 млн ₸
-Уверенность: средняя
-
-Текст:
-✓ указаны пробег, двигатель и коробка
-⚠ не указана комплектация
-⚠ фраза «идеальное состояние» не подкреплена деталями
-Рекомендация: перечислите последнее ТО и известные окрашенные элементы
-
-Фотографии:
-✓ достаточно светлые
-✓ есть общий вид спереди и сзади
-⚠ нет салона и багажника
-⚠ два почти одинаковых снимка
-Рекомендация: добавьте салон, приборную панель, багажник и крупные планы дефектов
-
-Риски:
-⚠ цена заметно ниже нижнего квантиля похожих объявлений
-✓ повторного использования фотографий у другой модели не найдено
-```
-
-Это должен быть объяснимый чек-лист, а не непрозрачный балл `73/100`. Человек
-должен понимать, что именно исправить.
-
----
+1. `clean_data`: reproducible analytical rows with quality and anomaly fields;
+2. trained general and cheap-segment CatBoost artifacts with metadata;
+3. calibrated price intervals and anomaly thresholds;
+4. HTML/JSON reports and protected human-review queues.
+
+No raw listings, seller descriptions, photos, manual labels, credentials, or
+private textbook files are shipped with the public repository.
+
+## Roadmap
+
+Work is prioritized by evidence:
+
+1. improve detail-page enrichment coverage for inexpensive listings;
+2. finish manual review under one stable photo-label policy;
+3. train a true damage detector only after the annotation gate is met;
+4. expose text and photo inputs only when training and serving use identical
+   information;
+5. repeat out-of-time validation after a longer market history;
+6. keep 18% MAPE as a research gate, not a promise.
+
+The intended future seller report should clearly separate observed facts,
+model estimates, uncertainty, market comparisons, visual evidence, and warnings.
+That separation is more valuable than presenting one overconfident number.

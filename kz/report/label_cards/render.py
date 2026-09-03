@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Сборка HTML-карточек: всё, что видит разметчик.
+"""Build the HTML cards shown to the anomaly annotator.
 
-Отделено от журнала и от очереди намеренно. Здесь нет ни базы, ни записи на
-диск — только превращение готовых строк в разметку, поэтому проверяется без
-Postgres и без файлов.
+Rendering is intentionally isolated from queue construction and journal
+writes. It transforms prepared rows into markup and can be tested without
+Postgres or filesystem mutations.
 """
 
 import html
@@ -15,85 +15,92 @@ from kz.report.label_cards.journal import LABELS_CSV
 
 OUT_HTML = "data/eda/label_cards.html"
 
-# Подсказки «как решать» по каждому флагу. Ключевой принцип проекта:
-# fraud = ОБМАН, а не «плохая машина». Честно проданный хлам = legit.
+# Decision guidance for each flag. The key principle is that fraud means
+# deception, not poor vehicle condition. An honestly described wreck is legit.
 FLAG_HELP = {
     "price_anomaly_low": (
-        "Цена сильно ниже рынка для этой модели/года.",
-        "fraud — если причина НЕ раскрыта: текст молчит о проблемах, фото "
-        "целые, бейджа «Аварийная» нет. Это приманка «позвоните, а машины нет».",
-        "legit — если дешевизна ОБЪЯСНЕНА: текст/фото/бейдж честно показывают "
-        "аварию, гниль, отсутствие двигателя; либо это взнос по рассрочке "
-        "(смотри «цена в месяц»); либо машина реально старая/убитая."),
+        "The price is far below the market for this model and year.",
+        "fraud — when the reason is hidden: the text reports no issue, photos "
+        "look intact, and there is no accident badge. This can be bait for a "
+        "vehicle that is not actually available at the advertised price.",
+        "legit — when the low price is explained by visible or disclosed crash "
+        "damage, corrosion, a missing engine, an instalment down payment, or "
+        "genuinely poor age and condition.",
+    ),
     "young_car_cheap": (
-        "Свежая машина по цене старой.",
-        "fraud — если ничего не объясняет цену (целые фото, текст без проблем).",
-        "legit — если это честно битая машина: бейдж «Аварийная/Не на ходу», "
-        "фото с повреждениями, damage-слова в тексте."),
+        "A recent vehicle is priced like an old one.",
+        "fraud — when nothing explains the price: intact photos and no issue in the text.",
+        "legit — when crash damage or a non-running condition is clearly "
+        "disclosed by the badge, photos, or description.",
+    ),
     "possible_repost": (
-        "Похоже на дубль: то же авто выложено ещё раз.",
-        "fraud — если на одну машину РАЗНЫЕ цены/пробеги/год: манипуляция "
-        "выдачей, накрутка охвата, ценовая наживка.",
-        "legit — если это просто перезалив (дилер поднял объявление): "
-        "совпадают цвет, пробег, цена. Дубль ≠ обман."),
+        "The same vehicle may have been listed again.",
+        "fraud — when one vehicle has conflicting prices, mileage, or years, "
+        "suggesting search manipulation or price bait.",
+        "legit — when this is a normal repost and colour, mileage, and price "
+        "remain consistent. A duplicate is not automatically deceptive.",
+    ),
     "shared_photo_diff_car": (
-        "Одно и то же фото у объявлений с разными атрибутами.",
-        "fraud — если на фото ДРУГАЯ машина (украли чужое фото).",
-        "legit — если это студийное/дилерское фото-шаблон или одна и та же "
-        "машина в двух объявлениях. Смотри глазами: pHash не видит кропы."),
+        "The same photo appears in listings with different attributes.",
+        "fraud — when the photo shows a different vehicle and was copied from elsewhere.",
+        "legit — when it is a dealer template or the same vehicle in two "
+        "listings. Inspect visually because pHash has limitations around crops.",
+    ),
     "used_but_zero_mileage": (
-        "У б/у машины пробег 0.",
-        "fraud — только если явно врут про состояние («новая», «0 км» на "
-        "убитой машине).",
-        "legit / unknown — обычно это просто незаполненное поле, "
-        "качество данных, а не обман."),
+        "A used vehicle has zero recorded mileage.",
+        "fraud — only when the seller explicitly misrepresents an obviously "
+        "used vehicle as new or zero-kilometre.",
+        "legit / unknown — most cases are missing data rather than deception.",
+    ),
     "cheap_and_urgent": (
-        "Дёшево + «срочно» в тексте.",
-        "fraud — если срочность + необъяснимая дешевизна = давление на "
-        "покупателя при отсутствии реальной машины.",
-        "legit — если человек честно объясняет, почему торопится."),
+        "The listing combines a low price with urgency language.",
+        "fraud — when unexplained cheapness and urgency pressure the buyer for "
+        "a vehicle that may not be available.",
+        "legit — when the seller clearly explains the urgency.",
+    ),
 }
 
-DEAD_HOSTS = {"alakt-photos-kl.kcdn.kz"}   # выведен из эксплуатации ~август 2026
+DEAD_HOSTS = {"alakt-photos-kl.kcdn.kz"}  # retired around August 2026
 
 
 def photo_src(ad_id: str, position: int, url: str, serve_mode: bool) -> str | None:
-    """Откуда браузеру брать картинку.
+    """Choose the browser source for a listing photo.
 
-    Приоритет у локальной копии: она грузится мгновенно и не зависит от того,
-    жив ли сервер kolesa. Один из двух хостов раздачи уже исчез, и для 39%
-    карточек ссылки ведут в никуда — там вернём None, чтобы карточка честно
-    сказала «фото недоступны», а не показывала молча пустые рамки.
+    Prefer a local copy because it loads quickly and survives CDN retirement.
+    One historical host is gone; return ``None`` for those URLs so the card
+    explicitly reports unavailable photos instead of showing empty frames.
     """
     from kz.collect.photo_fetch import local_path
 
     p = local_path(ad_id, position)
     if p.exists():
-        # в режиме сервера — через маршрут, в файловом — путь относительно
-        # data/eda/, где лежит сама страница
-        return f"/photos/{p.relative_to('data/photos')}" if serve_mode \
+        # Server mode uses the photo route; offline export uses a path relative
+        # to data/eda/, where the generated page is written.
+        return (
+            f"/photos/{p.relative_to('data/photos')}"
+            if serve_mode
             else f"../photos/{p.relative_to('data/photos')}"
+        )
     host = url.split("/")[2] if "//" in url else ""
     return None if host in DEAD_HOSTS else url
 
 
 def money(v) -> str:
-    """Цена в читаемом виде; пусто — прочерк.
+    """Format a price for people and represent missing values with a dash.
 
-    Миллионы — только начиная с миллиона: «0.24М ₸» для 240 000 читается
-    хуже, чем «240 000 ₸», а дешёвых объявлений среди подозрительных как
-    раз много (приманки).
+    Use millions only from one million upward; ``240,000 ₸`` is clearer than
+    ``0.24M ₸`` and low-price candidates are common in this queue.
     """
     if pd.isna(v) or v is None:
         return "—"
     v = float(v)
     if v >= 1e6:
-        return f"{v/1e6:.2f}".rstrip("0").rstrip(".") + "М ₸"
+        return f"{v / 1e6:.2f}".rstrip("0").rstrip(".") + "M ₸"
     return f"{int(v):,}".replace(",", " ") + " ₸"
 
 
 def fmt(v) -> str:
-    """Значение для таблички: NaN/None/пустое → прочерк, иначе экранируем."""
+    """Format a table value, using a dash for missing data and escaping text."""
     if v is None or (isinstance(v, float) and pd.isna(v)) or v == "":
         return "—"
     if isinstance(v, float) and float(v).is_integer():
@@ -101,20 +108,19 @@ def fmt(v) -> str:
     return html.escape(str(v))
 
 
-# Градации отношения «цена объявления / средняя цена kolesa». Раньше было три
-# грубых полосы, и на границе получалась бессмыслица вида «60% от среднего —
-# цена в норме». Полосы уже, формулировки не спорят с процентом.
+# Bands for listing price divided by Kolesa's reference price. Narrow bands
+# avoid contradictory edge cases such as “60% of average — normal price.”
 PRICE_BANDS = [
-    (0.60, "сильно дешевле рынка"),
-    (0.85, "заметно ниже среднего"),
-    (1.15, "в пределах среднего"),
-    (1.40, "выше среднего"),
-    (float("inf"), "существенно выше рынка — приманкой быть не может"),
+    (0.60, "far below the market"),
+    (0.85, "noticeably below average"),
+    (1.15, "within the average range"),
+    (1.40, "above average"),
+    (float("inf"), "well above the market and therefore not low-price bait"),
 ]
 
 
 def price_band(ratio: float) -> str:
-    """Словесная оценка отношения цены к средней по модели."""
+    """Describe a listing/reference-price ratio in plain language."""
     for limit, label in PRICE_BANDS:
         if ratio < limit:
             return label
@@ -122,21 +128,24 @@ def price_band(ratio: float) -> str:
 
 
 def price_verdict_hint(row) -> str:
-    """Кросс-чек с avgPrice самого kolesa — валидатор, НЕ признак модели."""
+    """Cross-check against Kolesa avgPrice; this validates but never trains the model."""
     avg = row.get("kolesa_avg_price")
     price = row.get("price_tenge")
     if pd.isna(avg) or avg is None or float(avg) <= 0 or pd.isna(price):
         return ""
     ratio = float(price) / float(avg)
-    return (f"<b>{ratio*100:.0f}% от средней цены kolesa</b> ({money(avg)}) — "
-            f"{price_band(ratio)}")
+    return (
+        f"<b>{ratio * 100:.0f}% of the Kolesa reference price</b> ({money(avg)}) — "
+        f"{price_band(ratio)}"
+    )
+
 
 def card_html(row, idx: int, serve_mode: bool = False) -> str:
-    """Одна карточка объявления.
+    """Render one listing card.
 
-    Компоновка подчинена задаче: главное — крупное фото (по миниатюре
-    состояние машины не оценить), рядом факты, ниже текст. Подсказки
-    «как решать» свёрнуты — они нужны на первых карточках, потом мешают.
+    A large photo is the primary evidence, facts sit beside it, and text comes
+    below. Decision guidance is collapsible because it helps early in a session
+    but becomes distracting once the protocol is familiar.
     """
     aid = html.escape(str(row["ad_id"]))
     reasons = [r for r in str(row.get("suspicion_reasons") or "").split(";") if r]
@@ -147,29 +156,35 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
 
     raw_photos = row["photos"]
     positions = row.get("photo_positions") or list(range(1, len(raw_photos) + 1))
-    pairs = [(photo_src(str(row["ad_id"]), pos, u, serve_mode), u)
-             for pos, u in zip(positions, raw_photos)]
+    pairs = [
+        (photo_src(str(row["ad_id"]), pos, u, serve_mode), u)
+        for pos, u in zip(positions, raw_photos)
+    ]
     photos = [src for src, _ in pairs if src]
     n_dead = sum(1 for src, _ in pairs if src is None)
     if photos:
         thumbs = "".join(
             f'<button class="thumb{" on" if i == 0 else ""}" data-i="{i}" '
-            f'aria-label="фото {i+1}">'
+            f'aria-label="photo {i + 1}">'
             f'<img loading="lazy" src="{html.escape(u)}" alt=""></button>'
-            for i, u in enumerate(photos))
+            for i, u in enumerate(photos)
+        )
         gallery = (
-            f'<div class="gal" data-photos=\'{html.escape(json.dumps(photos))}\'>'
-            f'  <div class="hero"><img src="{html.escape(photos[0])}" alt="фото 1">'
-            f'    <span class="zoom">нажми, чтобы увеличить</span>'
+            f"<div class=\"gal\" data-photos='{html.escape(json.dumps(photos))}'>"
+            f'  <div class="hero"><img src="{html.escape(photos[0])}" alt="photo 1">'
+            f'    <span class="zoom">click to enlarge</span>'
             f'    <span class="counter"><b>1</b>/{len(photos)}</span></div>'
             f'  <div class="thumbs">{thumbs}</div>'
-            f'</div>')
+            f"</div>"
+        )
     elif n_dead:
-        gallery = ('<div class="gal"><div class="empty">Фотографии недоступны: '
-                   f'сервер kolesa, где они лежали, отключён (было {n_dead} шт.). '
-                   'Скачать их уже нельзя — решай по тексту и цифрам.</div></div>')
+        gallery = (
+            '<div class="gal"><div class="empty">Photos are unavailable: '
+            f"the historical Kolesa image host was retired ({n_dead} files). "
+            "Use the text and structured facts for this decision.</div></div>"
+        )
     else:
-        gallery = '<div class="gal"><div class="empty">фото-URL не сохранены</div></div>'
+        gallery = '<div class="gal"><div class="empty">No photo URLs were stored.</div></div>'
 
     help_blocks = ""
     for r in reasons:
@@ -180,89 +195,115 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
                 f'<p class="hwhat">{html.escape(what)}</p>'
                 f'<p class="hfraud"><span>fraud</span>{fr[7:] if fr.startswith("fraud —") else fr}</p>'
                 f'<p class="hlegit"><span>legit</span>'
-                f'{lg.split("—", 1)[1] if "—" in lg else lg}</p></div>')
-    helps = (f'<details class="helps"><summary>как решать по этим флагам</summary>'
-             f'{help_blocks}</details>' if help_blocks else "")
+                f"{lg.split('—', 1)[1] if '—' in lg else lg}</p></div>"
+            )
+    helps = (
+        f'<details class="helps"><summary>How to evaluate these flags</summary>'
+        f"{help_blocks}</details>"
+        if help_blocks
+        else ""
+    )
 
     facts = [
-        ("Цена", money(row.get("price_tenge")), "big"),
-        ("Год", fmt(row.get("year")), ""),
-        ("Пробег, листинг", fmt(row.get("mileage_km")), ""),
-        ("Пробег, страница", fmt(row.get("page_mileage_km")), ""),
-        ("Двигатель", f'{fmt(row.get("engine_volume"))} · {fmt(row.get("engine_type"))}', ""),
-        ("Коробка", fmt(row.get("transmission")), ""),
-        ("Кузов", fmt(row.get("body_type")), ""),
-        ("Цвет", fmt(row.get("color")), ""),
-        ("Привод · руль", f'{fmt(row.get("drive"))} · {fmt(row.get("steering"))}', ""),
-        ("Растаможен", fmt(row.get("customs_cleared")), ""),
-        ("Состояние", fmt(row.get("page_condition")), ""),
-        ("VIN указан", fmt(row.get("has_vin")), ""),
-        ("price_z", fmt(round(float(row["price_z"]), 2)
-                        if pd.notna(row.get("price_z")) else None), ""),
-        ("Просмотров", fmt(row.get("views_count")), ""),
-        ("Размещено", fmt(row.get("posted_date")), ""),
+        ("Price", money(row.get("price_tenge")), "big"),
+        ("Year", fmt(row.get("year")), ""),
+        ("Mileage, listing", fmt(row.get("mileage_km")), ""),
+        ("Mileage, detail page", fmt(row.get("page_mileage_km")), ""),
+        ("Engine", f"{fmt(row.get('engine_volume'))} · {fmt(row.get('engine_type'))}", ""),
+        ("Transmission", fmt(row.get("transmission")), ""),
+        ("Body style", fmt(row.get("body_type")), ""),
+        ("Colour", fmt(row.get("color")), ""),
+        ("Drive · steering", f"{fmt(row.get('drive'))} · {fmt(row.get('steering'))}", ""),
+        ("Customs cleared", fmt(row.get("customs_cleared")), ""),
+        ("Condition", fmt(row.get("page_condition")), ""),
+        ("VIN evidence", fmt(row.get("has_vin")), ""),
+        (
+            "price_z",
+            fmt(round(float(row["price_z"]), 2) if pd.notna(row.get("price_z")) else None),
+            "",
+        ),
+        ("Views", fmt(row.get("views_count")), ""),
+        ("Posted", fmt(row.get("posted_date")), ""),
     ]
     facts_html = "".join(
-        f'<div class="f {cls}"><dt>{k}</dt><dd>{v}</dd></div>' for k, v, cls in facts)
+        f'<div class="f {cls}"><dt>{k}</dt><dd>{v}</dd></div>' for k, v, cls in facts
+    )
 
     texts = ""
-    for label, key in [("Описание из листинга", "description"),
-                       ("Комментарий продавца", "seller_comment"),
-                       ("Опции", "options_text")]:
+    for label, key in [
+        ("Listing summary", "description"),
+        ("Seller comment", "seller_comment"),
+        ("Options", "options_text"),
+    ]:
         v = row.get(key)
         if v is not None and not (isinstance(v, float) and pd.isna(v)) and str(v).strip():
-            texts += (f'<div class="txt"><div class="tl">{label}</div>'
-                      f'<div class="tb">{html.escape(str(v))}</div></div>')
+            texts += (
+                f'<div class="txt"><div class="tl">{label}</div>'
+                f'<div class="tb">{html.escape(str(v))}</div></div>'
+            )
     if not texts:
-        texts = ('<div class="empty">текста нет вообще — решай по фото и цене</div>')
+        texts = '<div class="empty">No text is available; use photos and price.</div>'
 
     notes = ""
     dmg = row.get("damage_keywords")
     if dmg and not (isinstance(dmg, float) and pd.isna(dmg)) and str(dmg).strip():
-        notes += (f'<div class="note legit-note"><b>{html.escape(str(dmg))}</b>'
-                  f'<span>продавец сам раскрыл проблему — в пользу legit</span></div>')
+        notes += (
+            f'<div class="note legit-note"><b>{html.escape(str(dmg))}</b>'
+            f"<span>the seller disclosed the issue, which supports legit</span></div>"
+        )
     if has_badge:
-        notes += (f'<div class="note legit-note"><b>бейдж: '
-                  f'{html.escape(str(badge))}</b><span>сайт сам помечает машину '
-                  f'проблемной, дешевизна объяснена — в пользу legit</span></div>')
+        notes += (
+            f'<div class="note legit-note"><b>site badge: '
+            f"{html.escape(str(badge))}</b><span>the site discloses a "
+            f"problematic condition, which explains the low price</span></div>"
+        )
 
     hint = price_verdict_hint(row)
     if hint:
         notes += f'<div class="note price-note">{hint}</div>'
 
     STRATUM_HELP = {
-        "rule_positive": ("правила пометили",
-                          "Вопрос: флаг верный? Обман — или объяснимая дешевизна."),
-        "residual_candidate": ("модель: подозрительно дёшево",
-                               "Правила молчат, но цена ниже ожидаемой для такой "
-                               "машины. Вопрос тот же: обман или объяснимо."),
-        "random_control": ("контрольное, детектор НЕ помечал",
-                           "Почти наверняка legit — и это нормальный, ожидаемый "
-                           "ответ. Смысл проверки в другом: найти обман, который "
-                           "детектор пропустил. Без этого нельзя посчитать "
-                           "полноту (recall)."),
+        "rule_positive": (
+            "Flagged by rules",
+            "Question: is the flag correct—deception or an explained low price?",
+        ),
+        "residual_candidate": (
+            "Model: unexpectedly low price",
+            "Rules are silent, but price is below the model's expectation. "
+            "Question: deception or a disclosed reason?",
+        ),
+        "random_control": (
+            "Control: not flagged by the detector",
+            "Most controls should be legit. Their purpose is to find missed "
+            "fraud; without them recall cannot be estimated.",
+        ),
     }
     st = str(row.get("stratum") or "")
     stratum_html = ""
     if st in STRATUM_HELP:
         title, hint = STRATUM_HELP[st]
         cls = "s-control" if st == "random_control" else "s-flagged"
-        stratum_html = (f'<div class="stratum {cls}"><b>{title}</b>'
-                        f'<span>{hint}</span></div>')
+        stratum_html = f'<div class="stratum {cls}"><b>{title}</b><span>{hint}</span></div>'
 
     ev = row.get("existing_verdict")
-    ev_html = (f'<div class="note done-note">уже размечено: '
-               f'<b>{html.escape(str(ev))}</b><span>можно перепроверить</span></div>'
-               if ev and not pd.isna(ev) else "")
+    ev_html = (
+        f'<div class="note done-note">Already labelled: '
+        f"<b>{html.escape(str(ev))}</b><span>you can review it again</span></div>"
+        if ev and not pd.isna(ev)
+        else ""
+    )
 
     status_html = (
-        f'<span class="dead">{html.escape(str(row.get("status")))} · страницы '
-        f'больше нет, но фото живы</span>' if dead else
-        f'<a class="live" href="https://kolesa.kz/a/show/{aid}" target="_blank" '
-        f'rel="noreferrer">открыть на kolesa ↗<em>тратит лимит IP</em></a>')
+        f'<span class="dead">{html.escape(str(row.get("status")))} · the listing '
+        f"page is gone, but photos remain available</span>"
+        if dead
+        else f'<a class="live" href="https://kolesa.kz/a/show/{aid}" target="_blank" '
+        f'rel="noreferrer">open on Kolesa ↗<em>uses the IP request budget</em></a>'
+    )
 
-    title = (f'{html.escape(str(row.get("brand") or ""))} '
-             f'{html.escape(str(row.get("model") or ""))}').strip()
+    title = (
+        f"{html.escape(str(row.get('brand') or ''))} {html.escape(str(row.get('model') or ''))}"
+    ).strip()
 
     return f"""
 <article class="card" id="ad{aid}" data-id="{aid}" data-idx="{idx}" data-stratum="{st}">
@@ -290,26 +331,23 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
     <button class="bfraud" data-v="fraud">fraud<kbd>F</kbd></button>
     <button class="blegit" data-v="legit">legit<kbd>L</kbd></button>
     <button class="bunk" data-v="unknown">unknown<kbd>U</kbd></button>
-    <input class="cmt" placeholder="почему — попадёт в колонку comment">
+    <input class="cmt" placeholder="Reason (saved to the comment column)">
     <span class="picked"></span>
   </footer>
 </article>"""
 
 
-def build(rows: pd.DataFrame, serve_mode: bool = False,
-          journal_total: int | None = None) -> str:
+def build(rows: pd.DataFrame, serve_mode: bool = False, journal_total: int | None = None) -> str:
     if journal_total is None:
-        # Считаем сами, а не полагаемся на вызывающего: без этого числа
-        # счётчик показывал только размеченное СРЕДИ ПОКАЗАННЫХ, а очередь
-        # намеренно состоит из неразмеченного — выходило «20 из 308» при
-        # 85 вердиктах в журнале, и читалось как «работа пропала».
+        # Compute this from the journal. Counting only labels among currently
+        # displayed rows made completed work appear to disappear whenever the
+        # queue was rebuilt to contain mostly unlabelled items.
         from kz.report.label_cards.journal import read_journal
-        _, jrows = read_journal()
-        journal_total = sum(1 for r in jrows
-                            if r.get("verdict") in ("fraud", "legit", "unknown"))
 
-    cards = "".join(card_html(r, i, serve_mode)
-                    for i, (_, r) in enumerate(rows.iterrows()))
+        _, jrows = read_journal()
+        journal_total = sum(1 for r in jrows if r.get("verdict") in ("fraud", "legit", "unknown"))
+
+    cards = "".join(card_html(r, i, serve_mode) for i, (_, r) in enumerate(rows.iterrows()))
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
     n_done = int(rows["existing_verdict"].notna().sum())
     n_left = len(rows) - n_done
@@ -317,41 +355,48 @@ def build(rows: pd.DataFrame, serve_mode: bool = False,
     n_rules = int(strata.get("rule_positive", 0))
     n_residual = int(strata.get("residual_candidate", 0))
     n_control = int(strata.get("random_control", 0))
-    n_nophoto = sum(1 for _, r in rows.iterrows()
-                    if r["photos"] and not any(
-                        photo_src(str(r["ad_id"]), p, u, serve_mode)
-                        for p, u in zip(r.get("photo_positions") or [], r["photos"])))
-    mode = ("вердикты пишутся в журнал" if serve_mode
-            else "черновик в браузере — журнал не пишется")
-    return (TEMPLATE
-            .replace("__CARDS__", cards)
-            .replace("__N__", str(len(rows)))
-            .replace("__NDEAD__", str(n_dead))
-            .replace("__NOPHOTO__", str(n_nophoto))
-            .replace("__NDONE__", str(n_done))
-            .replace("__NLEFT__", str(n_left))
-            .replace("__NRULES__", str(n_rules))
-            .replace("__NRESIDUAL__", str(n_residual))
-            .replace("__NCONTROL__", str(n_control))
-            .replace("__HOME__", ('<a class="count" href="/">← главная</a>'
-                                  if serve_mode else ""))
-            .replace("__SERVER__", "true" if serve_mode else "false")
-            .replace("__JOURNAL__", str(journal_total))
-            .replace("__MODECLS__", "live" if serve_mode else "draft")
-            .replace("__MODE__", mode)
-            .replace("__LABELS__", html.escape(LABELS_CSV)))
+    n_nophoto = sum(
+        1
+        for _, r in rows.iterrows()
+        if r["photos"]
+        and not any(
+            photo_src(str(r["ad_id"]), p, u, serve_mode)
+            for p, u in zip(r.get("photo_positions") or [], r["photos"])
+        )
+    )
+    mode = (
+        "verdicts are saved to the journal"
+        if serve_mode
+        else "browser draft; journal writes are disabled"
+    )
+    return (
+        TEMPLATE.replace("__CARDS__", cards)
+        .replace("__N__", str(len(rows)))
+        .replace("__NDEAD__", str(n_dead))
+        .replace("__NOPHOTO__", str(n_nophoto))
+        .replace("__NDONE__", str(n_done))
+        .replace("__NLEFT__", str(n_left))
+        .replace("__NRULES__", str(n_rules))
+        .replace("__NRESIDUAL__", str(n_residual))
+        .replace("__NCONTROL__", str(n_control))
+        .replace("__HOME__", ('<a class="count" href="/">← Home</a>' if serve_mode else ""))
+        .replace("__SERVER__", "true" if serve_mode else "false")
+        .replace("__JOURNAL__", str(journal_total))
+        .replace("__MODECLS__", "live" if serve_mode else "draft")
+        .replace("__MODE__", mode)
+        .replace("__LABELS__", html.escape(LABELS_CSV))
+    )
 
 
-# Шаблон отдельно от Python-строк с фигурными скобками CSS: подстановка
-# через .replace(), а не f-string — иначе пришлось бы экранировать всё CSS.
-# Строка СЫРАЯ (r"""), чтобы \n внутри JS писались как в JS, без двойного
-# экранирования.
+# Keep the template separate from Python strings that contain CSS braces. Plain
+# replacement avoids escaping the entire stylesheet as an f-string. A raw
+# string also preserves JavaScript ``\n`` without double escaping.
 TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Карточки для разметки</title>
+<title>Market anomaly review</title>
 <style>
-/* ── Тема. По умолчанию системная, кнопка ставит data-theme на <html>. ── */
+/* Theme follows the system by default; the button sets data-theme on <html>. */
 :root{
   --bg:#0c0f16; --surface:#131824; --surface2:#1a2030; --line:#232b3d;
   --text:#e7eaf2; --muted:#8f98ab; --faint:#5f6878;
@@ -382,9 +427,8 @@ TEMPLATE = r"""<!doctype html>
   }
 }
 
-/* ── Типографика. Системные шрифты: нативно, резко, без внешних загрузок
-      (страница обязана работать офлайн). Цифры табличные, чтобы столбцы
-      фактов и цены не «плясали». ── */
+/* System fonts keep the offline page crisp and dependency-free. Tabular
+   numerals keep fact and price columns aligned. */
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{
@@ -407,7 +451,7 @@ a:hover{text-decoration:underline}
 
 .wrap{max-width:1160px; margin:0 auto; padding:0 20px 80px}
 
-/* ── Верхняя панель ── */
+/* Top bar */
 .top{position:sticky; top:0; z-index:20; background:color-mix(in srgb,var(--bg) 88%,transparent);
      backdrop-filter:saturate(1.4) blur(10px); border-bottom:1px solid var(--line);
      margin:0 -20px 24px; padding:0 20px}
@@ -434,7 +478,7 @@ a:hover{text-decoration:underline}
 kbd{background:var(--surface2); border:1px solid var(--line); border-bottom-width:2px;
   border-radius:5px; padding:1px 6px; font-size:.75rem; color:var(--text)}
 
-/* ── Корзина вердиктов ── */
+/* Verdict basket */
 .basket{background:var(--surface); border:1px solid var(--line);
   border-radius:12px; margin:0 0 28px; box-shadow:var(--shadow)}
 .basket summary{cursor:pointer; padding:13px 16px; font-weight:500;
@@ -450,7 +494,7 @@ kbd{background:var(--surface2); border:1px solid var(--line); border-bottom-widt
 .basket .row{display:flex; gap:9px; margin-top:10px; flex-wrap:wrap}
 .hintline{color:var(--muted); font-size:.8125rem; margin:9px 0 0}
 
-/* ── Карточка ── */
+/* Card */
 .card{background:var(--surface); border:1px solid var(--line); border-radius:14px;
   padding:20px; margin:0 0 22px; scroll-margin-top:76px; box-shadow:var(--shadow);
   border-left:3px solid transparent}
@@ -476,11 +520,8 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 .body{display:grid; gap:20px; grid-template-columns:1fr}
 @media (min-width:1000px){ .body{grid-template-columns:minmax(0,1.5fr) minmax(290px,1fr)} }
 
-/* ── Галерея: крупное фото главное, миниатюры переключают ── */
-/* Высота фиксированная, а не aspect-ratio: среди фото есть вертикальные, и
-   в жёсткой рамке 4:3 они сжимались в узкую полоску — по такой картинке
-   состояние машины не оценить. Фиксированная высота + contain даёт крупное
-   изображение при любой ориентации и не дёргает вёрстку при перелистывании. */
+/* Gallery: fixed height plus contain keeps portrait photos large enough to
+   assess and prevents layout jumps while navigating. */
 .hero{position:relative; background:var(--surface2); border:1px solid var(--line);
   border-radius:11px; overflow:hidden; cursor:zoom-in;
   height:clamp(320px, 54vh, 580px)}
@@ -501,7 +542,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 .thumb.on{opacity:1; border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)}
 .empty{color:var(--muted); font-style:italic; padding:14px 0; font-size:.9375rem}
 
-/* ── Факты ── */
+/* Facts */
 .facts{margin:0; display:grid; gap:0}
 .f{display:flex; justify-content:space-between; align-items:baseline; gap:12px;
   padding:7px 0; border-bottom:1px solid var(--line); font-size:.875rem}
@@ -528,8 +569,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 .s-control b{color:var(--accent)}
 .done-note{background:var(--surface2); border:1px solid var(--line); margin:0 0 14px}
 
-/* ── Текст объявления: это читают внимательно, поэтому мера строки
-      ограничена, а межстрочный интервал больше. ── */
+/* Listing text uses a limited measure and generous line height for review. */
 .texts{margin-top:20px}
 .txt+.txt{margin-top:14px}
 .tl{color:var(--muted); font-size:.75rem; text-transform:uppercase;
@@ -537,7 +577,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 .tb{background:var(--bg); border:1px solid var(--line); border-radius:9px;
   padding:12px 14px; white-space:pre-wrap; max-width:78ch; line-height:1.7}
 
-/* ── Подсказки по флагам ── */
+/* Flag guidance */
 .helps{margin-top:18px; border-top:1px solid var(--line); padding-top:12px}
 .helps summary{cursor:pointer; color:var(--muted); font-size:.875rem;
   list-style:none}
@@ -553,7 +593,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 .hfraud span{background:var(--fraud-bg); color:var(--fraud)}
 .hlegit span{background:var(--legit-bg); color:var(--legit)}
 
-/* ── Кнопки вердикта ── */
+/* Verdict buttons */
 .actions{display:flex; gap:9px; align-items:center; flex-wrap:wrap; margin-top:18px;
   border-top:1px solid var(--line); padding-top:16px}
 .actions button{display:inline-flex; align-items:center; gap:7px; font:inherit;
@@ -578,7 +618,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 .mode.draft{background:var(--warn-bg); border:1px solid var(--line);
   color:var(--warn)}
 
-/* ── Лайтбокс ── */
+/* Lightbox */
 #box{position:fixed; inset:0; z-index:100; display:none; align-items:center;
   justify-content:center; background:rgba(6,8,12,.94); backdrop-filter:blur(3px)}
 #box.open{display:flex}
@@ -596,45 +636,44 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 <div class="top">
   <div class="progress"><i id="bar"></i></div>
   <div class="topin">
-    <h1>Review рыночных аномалий</h1>
+    <h1>Market anomaly review</h1>
     __HOME__
-    <span class="count"><b id="cnt">0</b> из __N__ в этой очереди</span>
-    <span class="count total-note" title="включая прошлые очереди и unknown">всего в журнале: <b>__JOURNAL__</b></span>
+    <span class="count"><b id="cnt">0</b> of __N__ in this queue</span>
+    <span class="count total-note" title="including previous queues and unknown verdicts">journal total: <b>__JOURNAL__</b></span>
     <span class="count" id="restored"></span>
     <span class="mode __MODECLS__">__MODE__</span>
-    <button class="tbtn" id="filter">скрыть размеченные</button>
-    <button class="tbtn" id="only-control">только контрольные</button>
-    <button class="tbtn" id="theme">тема</button>
+    <button class="tbtn" id="filter">hide labelled</button>
+    <button class="tbtn" id="only-control">controls only</button>
+    <button class="tbtn" id="theme">theme</button>
   </div>
 </div>
 
-<p class="lede"><b>__N__ объявлений</b>: __NRULES__ пометили правила,
-__NRESIDUAL__ добавил residual-детектор, __NCONTROL__ взяты случайно для
-проверки пропусков. Уже есть окончательный fraud/legit-вердикт: __NDONE__.
-Осталось принять окончательное решение по __NLEFT__.
-До ручного fraud/legit-вердикта это только кандидаты, не обвинение продавца.
-__NDEAD__ с закрытой страницей на kolesa, __NOPHOTO__ без доступных фотографий —
-у них сервер, где лежали снимки, отключён.</p>
+<p class="lede"><b>__N__ listings</b>: __NRULES__ were flagged by rules,
+__NRESIDUAL__ came from the residual detector, and __NCONTROL__ were sampled
+randomly to measure misses. __NDONE__ already have final fraud/legit verdicts;
+__NLEFT__ still need a decision. Before manual review these are candidates, not
+accusations against sellers. __NDEAD__ have closed Kolesa pages and __NOPHOTO__
+have no available photos because their historical image host was retired.</p>
 
-<div class="safe"><b>Страница не обращается к kolesa.kz.</b> Фотографии грузятся
-с CDN (другой хост), текст и цифры взяты из локальной базы, поэтому разметка не
-расходует суточный лимит запросов. Единственное исключение — ссылка «открыть на
-kolesa» в карточке.</div>
+<div class="safe"><b>This page does not request kolesa.kz.</b> Photos load from
+a separate CDN and all text and facts come from the local database, so normal
+labelling does not consume the daily Kolesa request budget. The only exception
+is the explicit “open on Kolesa” link on a card.</div>
 
 <div class="keys">
-  <span><kbd>J</kbd><kbd>K</kbd> следующая / предыдущая</span>
+  <span><kbd>J</kbd><kbd>K</kbd> next / previous listing</span>
   <span><kbd>F</kbd> fraud &nbsp;<kbd>L</kbd> legit &nbsp;<kbd>U</kbd> unknown</span>
-  <span><kbd>←</kbd><kbd>→</kbd> перелистнуть фото</span>
-  <span><kbd>C</kbd> комментарий</span>
+  <span><kbd>←</kbd><kbd>→</kbd> previous / next photo</span>
+  <span><kbd>C</kbd> focus comment</span>
 </div>
 
 <details class="basket" open>
-  <summary>Отмечено в этой сессии — <span id="cnt2">0</span></summary>
+  <summary>Labelled in this session — <span id="cnt2">0</span></summary>
   <div class="in">
-    <textarea id="out" readonly placeholder="Нажимай fraud / legit / unknown в карточках."></textarea>
+    <textarea id="out" readonly placeholder="Choose fraud, legit, or unknown on a card."></textarea>
     <div class="row">
-      <button class="tbtn" id="copy">копировать всё</button>
-      <button class="tbtn" id="clear">очистить черновик</button>
+      <button class="tbtn" id="copy">copy all</button>
+      <button class="tbtn" id="clear">clear browser draft</button>
     </div>
     <p class="hintline" id="baskethint"></p>
   </div>
@@ -652,29 +691,26 @@ __CARDS__
 </div>
 
 <script>
-const SERVER = __SERVER__;   /* true — страница /label, можно писать в журнал */
+const SERVER = __SERVER__;   /* true on /label, where journal writes are allowed */
 const cards = Array.from(document.querySelectorAll('.card'));
-/* Объявления, по которым вердикт уже лежит в журнале. */
+/* Listings that already have a journal verdict. */
 const ALREADY = new Set(cards.filter(c => c.querySelector('.done-note'))
                              .map(c => c.dataset.id));
 const picks = new Map();
 let cur = 0;
 
-/* Кавычки и переводы строк экранируются по правилам CSV, иначе комментарий
-   с запятой сдвинул бы колонки журнала. */
+/* Escape quotes and newlines according to CSV rules so punctuation in a
+   comment cannot shift journal columns. */
 function esc(s){ return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 
 function render(){
   const lines = [];
-  /* Схема журнала: ad_id, 7 описательных, verdict, comment, затем колонки
-     слоя. Число запятых должно совпадать с заголовком, иначе вставленная
-     строка сдвинет колонки. */
+  /* Journal schema: ad_id, seven descriptive fields, verdict, comment, then
+     sampling metadata. The comma count must match the header. */
   for (const [id, v] of picks) lines.push(id + ',,,,,,,,' + v + ',,');
   document.getElementById('out').value = lines.join('\n');
-  /* Счётчик показывает ИТОГ: что уже в журнале плюс отмеченное сейчас.
-     Раньше он показывал только черновик, и при открытии на другом порту
-     (у localStorage своя память на каждый адрес) выглядело так, будто
-     разметка пропала. */
+  /* Show the total of existing journal rows and new selections. Counting only
+     the browser draft made completed work appear lost on another origin. */
   const fresh = [...picks.keys()].filter(id => !ALREADY.has(id)).length;
   document.getElementById('cnt').textContent = ALREADY.size + fresh;
   document.getElementById('cnt2').textContent = picks.size;
@@ -682,10 +718,9 @@ function render(){
     (cards.length ? picks.size / cards.length * 100 : 0) + '%';
 }
 
-/* Выбор живёт в трёх местах, и это не дублирование, а разные задачи:
-   picks — текущая сессия (корзина/копирование);
-   localStorage — переживает перезагрузку и закрытие вкладки;
-   журнал на диске — единственный источник истины, пишется сервером. */
+/* A selection has three representations with different purposes: the current
+   session basket, localStorage for reload recovery, and the on-disk journal as
+   the sole source of truth. */
 const STORE = 'label_cards_picks';
 
 function saveLocal(){
@@ -713,15 +748,15 @@ function setVerdict(card, v){
   mark(card, 'local', '→ ' + v);
   saveLocal();
   render();
-  if (!SERVER) return;                    /* file:// — только копипаста */
+  if (!SERVER) return;                    /* file:// supports copy/paste only */
   fetch('/verdict', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ad_id: card.dataset.id, verdict: v, comment: cmt}),
   }).then(r => r.json())
     .then(d => mark(card, d.ok ? 'saved' : 'error',
-                    d.ok ? '✓ в журнале' : '✗ ' + (d.error || 'ошибка')))
-    /* Сеть отвалилась — выбор всё равно в localStorage, не потеряется. */
-    .catch(() => mark(card, 'error', '✗ не сохранено, есть в браузере'));
+                    d.ok ? '✓ saved to journal' : '✗ ' + (d.error || 'Error')))
+    /* A network failure leaves the selection recoverable in localStorage. */
+    .catch(() => mark(card, 'error', '✗ not saved; retained in browser'));
 }
 
 function focusCard(i){
@@ -731,7 +766,7 @@ function focusCard(i){
   cards[cur].scrollIntoView({block: 'start', behavior: 'smooth'});
 }
 
-/* ── Галереи ── */
+/* Galleries */
 cards.forEach(card => {
   if (card.querySelector('.done-note')) card.classList.add('done');
   card.querySelectorAll('.actions button').forEach(b => {
@@ -755,7 +790,7 @@ cards.forEach(card => {
   card._at = () => i;
 });
 
-/* ── Лайтбокс ── */
+/* Lightbox */
 const box = document.getElementById('box');
 let bp = [], bi = 0;
 function paint(){
@@ -770,7 +805,7 @@ box.querySelector('.prev').onclick = e => { e.stopPropagation(); moveBox(-1); };
 box.querySelector('.next').onclick = e => { e.stopPropagation(); moveBox(1); };
 box.onclick = e => { if (e.target === box) closeBox(); };
 
-/* ── Клавиатура ── */
+/* Keyboard */
 document.addEventListener('keydown', e => {
   if (box.classList.contains('open')){
     if (e.key === 'Escape') closeBox();
@@ -797,12 +832,12 @@ document.addEventListener('keydown', e => {
   if (k === 'j' || k === 'k') e.preventDefault();
 });
 
-/* ── Панель ── */
+/* Controls */
 document.getElementById('copy').onclick = () => {
   const t = document.getElementById('out');
   if (!t.value) return;
   const text = t.value + '\n';
-  /* На file:// clipboard API бывает недоступен — тогда старый способ. */
+  /* The Clipboard API may be unavailable on file://; use the legacy fallback. */
   const fallback = () => {
     t.removeAttribute('readonly'); t.select();
     document.execCommand('copy');
@@ -811,14 +846,13 @@ document.getElementById('copy').onclick = () => {
   if (navigator.clipboard) navigator.clipboard.writeText(text).catch(fallback);
   else fallback();
   const b = document.getElementById('copy');
-  b.textContent = 'скопировано';
-  setTimeout(() => b.textContent = 'копировать всё', 1400);
+  b.textContent = 'copied';
+  setTimeout(() => b.textContent = 'copy all', 1400);
 };
 document.getElementById('clear').onclick = () => {
-  /* Чистит только черновик в браузере. Journal на диске не трогаем никогда —
-     он append-only, и уже записанные вердикты остаются валидными. */
-  if (!confirm('Очистить черновик в браузере? Уже записанные в журнал '
-             + 'вердикты останутся — файл только дописывается.')) return;
+  /* Clear only the browser draft. Never remove existing journal verdicts. */
+  if (!confirm('Clear the browser draft? Verdicts already saved to the journal '
+             + 'will remain unchanged.')) return;
   picks.clear();
   try { localStorage.removeItem(STORE); } catch (e) {}
   cards.forEach(c => {
@@ -831,16 +865,15 @@ document.getElementById('filter').onclick = e => {
   document.body.classList.toggle('hide-done');
   const on = document.body.classList.contains('hide-done');
   e.target.classList.toggle('on', on);
-  e.target.textContent = on ? 'показать все' : 'скрыть размеченные';
+  e.target.textContent = on ? 'show all' : 'hide labelled';
 };
 document.getElementById('only-control').onclick = e => {
-  /* Контрольные — обычные объявления, которых детектор НЕ помечал. Только по
-     ним считается полнота: сколько обмана мы пропустили. Фильтр нужен, чтобы
-     не искать их глазами среди помеченных. */
+  /* Controls were not flagged. They are required to estimate how many fraud
+     cases the detector missed, so this filter makes them directly accessible. */
   document.body.classList.toggle('only-control');
   const on = document.body.classList.contains('only-control');
   e.target.classList.toggle('on', on);
-  e.target.textContent = on ? 'показать все' : 'только контрольные';
+  e.target.textContent = on ? 'show all' : 'controls only';
   focusCard(0);
 };
 document.getElementById('theme').onclick = () => {
@@ -850,8 +883,7 @@ document.getElementById('theme').onclick = () => {
   root.dataset.theme = now === 'dark' ? 'light' : 'dark';
 };
 
-/* Восстановление черновика: выборы прошлой сессии видны сразу, не надо
-   вспоминать, где остановился. Комментарий тоже возвращаем в поле. */
+/* Restore the previous browser draft, including comments. */
 (() => {
   const saved = loadLocal();
   let n = 0;
@@ -870,19 +902,18 @@ document.getElementById('theme').onclick = () => {
     n++;
   }
   if (n) document.getElementById('restored').textContent =
-    'восстановлено из браузера: ' + n;
+    'restored from browser: ' + n;
 })();
 
-/* Подсказка зависит от режима: в серверном вердикты уже в журнале, и
-   советовать копипасту значит путать. */
+/* Explain persistence differently for live server mode and offline export. */
 const _hint = document.getElementById('baskethint');
 if (_hint) _hint.innerHTML = SERVER
-  ? 'Вердикты уже записаны в <b>__LABELS__</b> — копировать ничего не нужно. '
-    + 'Этот список только показывает, что ты отметил в текущей сессии. '
-    + 'Дальше: <span class="mono">python -m kz.ops.run_all --ml</span>.'
-  : 'Страница открыта как файл, поэтому писать в журнал не может. '
-    + 'Скопируй строки и допиши в конец <b>__LABELS__</b>. '
-    + 'Надёжнее запускать через <span class="mono">python -m kz.web</span>.';
+  ? 'Verdicts are already stored in <b>__LABELS__</b>; no copying is required. '
+    + 'This list only summarizes the current session. Next: '
+    + '<span class="mono">python -m kz.ops.run_all --ml</span>.'
+  : 'A file:// page cannot write to the journal. Copy these rows into '
+    + '<b>__LABELS__</b>, or preferably use '
+    + '<span class="mono">python -m kz.web</span>.';
 
 focusCard(0);
 render();

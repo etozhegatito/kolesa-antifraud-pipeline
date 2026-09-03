@@ -1,20 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Насколько свежи данные и чему из отчётов можно верить прямо сейчас.
+"""Measure data age so reports can distinguish current evidence from stale data.
 
-ЗАЧЕМ ЭТО ОТДЕЛЬНЫМ МОДУЛЕМ. Конвейер писался так, будто его запускают
-каждый день. В действительности он живёт на ноутбуке, который закрывают, и
-между прогонами проходит неделя-две. За 39 календарных дней сбор шёл 8 —
-то есть 79% времени данные просто стояли.
-
-Молча это не проходит. Статус объявления, проверенный две недели назад,
-сегодня не факт. Объявление, не встреченное в последнем обходе, могло уйти
-с рынка — или просто выпасть за глубину обхода, потому что его вытеснили
-новые. Отчёт, который печатает «медианный срок жизни 24 дня», не сообщая,
-что статусы устарели на две недели, выдаёт догадку за измерение.
-
-Здесь считаются только факты о возрасте данных. Что с ними делать —
-решает каждый отчёт сам: где-то достаточно приписки, где-то честнее
-отказаться от вывода.
+The pipeline runs on a laptop rather than continuously. Old lifecycle checks or
+gaps in sightings can bias survival and market summaries. This module reports
+age facts; each consumer decides whether to warn or suppress a conclusion.
 """
 
 from __future__ import annotations
@@ -28,11 +17,10 @@ LOCAL_TIMEZONE = ZoneInfo("Asia/Almaty")
 
 
 def local_date_from_utc_iso(value: str) -> date:
-    """Календарный день артефакта в часовом поясе рынка.
+    """Return the artifact date in the market timezone.
 
-    Метаданные правильно пишутся в UTC. Но ``.date()`` до timezone-конвертации
-    превращало обучение в 01:15 Алматы в «вчера», потому что в UTC ещё было
-    20:15 предыдущего дня. Старые naive-метки считаем UTC для совместимости.
+    Metadata is stored in UTC. Convert before taking ``.date()`` so an early
+    Almaty run is not shown as the previous day. Treat legacy naive values as UTC.
     """
     created = datetime.fromisoformat(value)
     if created.tzinfo is None:
@@ -42,10 +30,11 @@ def local_date_from_utc_iso(value: str) -> date:
 
 @dataclass
 class Freshness:
-    """Возраст данных на момент вопроса."""
-    last_collect: date | None      # последний день, когда шёл сбор листинга
-    collect_days: int              # сколько дней всего собирали
-    span_days: int                 # сколько календарных дней прошло
+    """Age and coverage facts at the time of measurement."""
+
+    last_collect: date | None
+    collect_days: int
+    span_days: int
     last_status_check: date | None
     ads_total: int
     ads_status_checked: int
@@ -71,17 +60,17 @@ class Freshness:
 
     @property
     def status_coverage(self) -> float:
-        """Доля объявлений, чей статус хоть раз проверялся."""
+        """Share of listings whose status has been checked at least once."""
         return self.ads_status_checked / self.ads_total if self.ads_total else 0.0
 
     @property
     def collect_regularity(self) -> float:
-        """Доля дней, в которые сбор реально шёл. 1.0 — каждый день."""
+        """Share of calendar days with collection; 1.0 means every day."""
         return self.collect_days / self.span_days if self.span_days else 0.0
 
 
 def measure() -> Freshness:
-    """Один запрос к базе на каждый факт, без вычислений поверх."""
+    """Measure each freshness fact directly from the database."""
     import pandas as pd
 
     from kz.core.db import get_engine
@@ -98,9 +87,10 @@ def measure() -> Freshness:
     model_created = None
     try:
         from kz.ml.train_price_model import load_artifact
+
         _, meta = load_artifact()
         model_created = local_date_from_utc_iso(meta["created_at_utc"])
-    except Exception:                       # noqa: BLE001 — артефакта может не быть
+    except Exception:  # noqa: BLE001 — artifact is optional
         pass
 
     return Freshness(
@@ -115,43 +105,51 @@ def measure() -> Freshness:
 
 
 def report(f: Freshness, log=print) -> None:
-    """Шапка «чему верить», которую печатают отчёты перед своими числами."""
+    """Print the freshness preamble used by reports."""
+
     def age(n, what):
         if n is None:
-            return f"{what}: никогда"
+            return f"{what}: never"
         if n == 0:
-            return f"{what}: сегодня"
-        return f"{what}: {n} дн. назад"
+            return f"{what}: today"
+        return f"{what}: {n} days ago"
 
-    log("Свежесть данных:")
-    log(f"  {age(f.data_age_days, 'последний сбор')}, "
-        f"{age(f.status_age_days, 'проверка статусов')}, "
-        f"{age(f.model_age_days, 'обучение модели')}")
-    log(f"  статус проверялся у {f.ads_status_checked} из {f.ads_total} "
-        f"объявлений ({f.status_coverage*100:.0f}%)")
-    log(f"  сбор шёл {f.collect_days} дней из {f.span_days} "
-        f"({f.collect_regularity*100:.0f}% времени)")
+    log("Data freshness:")
+    log(
+        f"  {age(f.data_age_days, 'last collection')}, "
+        f"{age(f.status_age_days, 'status checks')}, "
+        f"{age(f.model_age_days, 'model training')}"
+    )
+    log(
+        f"  status checked for {f.ads_status_checked} of {f.ads_total} "
+        f"listings ({f.status_coverage * 100:.0f}%)"
+    )
+    log(
+        f"  collection ran on {f.collect_days} of {f.span_days} days "
+        f"({f.collect_regularity * 100:.0f}% of the period)"
+    )
 
 
-def stale_warnings(f: Freshness, status_days: int = 7,
-                   coverage: float = 0.5) -> list[str]:
-    """Что именно перестаёт быть надёжным при таком возрасте данных.
+def stale_warnings(f: Freshness, status_days: int = 7, coverage: float = 0.5) -> list[str]:
+    """Return conclusions weakened by data age or coverage.
 
-    Пороги эмпирические и намеренно мягкие: смысл не в том, чтобы запретить
-    отчёт, а в том, чтобы рядом с числом стояла причина ему не доверять.
+    Thresholds are deliberately permissive; warnings explain uncertainty rather
+    than blocking every report.
     """
     out = []
     if f.status_age_days is not None and f.status_age_days > status_days:
         out.append(
-            f"Статусы проверялись {f.status_age_days} дн. назад. Объявление, "
-            f"ушедшее с рынка за это время, всё ещё числится активным — "
-            f"сроки жизни завышены, доля ушедших занижена.")
+            f"Statuses were last checked {f.status_age_days} days ago. Listings "
+            f"removed since then may still appear active, inflating lifetimes."
+        )
     if f.status_coverage < coverage:
         out.append(
-            f"Статус проверялся лишь у {f.status_coverage*100:.0f}% объявлений. "
-            f"Остальные записаны активными по умолчанию, а не по проверке.")
+            f"Only {f.status_coverage * 100:.0f}% of listings have a status check. "
+            f"Others are active by default rather than by observation."
+        )
     if f.collect_regularity < 0.5 and f.span_days > 7:
         out.append(
-            f"Сбор шёл {f.collect_regularity*100:.0f}% дней. В истории цен и "
-            f"встреч есть провалы, и события внутри них не датируются точно.")
+            f"Collection ran on {f.collect_regularity * 100:.0f}% of days. Price "
+            f"and sighting histories contain gaps, so event dates are imprecise."
+        )
     return out

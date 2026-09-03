@@ -1,16 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Создать крошечный НЕПРОДУКТОВЫЙ артефакт для Docker smoke-test.
-
-Настоящая модель и данные не публикуются. Но без файлов модели Docker не
-может даже проверить, что контейнер стартует и отвечает на ``/api/health``.
-Этот модуль обучает несколько деревьев на синтетических строках и пишет их
-только в явно переданный каталог. Использовать результат для оценки машин
-нельзя.
-
-Запуск в CI::
-
-    python -m kz.ops.create_smoke_artifact --output .ci-smoke/models
-"""
+"""Implementation for the `kz.ops.create_smoke_artifact` module."""
 
 from __future__ import annotations
 
@@ -32,11 +21,11 @@ from kz.ml.train_price_model import (
 
 
 def create(output: Path) -> None:
-    """Записать совместимые main/specialist/metadata в безопасный каталог."""
+    """Implement `create`."""
     resolved = output.resolve()
     production = (Path.cwd() / "data/models").resolve()
     if resolved == production:
-        raise ValueError("smoke-артефакт не должен перезаписывать data/models")
+        raise ValueError("The smoke artifact must not overwrite data/models")
 
     output.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -44,27 +33,35 @@ def create(output: Path) -> None:
     brands = ("Toyota", "Hyundai", "Kia")
     bodies = ("седан", "кроссовер", "хэтчбек")
     for i in range(18):
-        rows.append({
-            "age": 2 + i,
-            "mileage_km": 12_000 + i * 9_000,
-            "engine_volume": 1.6 + (i % 4) * 0.4,
-            "photos_count": 5 + i % 7,
-            "is_mileage_missing": 0,
-            "is_vip": i % 2,
-            "has_monthly_price": (i + 1) % 2,
-            "brand": brands[i % len(brands)],
-            "model": f"Smoke-{i % 6}",
-            "engine_type": "бензин" if i % 3 else "дизель",
-            "transmission": "автомат" if i % 2 else "механика",
-            "body_type": bodies[i % len(bodies)],
-            "condition": "б/у",
-        })
+        rows.append(
+            {
+                "age": 2 + i,
+                "mileage_km": 12_000 + i * 9_000,
+                "engine_volume": 1.6 + (i % 4) * 0.4,
+                "photos_count": 5 + i % 7,
+                "is_mileage_missing": 0,
+                "is_vip": i % 2,
+                "has_monthly_price": (i + 1) % 2,
+                "brand": brands[i % len(brands)],
+                "model": f"Smoke-{i % 6}",
+                "engine_type": "бензин" if i % 3 else "дизель",
+                "transmission": "автомат" if i % 2 else "механика",
+                "body_type": bodies[i % len(bodies)],
+                "condition": "б/у",
+            }
+        )
         prices.append(3_000_000 + i * 550_000)
 
     frame = pd.DataFrame(rows)[FEATURES]
     target = np.log(np.asarray(prices, dtype=float))
-    params = dict(iterations=6, depth=3, learning_rate=0.1,
-                  loss_function="RMSE", random_seed=42, verbose=False)
+    params = dict(
+        iterations=6,
+        depth=3,
+        learning_rate=0.1,
+        loss_function="RMSE",
+        random_seed=42,
+        verbose=False,
+    )
     main = CatBoostRegressor(**params)
     specialist = CatBoostRegressor(**params)
     pool = Pool(frame, target, cat_features=CAT_FEATURES)
