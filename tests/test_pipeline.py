@@ -2815,6 +2815,60 @@ def test_full_verdict_queue_is_the_default():
     assert inspect.signature(load_rows).parameters["include_queue"].default is True
 
 
+def test_verdict_queue_keeps_history_reopenable(tmp_path, monkeypatch):
+    """Reviewed rows remain reachable after the disposable queue changes."""
+    import pandas as pd
+    from kz.report.label_cards import queue as label_queue
+
+    queue_csv = tmp_path / "queue.csv"
+    labels_csv = tmp_path / "labels.csv"
+    pd.DataFrame(
+        [{"ad_id": "new", "sampling_stratum": "random_control"}]
+    ).to_csv(queue_csv, index=False)
+    pd.DataFrame(
+        [
+            {
+                "ad_id": "old",
+                "verdict": "fraud",
+                "comment": "accidental click",
+                "sampling_stratum": "residual_candidate",
+            }
+        ]
+    ).to_csv(labels_csv, index=False)
+
+    clean = pd.DataFrame(
+        [
+            {"ad_id": "new", "is_suspicious": 0, "price_z": 0.0},
+            {"ad_id": "old", "is_suspicious": 0, "price_z": -1.0},
+        ]
+    )
+    enriched = pd.DataFrame(
+        columns=["ad_id", "options_text", "page_condition", "has_vin", "fetched_at"]
+    )
+    photos = pd.DataFrame(columns=["ad_id", "position", "url"])
+
+    def fake_read_sql(query, _engine, **_kwargs):
+        if "SELECT * FROM clean_data" in query:
+            return clean.copy()
+        if "FROM enriched" in query:
+            return enriched.copy()
+        if "FROM photos" in query:
+            return photos.copy()
+        raise AssertionError(query)
+
+    monkeypatch.setattr(label_queue, "QUEUE_CSV", str(queue_csv))
+    monkeypatch.setattr(label_queue, "LABELS_CSV", str(labels_csv))
+    monkeypatch.setattr(label_queue, "get_engine", lambda: object())
+    monkeypatch.setattr(label_queue.pd, "read_sql", fake_read_sql)
+
+    rows = label_queue.load_rows()
+    assert set(rows["ad_id"]) == {"new", "old"}
+    old = rows.set_index("ad_id").loc["old"]
+    assert old["existing_verdict"] == "fraud"
+    assert old["existing_comment"] == "accidental click"
+    assert old["stratum"] == "residual_candidate"
+
+
 def test_verdict_page_explains_why_queue_counts_differ():
     """Regression coverage for `test_verdict_page_explains_why_queue_counts_differ`."""
     import pandas as pd
@@ -2844,7 +2898,7 @@ def test_verdict_page_explains_why_queue_counts_differ():
         "1 were flagged by rules",
         "1 came from the residual detector",
         "1 were sampled",
-        "3 still need a decision",
+        "3 still need a final decision",
     ):
         assert text in page
 
@@ -2855,6 +2909,16 @@ def test_label_cards_can_filter_control_group():
     assert 'data-stratum="{st}"' in src
     assert "only-control" in src
     assert 'not([data-stratum="random_control"])' in src
+
+
+def test_label_cards_can_reopen_each_saved_verdict_with_one_click():
+    """Fraud, legit, and unknown history have dedicated review tabs."""
+    src = _label_cards_source()
+    for verdict in ("fraud", "legit", "unknown"):
+        assert f'data-verdict-filter="{verdict}"' in src
+        assert f'data-verdict="{verdict}"' in src
+    assert "document.body.dataset.verdictFilter" in src
+    assert "data-existing-verdict" in src
 
 
 def test_label_cards_keyboard_navigation_respects_active_filters():

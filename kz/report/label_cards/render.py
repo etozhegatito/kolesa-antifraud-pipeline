@@ -287,12 +287,25 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
         stratum_html = f'<div class="stratum {cls}"><b>{title}</b><span>{hint}</span></div>'
 
     ev = row.get("existing_verdict")
+    ev = "" if ev is None or pd.isna(ev) else str(ev)
+    if ev not in ("fraud", "legit", "unknown"):
+        ev = ""
     ev_html = (
         f'<div class="note done-note">Already labelled: '
         f"<b>{html.escape(str(ev))}</b><span>you can review it again</span></div>"
-        if ev and not pd.isna(ev)
+        if ev
         else ""
     )
+    verdict_attr = (
+        f' data-verdict="{html.escape(ev)}" data-existing-verdict="{html.escape(ev)}"'
+        if ev
+        else ""
+    )
+    existing_comment = row.get("existing_comment")
+    existing_comment = (
+        "" if existing_comment is None or pd.isna(existing_comment) else str(existing_comment)
+    )
+    comment_value = html.escape(existing_comment, quote=True)
 
     status_html = (
         f'<span class="dead">{html.escape(str(row.get("status")))} · the listing '
@@ -307,7 +320,7 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
     ).strip()
 
     return f"""
-<article class="card" id="ad{aid}" data-id="{aid}" data-idx="{idx}" data-stratum="{st}">
+<article class="card" id="ad{aid}" data-id="{aid}" data-idx="{idx}" data-stratum="{st}"{verdict_attr}>
   <header>
     <div class="ttl">
       <h2>{title} <span class="yr">{fmt(row.get("year"))}</span></h2>
@@ -332,7 +345,7 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
     <button class="bfraud" data-v="fraud">fraud<kbd>F</kbd></button>
     <button class="blegit" data-v="legit">legit<kbd>L</kbd></button>
     <button class="bunk" data-v="unknown">unknown<kbd>U</kbd></button>
-    <input class="cmt" placeholder="Reason (saved to the comment column)">
+    <input class="cmt" value="{comment_value}" placeholder="Reason (saved to the comment column)">
     <span class="picked"></span>
   </footer>
 </article>"""
@@ -350,7 +363,9 @@ def build(rows: pd.DataFrame, serve_mode: bool = False, journal_total: int | Non
 
     cards = "".join(card_html(r, i, serve_mode) for i, (_, r) in enumerate(rows.iterrows()))
     n_dead = int(rows["status"].isin(["archived", "deleted"]).sum())
-    n_done = int(rows["existing_verdict"].notna().sum())
+    verdicts = rows["existing_verdict"].fillna("")
+    n_done = int(verdicts.isin(["fraud", "legit"]).sum())
+    n_unknown = int(verdicts.eq("unknown").sum())
     n_left = len(rows) - n_done
     strata = rows.get("stratum", pd.Series(dtype=str)).fillna("").value_counts()
     n_rules = int(strata.get("rule_positive", 0))
@@ -376,6 +391,7 @@ def build(rows: pd.DataFrame, serve_mode: bool = False, journal_total: int | Non
         .replace("__NDEAD__", str(n_dead))
         .replace("__NOPHOTO__", str(n_nophoto))
         .replace("__NDONE__", str(n_done))
+        .replace("__NUNKNOWN__", str(n_unknown))
         .replace("__NLEFT__", str(n_left))
         .replace("__NRULES__", str(n_rules))
         .replace("__NRESIDUAL__", str(n_residual))
@@ -503,8 +519,11 @@ kbd{background:var(--surface2); border:1px solid var(--line); border-bottom-widt
 .card[data-verdict="fraud"]{border-left-color:var(--fraud)}
 .card[data-verdict="legit"]{border-left-color:var(--legit)}
 .card[data-verdict="unknown"]{border-left-color:var(--faint)}
-body.hide-done .card[data-verdict], body.hide-done .card.done{display:none}
 body.only-control .card:not([data-stratum="random_control"]){display:none}
+body[data-verdict-filter="unlabelled"] .card[data-verdict]{display:none}
+body[data-verdict-filter="fraud"] .card:not([data-verdict="fraud"]){display:none}
+body[data-verdict-filter="legit"] .card:not([data-verdict="legit"]){display:none}
+body[data-verdict-filter="unknown"] .card:not([data-verdict="unknown"]){display:none}
 
 .card header{display:flex; justify-content:space-between; align-items:flex-start;
   gap:16px; flex-wrap:wrap; margin-bottom:14px}
@@ -643,7 +662,11 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
     <span class="count total-note" title="including previous queues and unknown verdicts">journal total: <b>__JOURNAL__</b></span>
     <span class="count" id="restored"></span>
     <span class="mode __MODECLS__">__MODE__</span>
-    <button class="tbtn" id="filter">hide labelled</button>
+    <button class="tbtn verdict-filter on" data-verdict-filter="unlabelled">Queue <b id="vf-unlabelled">0</b></button>
+    <button class="tbtn verdict-filter" data-verdict-filter="fraud">Fraud <b id="vf-fraud">0</b></button>
+    <button class="tbtn verdict-filter" data-verdict-filter="legit">Legit <b id="vf-legit">0</b></button>
+    <button class="tbtn verdict-filter" data-verdict-filter="unknown">Unknown <b id="vf-unknown">0</b></button>
+    <button class="tbtn verdict-filter" data-verdict-filter="all">All <b id="vf-all">0</b></button>
     <button class="tbtn" id="only-control">controls only</button>
     <button class="tbtn" id="theme">theme</button>
   </div>
@@ -651,8 +674,9 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
 
 <p class="lede"><b>__N__ listings</b>: __NRULES__ were flagged by rules,
 __NRESIDUAL__ came from the residual detector, and __NCONTROL__ were sampled
-randomly to measure misses. __NDONE__ already have final fraud/legit verdicts;
-__NLEFT__ still need a decision. Before manual review these are candidates, not
+randomly to measure misses. __NDONE__ already have final fraud/legit verdicts,
+__NUNKNOWN__ are marked unknown, and __NLEFT__ still need a final decision.
+Before manual review these are candidates, not
 accusations against sellers. __NDEAD__ have closed Kolesa pages and __NOPHOTO__
 have no available photos because their historical image host was retired.</p>
 
@@ -699,9 +723,27 @@ const ALREADY = new Set(cards.filter(c => c.querySelector('.done-note'))
                              .map(c => c.dataset.id));
 const picks = new Map();
 let cur = 0;
+document.body.dataset.verdictFilter = 'unlabelled';
 
 function visibleCards(){
   return cards.filter(card => getComputedStyle(card).display !== 'none');
+}
+
+function stratumScopeCards(){
+  return document.body.classList.contains('only-control')
+    ? cards.filter(card => card.dataset.stratum === 'random_control') : cards;
+}
+
+function updateVerdictCounts(){
+  const scope = stratumScopeCards();
+  const counts = {all: scope.length, unlabelled: 0, fraud: 0, legit: 0, unknown: 0};
+  scope.forEach(card => {
+    const verdict = card.dataset.verdict || 'unlabelled';
+    counts[verdict] += 1;
+  });
+  Object.entries(counts).forEach(([name, count]) => {
+    document.getElementById('vf-' + name).textContent = count;
+  });
 }
 
 /* Escape quotes and newlines according to CSV rules so punctuation in a
@@ -724,6 +766,7 @@ function render(){
   document.getElementById('cnt2').textContent = picks.size;
   document.getElementById('bar').style.width =
     (scope.length ? completed / scope.length * 100 : 0) + '%';
+  updateVerdictCounts();
 }
 
 /* A selection has three representations with different purposes: the current
@@ -748,6 +791,18 @@ function mark(card, state, text){
   el.textContent = text;
 }
 
+function updateDoneNote(card, verdict){
+  let note = card.querySelector('.done-note');
+  if (!note){
+    note = document.createElement('div');
+    note.className = 'note done-note';
+    note.innerHTML = 'Already labelled: <b></b><span>you can review it again</span>';
+    card.querySelector('.body').before(note);
+  }
+  note.querySelector('b').textContent = verdict;
+  card.classList.add('done');
+}
+
 function setVerdict(card, v){
   if (!card) return;
   const cmt = card.querySelector('.cmt').value.trim();
@@ -756,13 +811,21 @@ function setVerdict(card, v){
   mark(card, 'local', '→ ' + v);
   saveLocal();
   render();
+  if (getComputedStyle(card).display === 'none') focusFirstVisible();
   if (!SERVER) return;                    /* file:// supports copy/paste only */
   fetch('/verdict', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ad_id: card.dataset.id, verdict: v, comment: cmt}),
   }).then(r => r.json())
-    .then(d => mark(card, d.ok ? 'saved' : 'error',
-                    d.ok ? '✓ saved to journal' : '✗ ' + (d.error || 'Error')))
+    .then(d => {
+      if (d.ok){
+        card.dataset.existingVerdict = v;
+        ALREADY.add(card.dataset.id);
+        updateDoneNote(card, v);
+      }
+      mark(card, d.ok ? 'saved' : 'error',
+           d.ok ? '✓ saved to journal' : '✗ ' + (d.error || 'Error'));
+    })
     /* A network failure leaves the selection recoverable in localStorage. */
     .catch(() => mark(card, 'error', '✗ not saved; retained in browser'));
 }
@@ -879,19 +942,22 @@ document.getElementById('clear').onclick = () => {
   picks.clear();
   try { localStorage.removeItem(STORE); } catch (e) {}
   cards.forEach(c => {
-    delete c.dataset.verdict;
+    if (c.dataset.existingVerdict) c.dataset.verdict = c.dataset.existingVerdict;
+    else delete c.dataset.verdict;
     c.querySelector('.picked').textContent = '';
   });
-  render();
-};
-document.getElementById('filter').onclick = e => {
-  document.body.classList.toggle('hide-done');
-  const on = document.body.classList.contains('hide-done');
-  e.target.classList.toggle('on', on);
-  e.target.textContent = on ? 'show all' : 'hide labelled';
   focusFirstVisible();
   render();
 };
+document.querySelectorAll('.verdict-filter').forEach(button => {
+  button.onclick = () => {
+    document.body.dataset.verdictFilter = button.dataset.verdictFilter;
+    document.querySelectorAll('.verdict-filter').forEach(
+      item => item.classList.toggle('on', item === button));
+    focusFirstVisible();
+    render();
+  };
+});
 document.getElementById('only-control').onclick = e => {
   /* Controls were not flagged. They are required to estimate how many fraud
      cases the detector missed, so this filter makes them directly accessible. */
@@ -941,7 +1007,7 @@ if (_hint) _hint.innerHTML = SERVER
     + '<b>__LABELS__</b>, or preferably use '
     + '<span class="mono">python -m kz.web</span>.';
 
-focusCard(0);
+focusFirstVisible();
 render();
 </script>
 """

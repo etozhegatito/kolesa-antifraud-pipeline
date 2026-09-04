@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from kz.core.db import get_engine
-from kz.report.label_cards.journal import LABELS_CSV
+from kz.report.label_cards.journal import LABELS_CSV, VERDICTS
 
 QUEUE_CSV = "data/eda/labeling_queue.csv"
 
@@ -32,6 +32,23 @@ def load_rows(include_queue: bool = True) -> pd.DataFrame:
         q = pd.read_csv(QUEUE_CSV, dtype={"ad_id": str})
         ids |= set(q["ad_id"])
         stratum = dict(zip(q["ad_id"], q["sampling_stratum"]))
+
+    # A verdict journal is durable while review queues are disposable. Include
+    # every previously reviewed listing so the Fraud/Legit/Unknown tabs can
+    # always reopen an accidental decision, even after the queue is rebuilt.
+    lab = pd.DataFrame()
+    reviewed = pd.DataFrame()
+    if Path(LABELS_CSV).exists():
+        lab = pd.read_csv(LABELS_CSV, dtype={"ad_id": str}).drop_duplicates(
+            "ad_id", keep="last"
+        )
+        reviewed = lab[lab["verdict"].isin(VERDICTS)].copy()
+        ids |= set(reviewed["ad_id"])
+        if "sampling_stratum" in reviewed.columns:
+            for aid, value in zip(reviewed["ad_id"], reviewed["sampling_stratum"]):
+                if pd.notna(value) and str(value).strip():
+                    stratum.setdefault(aid, str(value))
+
     rows = cd[cd["ad_id"].isin(ids)].copy()
     # Record the queue stratum because rule positives evaluate flag precision,
     # while random controls evaluate missed cases and recall.
@@ -59,11 +76,21 @@ def load_rows(include_queue: bool = True) -> pd.DataFrame:
         lambda v: v if isinstance(v, list) else []
     )
 
-    # Keep completed rows visible so previous decisions can be reviewed.
-    if Path(LABELS_CSV).exists():
-        lab = pd.read_csv(LABELS_CSV, dtype={"ad_id": str})
-        done = lab[lab["verdict"].isin(["fraud", "legit"])]
-        rows["existing_verdict"] = rows["ad_id"].map(dict(zip(done["ad_id"], done["verdict"])))
+    # Keep all three decisions visible. Unknown is not a final fraud/legit
+    # answer, but it must remain recoverable and reviewable from its own tab.
+    if not reviewed.empty:
+        rows["existing_verdict"] = rows["ad_id"].map(
+            dict(zip(reviewed["ad_id"], reviewed["verdict"]))
+        )
+        comments = (
+            reviewed["comment"]
+            if "comment" in reviewed.columns
+            else pd.Series("", index=reviewed.index)
+        )
+        rows["existing_comment"] = rows["ad_id"].map(
+            dict(zip(reviewed["ad_id"], comments))
+        )
     else:
         rows["existing_verdict"] = None
+        rows["existing_comment"] = None
     return rows.sort_values(["existing_verdict", "price_z"], na_position="first")

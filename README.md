@@ -226,7 +226,9 @@ Manual anomaly review lives at `/label`. Its `controls only` mode restricts
 both the visible cards and keyboard navigation, so a shortcut cannot silently
 label a hidden residual or rule candidate. The progress counter describes the
 currently visible subset; the separate journal total is the durable count
-across rebuilt queues.
+across rebuilt queues. One-click `Queue`, `Fraud`, `Legit`, `Unknown`, and
+`All` tabs reopen saved decisions and their comments even after the disposable
+candidate queue has been rebuilt.
 
 ## Computer vision status
 
