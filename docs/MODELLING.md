@@ -2,15 +2,15 @@
 
 ## Current measured quality
 
-The current artifact uses 12,455 training rows and reports:
+The current artifact uses 12,642 training rows and reports:
 
 | Evaluation | MAPE | Median APE |
 |---|---:|---:|
-| Grouped out-of-fold routed prediction | **21.36%** | **13.81%** |
-| Out-of-time routed prediction | **23.24%** | **14.82%** |
-| Grouped make/model/year baseline | 30.70% | 14.21% |
+| Grouped out-of-fold routed prediction | **21.63%** | **14.02%** |
+| Out-of-time routed prediction | **22.44%** | **14.21%** |
+| Grouped make/model/year baseline | 30.86% | 14.29% |
 
-The 95% grouped-bootstrap interval for MAPE is 20.87%–21.87%. Changes smaller
+The 95% grouped-bootstrap interval for MAPE is 21.13%–22.17%. Changes smaller
 than this sampling variation should not be described as real improvements.
 
 ## Target
@@ -31,6 +31,16 @@ price_hat = exp(y_hat)
 
 Log price reduces the dominance of very expensive vehicles and turns many
 multiplicative price relationships into additive ones.
+
+Before training, `kz.transform.price_basis` checks whether the saved number is
+actually a comparable cash price. It parses displayed monetary amounts and
+links each one to nearby wording such as customs-cleared, without customs,
+credit price, or initial payment. Negation is contextual: an unrelated word
+such as “not” and generic finance boilerplate do not change the target.
+
+Rows classified as `cash_uncleared`, `credit_price`, or `down_payment` are
+excluded. `ambiguous` rows remain eligible because detail-page enrichment is
+incomplete; treating unknown as invalid would create severe selection bias.
 
 ## Features
 
@@ -82,7 +92,7 @@ residual anomaly thresholds, and stability analysis.
 
 Grouped cross-validation estimates behavior across the observed dataset.
 Out-of-time validation asks whether a model trained on earlier listings works on
-later ones. The higher 23.24% temporal MAPE is a warning that market drift and
+later ones. The higher 22.44% temporal MAPE is a warning that market drift and
 data-history limits remain important.
 
 ## Routed inference
@@ -97,10 +107,10 @@ otherwise                    → general model
 The specialist trains on a wider band of actual prices below 8M KZT to reduce
 edge instability. The route never uses actual price during inference.
 
-On the current snapshot, routing changes overall grouped MAPE by only -0.03
-percentage points and the paired confidence interval includes zero. The
-architecture is correct, but the latest data do not support a strong claim of
-overall improvement.
+On the current snapshot, routing changes overall grouped MAPE by -0.18
+percentage points; the paired 95% interval is -0.35 to -0.01 points. This is a
+small supported grouped-CV gain, while the temporal paired interval still
+includes zero.
 
 ## Metrics
 
@@ -141,7 +151,7 @@ expensive vehicles. It complements rather than replaces MAPE.
 R² = 1 - Σ_i (z_i - z_hat_i)² / Σ_i (z_i - mean(z))²
 ```
 
-where `z = log(price)`. The current value is approximately 0.935. R-squared is
+where `z = log(price)`. The current value is approximately 0.934. R-squared is
 useful for fit diagnostics but less direct for seller-facing error.
 
 ## Confidence intervals
@@ -171,8 +181,8 @@ is not a fraud classifier.
 
 ## Where the remaining error lives
 
-Below-5M vehicles have 29.01% MAPE versus 16.07% above that threshold. The
-21+-year, below-5M intersection alone contributes about 41.1% of total
+Below-5M vehicles have 29.45% MAPE versus 16.21% above that threshold. The
+21+-year, below-5M intersection alone contributes about 41.0% of total
 percentage error. Repeated same-source data growth has reached a plateau.
 
 The modelling roadmap therefore focuses on condition evidence and coverage,

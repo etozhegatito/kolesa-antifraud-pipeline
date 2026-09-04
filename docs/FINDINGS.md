@@ -321,6 +321,37 @@ This was not a meaningful degradation. Enrichment improved anomaly evidence;
 the batch was simply too small and too sparsely covered to move global price
 accuracy.
 
+## 30. The listing number needs an explicit price-basis policy
+
+One enriched listing advertised 7.0M KZT without customs clearance, 10.9M KZT
+with customs clearance, and 11.4M KZT on credit. The saved listing target was
+7.0M. Treating a generic credit or customs keyword as a row-level flag would be
+wrong because all three meanings occur in the same description.
+
+A contextual classifier now parses amounts and associates the saved price with
+the nearest supported cue. It also handles customs negation, spelling variants,
+clause boundaries, and disagreement between structured fields and prose.
+Ordinary dealer finance boilerplate did produce false positives in the first
+draft; corpus review caught them, and credit/down-payment labels now require the
+advertised amount to be explicitly tied to the cue.
+
+On the corpus audit, 26 of 12,799 rows were classified as `cash_uncleared`; 24
+had previously been eligible for training. No current row met the
+high-confidence credit-price or down-payment rule. Ambiguous rows remain
+eligible.
+
+A controlled grouped-CV A/B on the same snapshot measured **21.7327% MAPE
+without** this filter and **21.6333% with** it, an improvement of 0.0993
+percentage points. That small change is below the model's overall bootstrap
+variation, but the target definition is more correct independently of the
+headline metric. The previous artifact's 21.3044% is not a valid A/B baseline:
+manual verdicts changed the training cohort between those runs.
+
+The same eligibility rule now governs model training, floor calibration,
+residual review, generated reports, CLI examples, and local comparable listings.
+This closed a train/report skew found when the first updated dashboard still
+reported 12,666 rows instead of the artifact's 12,642.
+
 ## Practical rules derived from these findings
 
 1. Measure on grouped OOF and out-of-time predictions, never training rows.
@@ -333,3 +364,4 @@ accuracy.
 8. Do not expand geography without redefining and validating the product.
 9. Prefer new condition evidence over more repetitions of plateaued fields.
 10. Preserve failed experiments so future work starts from evidence.
+11. Classify what a displayed price means before treating it as a regression target.

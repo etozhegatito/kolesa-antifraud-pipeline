@@ -4,9 +4,16 @@
 import numpy as np
 import pandas as pd
 
-from kz.transform.data_quality import scrub_junk_mileage
 from kz.ml.residual_detector import AGE_MAX, MIN_SUPPORT, load_floor_artifact, score_floor
-from kz.ml.train_price_model import CAT_FEATURES, FEATURES, load, load_artifact
+from kz.ml.train_price_model import (
+    CAT_FEATURES,
+    FEATURES,
+    load,
+    load_artifact,
+    prepare_training_data,
+)
+from kz.transform.data_quality import scrub_junk_mileage
+from kz.transform.price_basis import is_training_eligible
 
 OUT = "data/eda/ml_report.html"
 
@@ -118,10 +125,9 @@ def _stat(v, k):
 
 def main():
     df = load()
-    df = df[df["price_tenge"] > 0].copy()
-    df["log_price"] = np.log(df["price_tenge"])
+    df = df[df["price_tenge"].notna() & (df["price_tenge"] > 0)].copy()
     df, _ = scrub_junk_mileage(df)
-    clean = df[df["is_suspicious"] == 0]
+    clean = prepare_training_data(df)
     X = clean[FEATURES]
 
     model, metadata = load_artifact()
@@ -189,8 +195,14 @@ def main():
     dd["floor"] = np.exp(score_floor(qm, qmeta, Xall))
     sup = clean.groupby(["brand", "model"]).size()
     dd["sup"] = [int(sup.get((b, m), 0)) for b, m in zip(dd["brand"], dd["model"])]
+    eligible = dd.get("price_basis", pd.Series("ambiguous", index=dd.index)).map(
+        is_training_eligible
+    )
     dd["flag"] = (
-        (dd["price_tenge"] < dd["floor"]) & (dd["sup"] >= MIN_SUPPORT) & (dd["age"] <= AGE_MAX)
+        (dd["price_tenge"] < dd["floor"])
+        & (dd["sup"] >= MIN_SUPPORT)
+        & (dd["age"] <= AGE_MAX)
+        & eligible
     )
     dd["under"] = (dd["floor"] - dd["price_tenge"]) / dd["floor"] * 100
     susp_rows = ""

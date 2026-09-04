@@ -42,30 +42,35 @@ The target is the **first observed advertised price**, not a completed-sale
 price, dealer appraisal, repair-adjusted value, or guaranteed selling price.
 The distinction matters: negotiation and final-sale data are unavailable.
 
+The displayed number is not always the full cash price. The clean layer links
+explicit amounts to customs, credit, and down-payment context and stores the
+result as `price_basis`. Only confidently non-comparable targets are removed
+from training; conflicting or missing evidence remains `ambiguous`.
+
 A prediction range means that the calibration procedure covered approximately
 the target fraction of held-out listing prices. It does not mean that a sale is
 guaranteed inside the range.
 
 ## Current measured state
 
-The current artifact was trained on 12,455 rows from 12,639 collected Almaty
+The current artifact was trained on 12,642 rows from 12,799 collected Almaty
 listings.
 
 | Validation view | Result |
 |---|---:|
-| Grouped out-of-fold MAPE, routed model | **21.36%** |
-| Median absolute percentage error | **13.81%** |
-| Out-of-time MAPE | **23.24%** |
-| Grouped-bootstrap 95% interval for MAPE | **20.87%–21.87%** |
-| Simple make/model/year baseline MAPE | **30.70%** |
+| Grouped out-of-fold MAPE, routed model | **21.63%** |
+| Median absolute percentage error | **14.02%** |
+| Out-of-time MAPE | **22.44%** |
+| Grouped-bootstrap 95% interval for MAPE | **21.13%–22.17%** |
+| Simple make/model/year baseline MAPE | **30.86%** |
 
 The average error is not evenly distributed:
 
 | Segment | MAPE |
 |---|---:|
-| Below 5M tenge | **29.01%** |
-| 5M tenge and above | **16.07%** |
-| Vehicle age 21+ years | **29.62%** |
+| Below 5M tenge | **29.45%** |
+| 5M tenge and above | **16.21%** |
+| Vehicle age 21+ years | **29.66%** |
 
 Vehicles aged 21+ years and priced below 5M tenge create roughly 41% of the
 total percentage error. The strongest practical path is therefore better

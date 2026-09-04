@@ -95,7 +95,7 @@ project therefore reports price segments and median APE as well.
 ### Median APE
 
 Sort all row-level APE values and select the middle one. This describes the
-typical listing. The current median is 13.81%, much lower than 21.36% MAPE,
+typical listing. The current median is 14.02%, much lower than 21.63% MAPE,
 which tells us that a smaller tail of difficult rows raises the mean.
 
 ### MAE
@@ -148,7 +148,7 @@ One MAPE value is an estimate from one dataset. Grouped bootstrap repeatedly
 resamples vehicle groups and recomputes MAPE. The distribution gives a standard
 deviation and confidence interval.
 
-The current 95% interval is 20.87%–21.87%. A change from 21.40% to 21.44% is
+The current 95% interval is 21.13%–22.17%. A change of a few hundredths is
 well inside ordinary variation and should not be called degradation.
 
 ## Model logic
@@ -159,6 +159,12 @@ The model uses fields available both in training and at prediction time. The
 marketplace's own average price is excluded because it derives from the target.
 Partially enriched text/options are excluded until the estimator accepts and
 validates the same inputs.
+
+Target cleaning is separate from feature engineering. The contextual
+`price_basis` rule uses description evidence only to decide whether the saved
+number is a comparable cash target; the text itself is not passed to CatBoost.
+Explicit uncleared, credit, and down-payment amounts leave training, while
+ambiguous rows stay.
 
 ### General model and cheap specialist
 
@@ -281,12 +287,12 @@ python -m kz.report.photo_labels --stats
 
 ## Current state at a glance
 
-- 12,639 collected listings;
-- 12,455 model rows;
-- 21.36% grouped routed MAPE;
-- 13.81% median APE;
-- 23.24% out-of-time MAPE;
+- 12,799 collected listings;
+- 12,642 model rows;
+- 21.63% grouped routed MAPE;
+- 14.02% median APE;
+- 22.44% out-of-time MAPE;
 - approximately 80% interval coverage;
-- 179 anomaly candidates and 111 verdicts, with no confirmed fraud;
+- 133 anomaly candidates and 170 final verdicts, with no confirmed fraud;
 - 47 legacy damaged frames awaiting definition review;
 - read-only public demo deployed on Render Free.

@@ -17,7 +17,7 @@ from catboost import CatBoostRegressor, Pool
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GroupKFold
 
-from kz.transform import data_quality
+from kz.transform import data_quality, price_basis as price_basis_rules
 from kz.transform.data_quality import iforest_anomaly, scrub_junk_mileage
 from kz.core.db import get_engine
 
@@ -121,7 +121,10 @@ def prepare_training_data(df: pd.DataFrame) -> pd.DataFrame:
     out = df[df["price_tenge"].notna() & (df["price_tenge"] > 0)].copy()
     out, _ = scrub_junk_mileage(out)
     out["log_price"] = np.log(out["price_tenge"])
-    return out[out["is_suspicious"] == 0].copy()
+    eligible = out.get("price_basis", pd.Series("ambiguous", index=out.index)).map(
+        price_basis_rules.is_training_eligible
+    )
+    return out[(out["is_suspicious"] == 0) & eligible].copy()
 
 
 def duplicate_groups(df: pd.DataFrame) -> pd.Series:
@@ -440,7 +443,13 @@ def main():
     dq = iforest_anomaly(valid)
     print(f"Data quality: Isolation Forest queued {int(dq.sum())} rows for manual review")
 
-    clean = valid[valid["is_suspicious"] == 0].copy()
+    price_eligible = valid.get("price_basis", pd.Series("ambiguous", index=valid.index)).map(
+        price_basis_rules.is_training_eligible
+    )
+    excluded_price_basis = int((~price_eligible).sum())
+    if excluded_price_basis:
+        print(f"Target policy: excluded {excluded_price_basis} known non-comparable listing prices")
+    clean = valid[(valid["is_suspicious"] == 0) & price_eligible].copy()
     model_oof, baseline_oof, base_oof = grouped_oof_predictions(clean)
     grouped_model = regression_metrics(clean["log_price"], model_oof)
     grouped_base_model = regression_metrics(clean["log_price"], base_oof)
@@ -504,7 +513,9 @@ def main():
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
         "git_dirty": _git_dirty(),
-        "training_code_sha256": code_fingerprint(__file__, data_quality.__file__),
+        "training_code_sha256": code_fingerprint(
+            __file__, data_quality.__file__, price_basis_rules.__file__
+        ),
         "data_fingerprint_sha256": _data_fingerprint(clean),
         "training_rows": int(len(clean)),
         "routing": {
@@ -534,6 +545,8 @@ def main():
             "observation": "first_saved_listing_price",
             "later_prices_table": "sightings",
             "is_transaction_price": False,
+            "excluded_price_bases": sorted(price_basis_rules.NON_COMPARABLE_PRICE_BASES),
+            "excluded_rows": excluded_price_basis,
         },
         "validation": {
             "grouped_cv": {

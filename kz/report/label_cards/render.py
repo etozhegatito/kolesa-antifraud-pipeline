@@ -215,6 +215,7 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
         ("Colour", fmt(row.get("color")), ""),
         ("Drive · steering", f"{fmt(row.get('drive'))} · {fmt(row.get('steering'))}", ""),
         ("Customs cleared", fmt(row.get("customs_cleared")), ""),
+        ("Price basis", fmt(row.get("price_basis")), ""),
         ("Condition", fmt(row.get("page_condition")), ""),
         ("VIN evidence", fmt(row.get("has_vin")), ""),
         (

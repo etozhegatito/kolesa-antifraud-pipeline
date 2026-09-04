@@ -13,6 +13,7 @@ from kz.ml.train_price_model import (
     coerce_features,
     load,
     load_artifact,
+    prepare_training_data,
 )
 
 CY = date.today().year
@@ -50,8 +51,7 @@ def main():
             f"(test={temporal['test_rows']})"
         )
 
-    df = load()
-    clean = df[(df["price_tenge"] > 0) & (df["is_suspicious"] == 0)]
+    clean = prepare_training_data(load())
     car = clean.sample(1).iloc[0]
     p = estimate(
         m,

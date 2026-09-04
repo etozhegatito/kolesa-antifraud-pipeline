@@ -28,6 +28,7 @@ OUT_CSV = "data/clean/clean_data.csv"
 
 
 from kz.transform.damage import DAMAGE_PATTERNS, has_damage as _has_damage  # noqa: F401
+from kz.transform.price_basis import classify_price_basis
 
 CURRENT_YEAR = date.today().year
 
@@ -368,6 +369,11 @@ def main():
     df["text_full"] = df.get("seller_comment", pd.Series(index=df.index, dtype="object")).fillna(
         df["description"]
     )
+    customs = df.get("customs_cleared", pd.Series(index=df.index, dtype="object"))
+    df["price_basis"] = [
+        classify_price_basis(text, clearance, price)
+        for text, clearance, price in zip(df["text_full"], customs, df["price_tenge"])
+    ]
 
     if Path(LABELS_CSV).exists():
         lab = pd.read_csv(LABELS_CSV, dtype={"ad_id": str}).drop_duplicates("ad_id", keep="last")

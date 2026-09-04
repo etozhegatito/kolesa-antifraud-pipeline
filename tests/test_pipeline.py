@@ -131,6 +131,110 @@ def test_real_damage_still_detected():
     assert "без матора" in kws and "без коробки" in kws
 
 
+def test_price_basis_links_the_listing_price_to_the_nearest_cue():
+    """Multiple displayed prices must not be collapsed into one vague keyword hit."""
+    from kz.transform.price_basis import classify_price_basis
+
+    text = "Цена: без растаможки — 7 000 000; с растаможкой — 10 900 000; в кредит — 11 400 000."
+    assert classify_price_basis(text, "Нет", 7_000_000) == "cash_uncleared"
+    assert classify_price_basis(text, "Нет", 10_900_000) == "cash_customs_cleared"
+    assert classify_price_basis(text, "Нет", 11_400_000) == "credit_price"
+
+
+def test_price_basis_uses_contextual_negation_not_any_ne():
+    """Unrelated negation and dealer boilerplate must not reject a cash price."""
+    from kz.transform.price_basis import classify_price_basis
+
+    assert (
+        classify_price_basis("Не требует вложений. Кредит не интересует.", "Да", 7_000_000)
+        == "cash_customs_cleared"
+    )
+    assert classify_price_basis("Автомобиль не растаможен", None, 7_000_000) == "cash_uncleared"
+    assert classify_price_basis("Автомобиль не  растоможен", None, 7_000_000) == ("cash_uncleared")
+    assert classify_price_basis("Растаможка не оплачена", None, 7_000_000) == ("cash_uncleared")
+    assert (
+        classify_price_basis("Кредит до 7 лет, первый взнос от 10%.", "Да", 7_000_000)
+        == "cash_customs_cleared"
+    )
+
+
+def test_price_basis_recognises_a_real_down_payment_amount():
+    """A down payment is rejected only when it matches the saved listing price."""
+    from kz.transform.price_basis import classify_price_basis
+
+    text = "Полная цена 8 500 000, первоначальный взнос 1 500 000 тенге."
+    assert classify_price_basis(text, "Да", 1_500_000) == "down_payment"
+    assert classify_price_basis(text, "Да", 8_500_000) == "cash_customs_cleared"
+
+
+def test_price_basis_ignores_finance_terms_in_a_later_clause():
+    """Dealer finance boilerplate after a cash price must not relabel that price."""
+    from kz.transform.price_basis import classify_price_basis
+
+    down_payment_offer = "По супер цене от 7 590 000 т. Первоначальный взнос от 10%."
+    credit_offer = "Цена от 9 990 000 тг · в кредит с первоначальным взносом от 474 500 тг."
+    assert classify_price_basis(down_payment_offer, "Да", 7_590_000) == ("cash_customs_cleared")
+    assert classify_price_basis(credit_offer, "Да", 9_990_000) == ("cash_customs_cleared")
+
+
+def test_price_basis_marks_conflicting_customs_evidence_ambiguous():
+    """A structured customs value must not silently override contradictory prose."""
+    from kz.transform.price_basis import classify_price_basis
+
+    text = "Цена с учетом доставки и растаможки."
+    assert classify_price_basis(text, "Нет", 12_000_000) == "ambiguous"
+    typo = "Расстаможка, НДС оплачен. Остались утильсбор и регистрация."
+    assert classify_price_basis(typo, "Нет", 9_900_000) == "ambiguous"
+
+
+def test_price_training_rejects_only_known_non_comparable_targets():
+    """Unknown price bases stay usable while explicit traps leave training."""
+    import pandas as pd
+
+    from kz.ml.train_price_model import prepare_training_data
+
+    frame = pd.DataFrame(
+        {
+            "price_tenge": [7_000_000, 11_400_000, 1_500_000, 9_000_000, 8_000_000],
+            "mileage_km": [10_000] * 5,
+            "is_suspicious": [0] * 5,
+            "price_basis": [
+                "cash_uncleared",
+                "credit_price",
+                "down_payment",
+                "ambiguous",
+                "cash_customs_cleared",
+            ],
+        }
+    )
+
+    result = prepare_training_data(frame)
+    assert result["price_basis"].tolist() == [
+        "ambiguous",
+        "cash_customs_cleared",
+    ]
+
+
+def test_price_basis_policy_is_shared_by_downstream_consumers():
+    """Reports, floor calibration, and examples must use the training cohort."""
+    from pathlib import Path
+
+    for path in [
+        "kz/ml/predict_price.py",
+        "kz/ml/residual_detector.py",
+        "kz/report/ml_dashboard.py",
+        "kz/report/ml_report.py",
+    ]:
+        source = Path(path).read_text(encoding="utf-8")
+        assert "prepare_training_data" in source, path
+
+    explore = Path("kz/report/explore.py").read_text(encoding="utf-8")
+    assert "is_training_eligible" in explore
+
+    service = Path("kz/web/service.py").read_text(encoding="utf-8")
+    assert service.count("COALESCE(price_basis, 'ambiguous') NOT IN") == 2
+
+
 def test_damage_disclosed_rust_and_gearbox():
     """Regression coverage for `test_damage_disclosed_rust_and_gearbox`."""
     from kz.transform.damage import has_damage

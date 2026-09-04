@@ -85,6 +85,8 @@ avoids long retries against retired CDN hosts. Image traffic has its own budget.
 - numeric and categorical normalization;
 - missingness indicators;
 - impossible-value checks;
+- contextual `price_basis` classification for customs, credit, and down-payment
+  terms;
 - relist grouping without using price;
 - rule-based anomaly signals;
 - exculpation for disclosed damage or other valid low-price reasons;
@@ -92,6 +94,12 @@ avoids long retries against retired CDN hosts. Image traffic has its own budget.
 
 The clean layer is disposable. Raw, enriched, status, and manual-label layers
 are durable.
+
+`price_basis` is deliberately high precision. The classifier associates the
+saved price with the nearest labelled amount, handles customs negation and
+common spelling variants, and returns `ambiguous` when structured and textual
+evidence conflict. Training rejects only known non-comparable bases; uncertainty
+is not treated as proof that a row is invalid.
 
 ## Modelling layer
 

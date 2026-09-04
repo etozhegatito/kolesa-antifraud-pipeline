@@ -143,17 +143,23 @@ def export_labeling_queue(df: pd.DataFrame):
             score_floor,
         )
         from kz.ml.train_price_model import FEATURES
+        from kz.transform.price_basis import is_training_eligible
 
         model, metadata = load_floor_artifact()
         floor = score_floor(model, metadata, work[FEATURES])
         work["residual_gap"] = floor - np.log(work["price_tenge"])
-        clean = work[work["is_suspicious"] == 0]
+        eligible = work.get("price_basis", pd.Series("ambiguous", index=work.index)).map(
+            is_training_eligible
+        )
+        clean = work[(work["is_suspicious"] == 0) & eligible]
         support = clean.groupby(["brand", "model"]).size()
         sup = pd.Series(
             [int(support.get((b, m), 0)) for b, m in zip(work["brand"], work["model"])],
             index=work.index,
         )
-        residual_mask = work["residual_gap"].gt(0) & sup.ge(MIN_SUPPORT) & work["age"].le(AGE_MAX)
+        residual_mask = (
+            work["residual_gap"].gt(0) & sup.ge(MIN_SUPPORT) & work["age"].le(AGE_MAX) & eligible
+        )
     except FileNotFoundError:
         pass
 
@@ -172,7 +178,13 @@ def export_labeling_queue(df: pd.DataFrame):
         "residual_gap",
         "suspicion_reasons",
     ]
-    for extra in ["customs_cleared", "steering", "damage_keywords", "seller_comment"]:
+    for extra in [
+        "price_basis",
+        "customs_cleared",
+        "steering",
+        "damage_keywords",
+        "seller_comment",
+    ]:
         if extra in q.columns:
             cols.append(extra)
     q = q[cols]

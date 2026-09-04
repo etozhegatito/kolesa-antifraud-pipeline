@@ -18,11 +18,11 @@ market-anomaly review, and experimental visual-condition analysis.
 |---|---|
 | What problem does it solve? | Estimates a fair *listing* price for a used car in Almaty and sends unusually low listings to human review. |
 | What is deployed? | A read-only estimator backed by two trained CatBoost models. It does not need the source database for inference. |
-| How much data? | 12,639 collected listings; 12,455 rows used by the current model. |
-| Main result | **21.36% grouped out-of-fold MAPE**, 13.81% median APE, 23.24% out-of-time MAPE. |
-| Where is the remaining error? | Cars below ₸5M: 29.01% MAPE and 55.5% of total percentage error. Cars at ₸5M+: 16.07% MAPE. |
+| How much data? | 12,799 collected listings; 12,642 rows used by the current model. |
+| Main result | **21.63% grouped out-of-fold MAPE**, 14.02% median APE, 22.44% out-of-time MAPE. |
+| Where is the remaining error? | Cars below ₸5M: 29.45% MAPE and 55.7% of total percentage error. Cars at ₸5M+: 16.21% MAPE. |
 | Is computer vision in production? | No. Earlier supervised CV results were withdrawn after label-definition drift was found. The live price estimate does not claim to inspect photos. |
-| Engineering quality | 255 offline tests plus 6 PostgreSQL integration tests, Ruff, Docker health smoke, and GitHub Actions. |
+| Engineering quality | 262 offline tests plus 6 PostgreSQL integration tests, Ruff, Docker health smoke, and GitHub Actions. |
 
 The free demo can sleep after inactivity. Its first request may therefore take
 about a minute; later requests are fast.
@@ -90,29 +90,29 @@ validation MAPE, and whether public-demo safeguards are active.
 
 ## Current measured results
 
-These numbers come from the model trained on 3 September 2026. They are based
+These numbers come from the model trained on 4 September 2026. They are based
 on saved out-of-fold predictions, not predictions on training rows.
 
 | Validation view | MAPE | Median APE | Notes |
 |---|---:|---:|---|
-| Grouped OOF, routed model | **21.36%** | **13.81%** | Primary model-selection estimate |
-| Grouped OOF, general model only | 21.38% | 13.94% | Routing changes little on this snapshot |
-| Grouped OOF, simple baseline | 30.70% | 14.21% | Median by make + model + year |
-| Out-of-time, routed model | **23.24%** | 14.82% | Later listings held out by time |
-| Out-of-time, baseline | 35.01% | 15.25% | Same temporal holdout |
+| Grouped OOF, routed model | **21.63%** | **14.02%** | Primary model-selection estimate |
+| Grouped OOF, general model only | 21.81% | 14.10% | General model before specialist routing |
+| Grouped OOF, simple baseline | 30.86% | 14.29% | Median by make + model + year |
+| Out-of-time, routed model | **22.44%** | 14.21% | Later listings held out by time |
+| Out-of-time, baseline | 34.28% | 14.89% | Same temporal holdout |
 
 The routed model's grouped MAPE has a 95% grouped-bootstrap interval of
-**20.87%–21.87%**. Its improvement over the general model is only -0.03
-percentage points, and the paired confidence interval crosses zero. The
-specialist remains a researched production route, but the current snapshot
-does not justify claiming a meaningful overall win.
+**21.13%–22.17%**. Its improvement over the general model is -0.18 percentage
+points, with a paired 95% interval of **-0.35 to -0.01** points. That is a
+small grouped-CV win; the out-of-time paired interval still crosses zero, so
+the evidence is promising rather than final.
 
 ### Error by price
 
 | Actual listing price | Rows | MAPE | Share of total percentage error |
 |---|---:|---:|---:|
-| Below ₸5M | 5,089 | **29.01%** | **55.5%** |
-| ₸5M and above | 7,366 | **16.07%** | 44.5% |
+| Below ₸5M | 5,176 | **29.45%** | **55.7%** |
+| ₸5M and above | 7,466 | **16.21%** | 44.3% |
 
 The 18% overall MAPE target is a research gate, not a promise. If the stronger
 segment remains unchanged, the below-₸5M segment must improve to roughly
@@ -124,13 +124,13 @@ inexpensive cars.
 
 | Vehicle age | Rows | MAPE |
 |---|---:|---:|
-| 0–5 years | 3,350 | 16.72% |
-| 6–10 years | 1,581 | 15.74% |
-| 11–20 years | 3,353 | 18.37% |
-| 21+ years | 4,171 | **29.62%** |
+| 0–5 years | 3,381 | 17.18% |
+| 6–10 years | 1,600 | 15.45% |
+| 11–20 years | 3,408 | 18.94% |
+| 21+ years | 4,253 | **29.66%** |
 
-The sharpest intersection is **21+ years and below ₸5M**: 3,518 rows, 31.05%
-MAPE, and 41.1% of all percentage error. The roadmap therefore prioritizes
+The sharpest intersection is **21+ years and below ₸5M**: 3,588 rows, 31.22%
+MAPE, and 41.0% of all percentage error. The roadmap therefore prioritizes
 condition evidence instead of treating every car older than five years as a
 single difficult class.
 
@@ -174,6 +174,13 @@ The model learns `log(first observed listing price in KZT)`. The logarithm
 reduces the dominance of very expensive vehicles and turns many multiplicative
 price relationships into easier additive relationships. Predictions are
 transformed back to tenge for the user.
+
+A deterministic `price_basis` classifier first checks what that displayed
+number means. It links an amount to nearby customs, credit, or down-payment
+wording; a credit keyword elsewhere in the description is not enough. Known
+uncleared-cash, credit-price, and down-payment targets are excluded from model
+training, while `ambiguous` rows stay in the data so missing enrichment does not
+silently erase most of the market.
 
 The deployed models use 13 features:
 

@@ -10,6 +10,7 @@
 | R-squared | Fraction of variance explained relative to predicting the mean; calculated here in log-price space. |
 | Baseline | A simple make/model/year reference used to prove that the ML model adds value. |
 | Target | The value being predicted: first observed advertised price in KZT. |
+| Price basis | What the displayed number represents: customs-cleared cash, uncleared cash, credit price, down payment, or ambiguous. |
 | Feature | An input variable available to the model at training and inference. |
 | Leakage | Information that would not legitimately be available at prediction time or crosses a validation boundary. |
 | Train/serve skew | A mismatch between fields available during training and those supplied in production. |

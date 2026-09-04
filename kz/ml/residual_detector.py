@@ -25,7 +25,9 @@ from kz.ml.train_price_model import (
     duplicate_groups,
     load,
     new_model,
+    prepare_training_data,
 )
+from kz.transform.price_basis import is_training_eligible
 
 ALPHA = 0.10
 MIN_SUPPORT = 8
@@ -115,7 +117,7 @@ def main():
     df = df[df["price_tenge"].notna() & (df["price_tenge"] > 0)].copy()
     df, _ = scrub_junk_mileage(df)
     df["log_price"] = np.log(df["price_tenge"])
-    clean = df[df["is_suspicious"] == 0].copy().reset_index()
+    clean = prepare_training_data(df).reset_index()
 
     model, offset, oof_floor = fit_calibrated_floor(clean)
     frac_below = float((clean["log_price"].to_numpy() < oof_floor).mean())
@@ -140,8 +142,15 @@ def main():
         .fillna("")
         .str.contains("low_price_explained")
     )
+    eligible = df.get("price_basis", pd.Series("ambiguous", index=df.index)).map(
+        is_training_eligible
+    )
     df["flag"] = (
-        df["below_floor"] & (df["support"] >= MIN_SUPPORT) & (df["age"] <= AGE_MAX) & ~explained
+        df["below_floor"]
+        & (df["support"] >= MIN_SUPPORT)
+        & (df["age"] <= AGE_MAX)
+        & ~explained
+        & eligible
     )
 
     metadata = {

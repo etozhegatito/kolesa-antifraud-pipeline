@@ -13,10 +13,12 @@ price, or guarantee that a vehicle will sell inside the displayed range.
 ## Data
 
 - Source market: kolesa.kz listings scoped to Almaty.
-- Collected listings: 12,639.
-- Rows used by the current trained artifact: 12,455.
+- Collected listings: 12,799.
+- Rows used by the current trained artifact: 12,642.
 - Target: first observed listing price in KZT.
-- Training timestamp: 3 September 2026.
+- Target cleaning: explicit uncleared-cash, credit-price, and down-payment
+  amounts are excluded; ambiguous rows are retained.
+- Training timestamp: 4 September 2026.
 - Raw listings, seller descriptions, photos, and manual labels are private and
   are not included in the public repository.
 
@@ -47,39 +49,39 @@ artifact because coverage and train/serve parity are not yet sufficient.
 
 ## Validation results
 
-Measured on the 3 September 2026 artifact:
+Measured on the 4 September 2026 artifact:
 
 | Validation view | MAPE | Median APE | R-squared on log price |
 |---|---:|---:|---:|
-| Grouped OOF, routed | **21.36%** | **13.81%** | **0.935** |
-| Grouped OOF, general only | 21.38% | 13.94% | — |
-| Grouped OOF, make/model/year baseline | 30.70% | 14.21% | — |
-| Out-of-time, routed | **23.24%** | 14.82% | — |
-| Out-of-time, baseline | 35.01% | 15.25% | — |
+| Grouped OOF, routed | **21.63%** | **14.02%** | **0.934** |
+| Grouped OOF, general only | 21.81% | 14.10% | 0.934 |
+| Grouped OOF, make/model/year baseline | 30.86% | 14.29% | 0.851 |
+| Out-of-time, routed | **22.44%** | 14.21% | 0.929 |
+| Out-of-time, baseline | 34.28% | 14.89% | 0.841 |
 
 Grouped bootstrap for routed MAPE:
 
-- standard deviation: about 0.25 percentage points;
-- 95% interval: **20.87%–21.87%**.
+- standard deviation: about 0.26 percentage points;
+- 95% interval: **21.13%–22.17%**.
 
-The routed model improves grouped MAPE over the general model by only 0.03
-percentage points on this snapshot, and the paired confidence interval crosses
-zero. Routing is operationally supported, but the current result does not prove
-a meaningful overall gain.
+The routed model improves grouped MAPE over the general model by 0.18 percentage
+points on this snapshot. Its paired 95% interval is -0.35 to -0.01 points, so
+the grouped result narrowly supports routing. The out-of-time interval still
+crosses zero and prevents a stronger generalization claim.
 
 ## Segment behavior
 
 | Segment | Rows | MAPE |
 |---|---:|---:|
-| Price below 5M tenge | 5,089 | **29.01%** |
-| Price at least 5M tenge | 7,366 | **16.07%** |
-| Age 0–5 years | 3,350 | 16.72% |
-| Age 6–10 years | 1,581 | 15.74% |
-| Age 11–20 years | 3,353 | 18.37% |
-| Age 21+ years | 4,171 | **29.62%** |
+| Price below 5M tenge | 5,176 | **29.45%** |
+| Price at least 5M tenge | 7,466 | **16.21%** |
+| Age 0–5 years | 3,381 | 17.18% |
+| Age 6–10 years | 1,600 | 15.45% |
+| Age 11–20 years | 3,408 | 18.94% |
+| Age 21+ years | 4,253 | **29.66%** |
 
-The intersection age 21+ and price below 5M contains 3,518 rows, has 31.05%
-MAPE, and creates approximately 41.1% of all percentage error. Performance
+The intersection age 21+ and price below 5M contains 3,588 rows, has 31.22%
+MAPE, and creates approximately 41.0% of all percentage error. Performance
 claims should therefore always include segment metrics.
 
 ## Prediction intervals
@@ -95,6 +97,8 @@ that one particular final transaction occurs inside the range.
 ## Known limitations
 
 - The target is advertised price, not transaction price.
+- Price-basis classification is rule-based and intentionally conservative;
+  ambiguous wording is not automatically discarded.
 - Training covers one city and should not be presented as a national model.
 - Older inexpensive vehicles have much higher error.
 - Detail-page text/options cover only a minority of rows.

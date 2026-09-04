@@ -161,6 +161,8 @@ def similar_cars(car: dict, limit: int = 5) -> pd.DataFrame:
     q = """SELECT ad_id, brand, model, year, price_tenge, mileage_km, age
            FROM clean_data
            WHERE brand = %(b)s AND model = %(m)s AND is_suspicious = 0
+             AND COALESCE(price_basis, 'ambiguous') NOT IN
+                 ('cash_uncleared', 'credit_price', 'down_payment')
              AND price_tenge > 0 AND ABS(age - %(a)s) <= 2
            ORDER BY ABS(age - %(a)s), price_tenge"""
     df = query(q, {"b": brand, "m": model_name, "a": int(age)})
@@ -184,6 +186,8 @@ def price_position(car: dict, asking_price: float | None) -> dict | None:
         return None
     q = """SELECT price_tenge FROM clean_data
            WHERE brand = %(b)s AND model = %(m)s AND is_suspicious = 0
+             AND COALESCE(price_basis, 'ambiguous') NOT IN
+                 ('cash_uncleared', 'credit_price', 'down_payment')
              AND price_tenge > 0 AND ABS(age - %(a)s) <= 2"""
     prices = query(q, {"b": brand, "m": model_name, "a": int(age)})
     if prices is None or len(prices) < MIN_SIMILAR:

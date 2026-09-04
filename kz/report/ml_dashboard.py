@@ -8,8 +8,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from kz.transform.data_quality import scrub_junk_mileage
-from kz.ml.train_price_model import FEATURES, grouped_oof_predictions, load, load_artifact
+from kz.ml.train_price_model import (
+    FEATURES,
+    grouped_oof_predictions,
+    load,
+    load_artifact,
+    prepare_training_data,
+)
 
 OUT_PNG = "data/eda/ml_dashboard.png"
 AGE_ORDER = ["0-3", "4-7", "8-12", "13-20", "21+"]
@@ -33,11 +38,7 @@ C_OK, C_BAD, C_ACC = "#4fa3ff", "#ff5d5d", "#ffd166"
 
 
 def main():
-    df = load()
-    df = df[df["price_tenge"].notna() & (df["price_tenge"] > 0)]
-    df["log_price"] = np.log(df["price_tenge"])
-    df, _ = scrub_junk_mileage(df)
-    clean = df[df["is_suspicious"] == 0].reset_index(drop=True)
+    clean = prepare_training_data(load()).reset_index(drop=True)
     X, y = clean[FEATURES], clean["log_price"]
 
     oof, baseline_oof, _base_oof = grouped_oof_predictions(clean)

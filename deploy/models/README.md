@@ -9,8 +9,10 @@ the read-only price demo:
 - `price_model.metadata.json` — features, routing contract, provenance hashes,
   target policy, and validation metrics.
 
-The artifacts were trained on 12,455 rows and created on 3 September 2026.
-Their primary grouped out-of-fold MAPE is 21.36%.
+The artifacts were trained on 12,642 rows and created on 4 September 2026.
+Their primary grouped out-of-fold MAPE is 21.63%. The target policy excludes
+known uncleared-cash, credit-price, and down-payment amounts while retaining
+ambiguous rows.
 
 No source listing, seller description, image, URL, manual verdict, damage
 label, contact detail, or database credential is stored here. CatBoost `.cbm`
