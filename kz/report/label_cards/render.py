@@ -639,7 +639,7 @@ body.only-control .card:not([data-stratum="random_control"]){display:none}
   <div class="topin">
     <h1>Market anomaly review</h1>
     __HOME__
-    <span class="count"><b id="cnt">0</b> of __N__ in this queue</span>
+    <span class="count"><b id="cnt">0</b> labelled of <b id="scope-total">__N__</b> visible</span>
     <span class="count total-note" title="including previous queues and unknown verdicts">journal total: <b>__JOURNAL__</b></span>
     <span class="count" id="restored"></span>
     <span class="mode __MODECLS__">__MODE__</span>
@@ -700,6 +700,10 @@ const ALREADY = new Set(cards.filter(c => c.querySelector('.done-note'))
 const picks = new Map();
 let cur = 0;
 
+function visibleCards(){
+  return cards.filter(card => getComputedStyle(card).display !== 'none');
+}
+
 /* Escape quotes and newlines according to CSV rules so punctuation in a
    comment cannot shift journal columns. */
 function esc(s){ return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
@@ -712,11 +716,14 @@ function render(){
   document.getElementById('out').value = lines.join('\n');
   /* Show the total of existing journal rows and new selections. Counting only
      the browser draft made completed work appear lost on another origin. */
-  const fresh = [...picks.keys()].filter(id => !ALREADY.has(id)).length;
-  document.getElementById('cnt').textContent = ALREADY.size + fresh;
+  const scope = visibleCards();
+  const completed = scope.filter(card =>
+    ALREADY.has(card.dataset.id) || picks.has(card.dataset.id)).length;
+  document.getElementById('cnt').textContent = completed;
+  document.getElementById('scope-total').textContent = scope.length;
   document.getElementById('cnt2').textContent = picks.size;
   document.getElementById('bar').style.width =
-    (cards.length ? picks.size / cards.length * 100 : 0) + '%';
+    (scope.length ? completed / scope.length * 100 : 0) + '%';
 }
 
 /* A selection has three representations with different purposes: the current
@@ -765,6 +772,20 @@ function focusCard(i){
   cur = Math.max(0, Math.min(cards.length - 1, i));
   cards.forEach((c, j) => c.classList.toggle('cur', j === cur));
   cards[cur].scrollIntoView({block: 'start', behavior: 'smooth'});
+}
+
+function focusFirstVisible(){
+  const i = cards.findIndex(card => getComputedStyle(card).display !== 'none');
+  if (i >= 0) focusCard(i);
+}
+
+function stepVisible(direction){
+  for (let i = cur + direction; i >= 0 && i < cards.length; i += direction){
+    if (getComputedStyle(cards[i]).display !== 'none'){
+      focusCard(i);
+      return;
+    }
+  }
 }
 
 /* Galleries */
@@ -819,10 +840,11 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const card = cards[cur];
+  const card = cards[cur] && getComputedStyle(cards[cur]).display !== 'none'
+    ? cards[cur] : null;
   const k = e.key.toLowerCase();
-  if (k === 'j') focusCard(cur + 1);
-  else if (k === 'k') focusCard(cur - 1);
+  if (k === 'j') stepVisible(1);
+  else if (k === 'k') stepVisible(-1);
   else if (k === 'f') setVerdict(card, 'fraud');
   else if (k === 'l') setVerdict(card, 'legit');
   else if (k === 'u') setVerdict(card, 'unknown');
@@ -867,6 +889,8 @@ document.getElementById('filter').onclick = e => {
   const on = document.body.classList.contains('hide-done');
   e.target.classList.toggle('on', on);
   e.target.textContent = on ? 'show all' : 'hide labelled';
+  focusFirstVisible();
+  render();
 };
 document.getElementById('only-control').onclick = e => {
   /* Controls were not flagged. They are required to estimate how many fraud
@@ -875,7 +899,8 @@ document.getElementById('only-control').onclick = e => {
   const on = document.body.classList.contains('only-control');
   e.target.classList.toggle('on', on);
   e.target.textContent = on ? 'show all' : 'controls only';
-  focusCard(0);
+  focusFirstVisible();
+  render();
 };
 document.getElementById('theme').onclick = () => {
   const root = document.documentElement;

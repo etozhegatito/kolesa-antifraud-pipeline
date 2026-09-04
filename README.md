@@ -222,6 +222,12 @@ residuals. The anomaly layer creates a review queue; it does not declare that a
 seller is fraudulent. A visibly damaged car at an honest low price is a
 legitimate listing, not fraud.
 
+Manual anomaly review lives at `/label`. Its `controls only` mode restricts
+both the visible cards and keyboard navigation, so a shortcut cannot silently
+label a hidden residual or rule candidate. The progress counter describes the
+currently visible subset; the separate journal total is the durable count
+across rebuilt queues.
+
 ## Computer vision status
 
 Computer vision is **experimental and not deployed**. The repository contains

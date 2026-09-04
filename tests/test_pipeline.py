@@ -2857,6 +2857,17 @@ def test_label_cards_can_filter_control_group():
     assert 'not([data-stratum="random_control"])' in src
 
 
+def test_label_cards_keyboard_navigation_respects_active_filters():
+    """Hidden cards must never receive a keyboard verdict."""
+    src = _label_cards_source()
+    assert "function visibleCards()" in src
+    assert "function stepVisible(direction)" in src
+    assert "stepVisible(1)" in src
+    assert "stepVisible(-1)" in src
+    assert "getComputedStyle(cards[cur]).display !== 'none'" in src
+    assert src.count("focusFirstVisible();") >= 2
+
+
 def test_photo_src_prefers_local_and_drops_dead_hosts():
     """Regression coverage for `test_photo_src_prefers_local_and_drops_dead_hosts`."""
     from kz.report.label_cards import DEAD_HOSTS, photo_src
@@ -2887,7 +2898,8 @@ def test_counter_reflects_journal_not_just_draft():
     """Regression coverage for `test_counter_reflects_journal_not_just_draft`."""
     src = _label_cards_source()
     assert "ALREADY" in src
-    assert "ALREADY.size" in src
+    assert "ALREADY.has(card.dataset.id)" in src
+    assert "const scope = visibleCards()" in src
 
 
 def test_web_coerces_numeric_fields_from_forms():
