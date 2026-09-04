@@ -2124,6 +2124,8 @@ def test_unified_verdict_endpoint_only_accepts_shown_ads(monkeypatch):
     )
     assert good.status_code == 200 and len(saved) == 1
     assert bad.status_code == 400 and len(saved) == 1
+    assert web._cards_html is None
+    assert web._cards_facts == {"111": {"title": "Audi 80", "year": 1994}}
 
 
 def test_file_mode_page_cannot_write_journal():

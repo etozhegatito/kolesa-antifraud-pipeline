@@ -252,9 +252,14 @@ def label_page():
 @app.post("/verdict")
 async def save_verdict(request: Request):
     """Save an annotator verdict; this is the journal's only HTTP write path."""
+    global _cards_html
     if PUBLIC_DEMO:
         return JSONResponse({"error": "not found"}, status_code=404)
-    _cards()  # ensure the facts cache is populated
+    # Facts validate that the browser can mutate only a card served by this
+    # process. They remain reusable between clicks; rebuilding the full page
+    # before every verdict would repeatedly query the database and photos.
+    if not _cards_facts:
+        _cards()
     data = await request.json()
     ad_id = str(data.get("ad_id", ""))
     try:
@@ -265,6 +270,9 @@ async def save_verdict(request: Request):
         )
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": _html.escape(str(e))}, status_code=400)
+    # The next GET must reflect the durable journal. Keep facts warm so a batch
+    # of keyboard labels stays fast, but discard the rendered HTML snapshot.
+    _cards_html = None
     return JSONResponse({"ok": True})
 
 
