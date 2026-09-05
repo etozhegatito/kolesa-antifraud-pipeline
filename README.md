@@ -22,7 +22,7 @@ market-anomaly review, and experimental visual-condition analysis.
 | Main result | **21.63% grouped out-of-fold MAPE**, 14.02% median APE, 22.44% out-of-time MAPE. |
 | Where is the remaining error? | Cars below ₸5M: 29.45% MAPE and 55.7% of total percentage error. Cars at ₸5M+: 16.21% MAPE. |
 | Is computer vision in production? | No. Earlier supervised CV results were withdrawn after label-definition drift was found. The live price estimate does not claim to inspect photos. |
-| Engineering quality | 262 offline tests plus 6 PostgreSQL integration tests, Ruff, Docker health smoke, and GitHub Actions. |
+| Engineering quality | 270 offline tests plus 6 PostgreSQL integration tests, Ruff, Docker health smoke, and GitHub Actions. |
 
 The free demo can sleep after inactivity. Its first request may therefore take
 about a minute; later requests are fast.
@@ -230,6 +230,20 @@ across rebuilt queues. One-click `Queue`, `Fraud`, `Legit`, `Unknown`, and
 `All` tabs reopen saved decisions and their comments even after the disposable
 candidate queue has been rebuilt.
 
+The local `/price-review` page is a separate, deliberately blinded diagnostic
+for the below-₸5M segment. Its first pilot is fixed at 50 listings: 30 old
+vehicles with large grouped-OOF errors, 10 random inexpensive controls, and 10
+random audit listings selected before error ranking. This audit is random
+within the already-downloaded-photo pool, not yet representative of every
+cheap listing. Each card requires at least three already-downloaded viewpoints
+and asks for three independent facts: overall vehicle
+state, what the advertised amount means, and whether the evidence came from
+text, photos, both, or neither. OOF predictions are not sent to the browser, so
+they cannot anchor the annotator. These labels do not enter price training
+directly; they first identify which scalable text or CV feature is worth
+building. The current frame can be opened in the precise bounding-box tool
+without leaving the listing workflow conceptually.
+
 ## Computer vision status
 
 Computer vision is **experimental and not deployed**. The repository contains
@@ -247,11 +261,13 @@ price inference.
 The next valid CV milestone is:
 
 1. finish visual review under one written label policy;
-2. collect 150–200 independent positive ads, not merely frames;
-3. preserve a random audit split before active-learning ranking;
-4. group by ad and exact-photo duplicate components;
-5. beat the age+price baseline with a positive lower bound for paired bootstrap delta AUC;
-6. only then test whether a condition score improves price MAPE.
+2. use the fixed below-₸5M pilot to separate text evidence from photo evidence;
+3. pretrain a detector on a licensed external damage dataset without publishing it;
+4. fine-tune on local boxes and collect 150–200 independent positive ads, not merely frames;
+5. preserve a random audit split before active-learning ranking;
+6. group by ad and exact-photo duplicate components;
+7. beat the age+price baseline with a positive lower bound for paired bootstrap delta AUC;
+8. only then test whether an automated condition score improves price MAPE.
 
 ## Repository map
 
@@ -289,7 +305,8 @@ python -m kz.web
 ```
 
 Open `http://127.0.0.1:8000`. The local app contains the estimator plus the
-protected labeling workflows. The public deployment exposes only estimation.
+protected `/label`, `/price-review`, and `/damage` workflows. The public
+deployment exposes only estimation.
 
 The usual workflow is:
 

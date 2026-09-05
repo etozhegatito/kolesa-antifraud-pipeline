@@ -2436,6 +2436,8 @@ def test_web_app_routes_exist():
         "/verdict",
         "/damage",
         "/damage/label",
+        "/price-review",
+        "/price-review/label",
         "/api/health",
     ):
         assert p in paths, p
@@ -3964,6 +3966,157 @@ def test_damage_routes_are_closed_in_public_mode():
     src = Path("kz/web/app.py").read_text(encoding="utf-8")
     damage = src[src.index("def damage_page") : src.index("def label_page")]
     assert damage.count("if PUBLIC_DEMO:") >= 2, "закрыты обе точки: показ и запись"
+
+
+def test_price_review_journal_is_validated_atomic_and_recoverable(tmp_path, monkeypatch):
+    """A correction updates one row and preserves a recovery snapshot."""
+    from kz.report import price_review as review
+
+    journal = tmp_path / "price_review.csv"
+    previous = tmp_path / "price_review.prev.csv"
+    monkeypatch.setattr(review, "LABELS_CSV", str(journal))
+    monkeypatch.setattr(review, "LABELS_PREV", str(previous))
+    monkeypatch.setattr(review, "_snapshot_done", False)
+
+    review.save_review(
+        "123",
+        "cosmetic",
+        "comparable_cash",
+        "photos",
+        selection_source="random_cheap_control",
+        dataset_split="discovery",
+    )
+    assert not previous.exists()  # no old journal existed before the first write
+
+    monkeypatch.setattr(review, "_snapshot_done", False)
+    review.save_review(
+        "123",
+        "repair_needed",
+        "comparable_cash",
+        "both",
+        comment="dent is disclosed and visible",
+        selection_source="random_cheap_control",
+        dataset_split="discovery",
+    )
+    _, rows = review.read_journal()
+    assert len(rows) == 1
+    assert rows[0]["vehicle_state"] == "repair_needed"
+    assert previous.exists()
+
+    try:
+        review.save_review(
+            "124",
+            "looks_bad",
+            "comparable_cash",
+            "photos",
+            selection_source="x",
+            dataset_split="discovery",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted a vehicle state outside the fixed label dictionary")
+
+
+def test_price_review_routes_are_closed_in_public_mode():
+    """The public estimator must never expose or mutate diagnosis ground truth."""
+    from pathlib import Path
+
+    src = Path("kz/web/app.py").read_text(encoding="utf-8")
+    review = src[src.index("def price_review_page") : src.index("def label_page")]
+    assert review.count("if PUBLIC_DEMO:") >= 2
+
+
+def test_price_review_pilot_is_fixed_and_contains_controls():
+    """The pilot mixes high-error old cars, random controls, and a blind audit."""
+    import pandas as pd
+    from kz.report import price_review as review
+
+    rows = []
+    for i in range(120):
+        rows.append(
+            {
+                "ad_id": str(i),
+                "dataset_split": "audit" if i < 25 else "discovery",
+                "age": 25 if i % 2 else 15,
+                "absolute_percentage_error_pct": float(i),
+            }
+        )
+    selected = review.select_pilot(pd.DataFrame(rows))
+    assert len(selected) == review.PILOT_SIZE
+    counts = selected["selection_source"].value_counts().to_dict()
+    assert counts["random_local_audit"] == review.AUDIT_SIZE
+    assert counts["old_high_oof_error"] == review.HIGH_ERROR_SIZE
+    assert counts["random_cheap_control"] == review.RANDOM_CONTROL_SIZE
+    assert (selected.loc[selected.selection_source == "old_high_oof_error", "age"] >= 21).all()
+    assert selected.ad_id.tolist() == review.select_pilot(pd.DataFrame(rows)).ad_id.tolist()
+
+
+def test_price_review_oof_alignment_fails_closed(monkeypatch):
+    """A stale OOF file must never be attached to the wrong listing."""
+    import pandas as pd
+    from kz.report import price_review as review
+
+    training = pd.DataFrame(
+        {
+            "ad_id": ["1", "2"],
+            "brand": ["A", "B"],
+            "model": ["X", "Y"],
+            "year": [2000, 2001],
+            "age": [27, 26],
+            "price_tenge": [1_000_000, 2_000_000],
+            "description": ["one meaningful description", "another meaningful description"],
+        }
+    )
+    groups = review.duplicate_groups(training).astype(str).tolist()
+    oof = pd.DataFrame(
+        {
+            "duplicate_group": groups[::-1],
+            "age": [27, 26],
+            "actual_price_tenge": [1_000_000, 2_000_000],
+            "routed_pred_tenge": [1_100_000, 2_100_000],
+            "base_pred_tenge": [1_100_000, 2_100_000],
+            "baseline_pred_tenge": [1_100_000, 2_100_000],
+            "absolute_percentage_error_pct": [10.0, 5.0],
+        }
+    )
+    try:
+        review.align_oof(training, oof)
+    except ValueError as exc:
+        assert "stale or reordered" in str(exc)
+    else:
+        raise AssertionError("attached reordered OOF diagnostics to listings")
+
+
+def test_price_review_page_combines_gallery_reason_labels_and_precise_cv_link():
+    """One listing-level screen links to exact frame-level CV annotation."""
+    from kz.web.price_review_page import page
+
+    row = {
+        "ad_id": "123",
+        "brand": "Toyota",
+        "model": "Camry",
+        "price_tenge": 4_000_000,
+        "year": 1999,
+        "age": 28,
+        "mileage_km": 200_000,
+        "engine_volume": 2.2,
+        "transmission": "автомат",
+        "body_type": "седан",
+        "photos_count": 5,
+        "price_basis": "ambiguous",
+        "description": "summary",
+        "seller_comment": "comment",
+        "photos": [
+            {"position": 1, "path": "data/photos/12/123_1.jpg", "src": "/photos/12/123_1.jpg"}
+        ],
+    }
+    html = page([row], [])
+    assert "Below-5M condition review" in html
+    assert "vehicle_state" in html and "price_validity" in html and "evidence_source" in html
+    assert "Precisely label this frame for CV" in html
+    assert "/damage?ad_id=" in html
+    assert "predictions and errors are hidden" in html.lower()
 
 
 def test_damage_labelling_never_touches_kolesa():

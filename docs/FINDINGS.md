@@ -352,6 +352,35 @@ residual review, generated reports, CLI examples, and local comparable listings.
 This closed a train/report skew found when the first updated dashboard still
 reported 12,666 rows instead of the artifact's 12,642.
 
+## 31. Cheap-segment labels must diagnose causes before becoming features
+
+A damaged vehicle can have a perfectly honest comparable cash price, while an
+intact vehicle can advertise only a down payment. One broad “cheap because of
+condition” label would mix target corruption with physical condition and make
+both text and CV experiments uninterpretable.
+
+The first `/price-review` pilot therefore fixes 50 listings before any labels
+are removed: 30 old vehicles with large grouped-OOF errors, 10 random cheap
+controls, and 10 random audit listings selected before error ranking. The audit
+is random within the already-downloaded-photo pool; it cannot estimate
+segment-wide prevalence until photo acquisition is randomized. Model
+predictions and errors are not sent to the browser. The reviewer independently
+records vehicle state, price validity, evidence source, and an optional
+data-quality issue while seeing at least three locally stored viewpoints and
+existing text. A single seller-selected cover is insufficient for a confident
+listing-level condition decision.
+
+These labels are not connected to price training. They first answer whether
+the missing scalable signal is mostly parseable seller text, visible condition,
+non-comparable prices, or wrong structured fields. A photo can be opened in the
+existing bounding-box tool, but frame geometry remains in the CV journal and
+listing-level price diagnosis remains in its own journal.
+
+Decision: analyse the fixed pilot before expanding annotation. Build an
+automated text or photo feature only for a cause that is common and associated
+with OOF error, then require improvement on grouped CV and the temporal holdout
+before changing the deployed model.
+
 ## Practical rules derived from these findings
 
 1. Measure on grouped OOF and out-of-time predictions, never training rows.

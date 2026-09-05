@@ -5,9 +5,10 @@ This module is a thin wrapper around :mod:`kz.web.service` and
 :mod:`kz.report.label_cards`: it defines routes and HTML, while business
 logic remains testable without starting a server.
 
-The three pages serve different tasks:
+The four pages serve different tasks:
   /estimate   vehicle estimate, range, explanation, market position, and checks;
   /label      manual review of market-anomaly candidates;
+  /price-review listing-level diagnosis of the difficult below-5M segment;
   /damage     photo and bounding-box labelling for computer vision.
 
 Run:  python -m kz.web
@@ -29,7 +30,7 @@ from kz.web.service import full_estimate
 # Public mode is used by the externally hosted container. Price estimation is
 # read-only, while verdict labelling writes to data/manual_labels.csv: the
 # ground truth used to evaluate anomaly screening. Anonymous users must not be
-# able to modify it, so /label, /damage, and their write endpoints are disabled.
+# able to modify it, so every review page and write endpoint is disabled.
 PUBLIC_DEMO = os.getenv("KZ_PUBLIC_DEMO", "").lower() in ("1", "true", "yes")
 
 # Per-address request limit in public mode. Thirty requests per minute is far
@@ -150,6 +151,7 @@ def photo(path: str):
 
 
 _damage_queue: list | None = None
+_price_review_cohort = None
 
 
 def _damage_rows():
@@ -184,8 +186,84 @@ def pd_notna(v) -> bool:
     return bool(pd.notna(v))
 
 
+def _price_rows():
+    """Build the fixed below-5M pilot once per process."""
+    global _price_review_cohort
+    if _price_review_cohort is None:
+        from kz.report.price_review import load_candidates, select_pilot
+
+        _price_review_cohort = select_pilot(load_candidates())
+    return _price_review_cohort
+
+
+def _price_records() -> tuple[list[dict], list[dict]]:
+    """Separate the fixed pilot into pending and recoverable reviewed rows."""
+    from kz.report.price_review import journal_by_id
+    from kz.web.service import jsonable
+
+    journal = journal_by_id()
+    # Deliberately omit OOF predictions/errors from the browser payload.  The
+    # annotator should classify observable facts without being pulled toward
+    # the model's answer, and timestamps/internal columns only bloat the page.
+    shown = [
+        "ad_id",
+        "brand",
+        "model",
+        "year",
+        "age",
+        "price_tenge",
+        "mileage_km",
+        "engine_volume",
+        "transmission",
+        "body_type",
+        "photos_count",
+        "price_basis",
+        "description",
+        "seller_comment",
+        "text_full",
+        "damage_keywords",
+        "page_status_badge",
+        "photos",
+        "selection_source",
+        "dataset_split",
+    ]
+    pending, reviewed = [], []
+    available = [column for column in shown if column in _price_rows().columns]
+    for record in _price_rows()[available].to_dict(orient="records"):
+        aid = str(record["ad_id"])
+        if aid in journal:
+            record.update(journal[aid])
+            reviewed.append(jsonable(record))
+        else:
+            pending.append(jsonable(record))
+    return pending, reviewed
+
+
+def _price_damage_rows(ad_id: str, preferred_position: int | None = None) -> list[dict]:
+    """Expose only server-known local pilot frames to precise CV labelling."""
+    matches = _price_rows()[_price_rows()["ad_id"].astype(str) == str(ad_id)]
+    if matches.empty:
+        return []
+    row = matches.iloc[0]
+    out = [
+        {
+            "ad_id": str(ad_id),
+            "position": int(photo["position"]),
+            "path": str(photo["path"]),
+            "suspect": True,
+            "selection_source": f"price_review:{row['selection_source']}",
+            "dataset_split": "audit" if row["dataset_split"] == "audit" else "train",
+            "price": f"{float(row['price_tenge']) / 1e6:.1f}M ₸",
+        }
+        for photo in row["photos"]
+    ]
+    if preferred_position is not None:
+        out.sort(key=lambda item: item["position"] != preferred_position)
+    return out
+
+
 @app.get("/damage", response_class=HTMLResponse)
-def damage_page():
+def damage_page(request: Request):
     """Render bounding-box labelling under the same restriction as /label.
 
     This page writes irreplaceable manual work to data/photo_labels.csv, so it
@@ -195,6 +273,22 @@ def damage_page():
         return HTMLResponse("Labelling is available only in local mode.", status_code=404)
     from kz.report.photo_labels import labelled_frames, stats
     from kz.web.damage_page import page
+
+    # A price-review card can open its currently visible local frame directly.
+    # It still writes the exact same frame-level CV journal; the query parameter
+    # only changes navigation, never label semantics.
+    ad_id = request.query_params.get("ad_id")
+    if ad_id:
+        raw_position = request.query_params.get("position")
+        try:
+            position = int(raw_position) if raw_position is not None else None
+        except ValueError:
+            return HTMLResponse("Invalid photo position.", status_code=400)
+        direct = _price_damage_rows(ad_id, position)
+        if not direct:
+            return HTMLResponse("Listing is not in the local price-review pilot.", status_code=404)
+        done = [r for r in labelled_frames() if str(r.get("ad_id")) == str(ad_id)]
+        return page(direct, stats(), done)
 
     # Read completed labels on every request. The same process updates the
     # journal, so caching would show stale labels.
@@ -217,6 +311,11 @@ async def damage_label(request: Request):
     # remain editable, but arbitrary browser-supplied paths are rejected.
     known = {(r["ad_id"], r["position"]): r for r in _damage_rows()}
     known.update({(r["ad_id"], r["position"]): r for r in labelled_frames()})
+    # Frames reached from /price-review are also trusted only when their local
+    # paths belong to the fixed server-side pilot. The browser never supplies
+    # or chooses a filesystem path.
+    requested_ad = str(data.get("ad_id"))
+    known.update({(r["ad_id"], r["position"]): r for r in _price_damage_rows(requested_ad)})
     try:
         key = (str(data.get("ad_id")), int(data.get("position", -1)))
         if key not in known:
@@ -238,6 +337,46 @@ async def damage_label(request: Request):
         if _damage_queue is not None:
             _damage_queue = [r for r in _damage_queue if (r["ad_id"], r["position"]) != key]
     except Exception as e:  # noqa: BLE001 — return a client error
+        return JSONResponse({"error": _html.escape(str(e))}, status_code=400)
+    return JSONResponse({"ok": True, "stats": stats()})
+
+
+@app.get("/price-review", response_class=HTMLResponse)
+def price_review_page():
+    """Render the local, blinded pilot for below-5M price failures."""
+    if PUBLIC_DEMO:
+        return HTMLResponse("Labelling is available only in local mode.", status_code=404)
+    from kz.web.price_review_page import page
+
+    pending, reviewed = _price_records()
+    return page(pending, reviewed)
+
+
+@app.post("/price-review/label")
+async def price_review_label(request: Request):
+    """Save one listing-level condition review after whitelist validation."""
+    if PUBLIC_DEMO:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    from kz.report.price_review import save_review, stats
+
+    data = await request.json()
+    ad_id = str(data.get("ad_id", ""))
+    matches = _price_rows()[_price_rows()["ad_id"].astype(str) == ad_id]
+    try:
+        if matches.empty:
+            raise ValueError(f"Listing is not in the fixed price-review pilot: {ad_id!r}")
+        fact = matches.iloc[0]
+        save_review(
+            ad_id,
+            str(data.get("vehicle_state", "")),
+            str(data.get("price_validity", "")),
+            str(data.get("evidence_source", "")),
+            str(data.get("data_issue", "none")),
+            str(data.get("comment", "")),
+            selection_source=str(fact["selection_source"]),
+            dataset_split=str(fact["dataset_split"]),
+        )
+    except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": _html.escape(str(e))}, status_code=400)
     return JSONResponse({"ok": True, "stats": stats()})
 

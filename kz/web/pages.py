@@ -91,6 +91,12 @@ def index_page() -> str:
   random control sample. A candidate is not an accusation. One item is one listing.</p>
 </div>
 <div class="card">
+  <h2 style="margin-top:0"><a href="/price-review">Review below-5M condition →</a></h2>
+  <p class="muted">Inspect a fixed 50-listing pilot with locally stored photos.
+  Label vehicle state, price meaning, and whether the evidence came from text,
+  photos, both, or neither. Predictions stay hidden to avoid anchoring.</p>
+</div>
+<div class="card">
   <h2 style="margin-top:0"><a href="/damage">Label vehicle damage →</a></h2>
   <p class="muted">Review individual photos: draw boxes around local impact
   damage or mark a frame as intact, wrecked, dismantled, or unclear. Counts

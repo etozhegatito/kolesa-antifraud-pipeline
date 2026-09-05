@@ -127,12 +127,24 @@ time. Routing on the actual price would be target leakage.
 combines rule positives, residual candidates, and a random control sample.
 Controls are required to estimate missed cases and recall.
 
+`/price-review` operates on a fixed listing-level pilot from the difficult
+below-5M segment. The cohort mixes old high-OOF-error vehicles with random cheap
+controls and a preselected audit split. Predictions and residuals select the
+cohort but are omitted from the browser payload to prevent annotator anchoring.
+The journal stores vehicle state, price validity, evidence source, and optional
+data-quality issues. It is diagnostic ground truth, not a manually injected
+price-model feature.
+
 `/damage` operates on individual frames. It records exact English label keys,
 optional notes, one or more relative bounding boxes, selection provenance,
-dataset split, annotator, version, and review status.
+dataset split, annotator, version, and review status. A frame opened from
+`/price-review` still writes only to this frame-level journal; the listing-level
+and geometric labels are never conflated.
 
 Both journals are atomically updated and snapshotted before mutation. Tests use
-`KZ_LABELS_DIR` to redirect writes to a scratch directory.
+`KZ_LABELS_DIR` to redirect writes to a scratch directory. Review pages use
+only local photos, so annotation does not contact the source marketplace or
+consume a collection budget.
 
 ## Storage
 
