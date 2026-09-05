@@ -24,7 +24,7 @@ VERDICTS = ("fraud", "legit", "unknown")
 
 # Sampling strata belong in the journal, not only in the disposable work queue.
 # Without this metadata, completed controls cannot be used to estimate misses.
-STRATUM_COLS = ["sampling_stratum", "stratum_population"]
+STRATUM_COLS = ["sampling_stratum", "stratum_population", "stratum_sample_size"]
 
 BASE_HEADER = [
     "ad_id",
@@ -82,7 +82,14 @@ def read_journal() -> tuple[list[str], list[dict]]:
     with open(LABELS_CSV, newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
         rows = [dict(x) for x in r]
-        return list(r.fieldnames or journal_header()), rows
+        header = list(r.fieldnames or journal_header())
+        # Migrate legacy journals non-destructively on their next write. The
+        # sample size is required together with the population to calculate
+        # inverse-probability weights in the detector report.
+        for column in STRATUM_COLS:
+            if column not in header:
+                header.append(column)
+        return header, rows
 
 
 def write_journal(header: list[str], rows: list[dict]) -> None:
@@ -119,6 +126,11 @@ def upsert_verdict(ad_id: str, verdict: str, comment: str, facts: dict) -> None:
         target.update({c: _cell(facts.get(c)) for c in header if c in facts})
         target["ad_id"] = aid
         rows.append(target)
+    # Old rows predate sampling metadata. Fill only missing cells so a newer
+    # queue can repair the report without rewriting historical assignments.
+    for column in STRATUM_COLS:
+        if not str(target.get(column, "") or "").strip() and column in facts:
+            target[column] = _cell(facts.get(column))
     target["verdict"] = verdict
     target["comment"] = comment or ""
     write_journal(header, rows)
@@ -155,6 +167,8 @@ def journal_facts(rows: pd.DataFrame) -> dict:
     for _, r in rows.iterrows():
         out[str(r["ad_id"])] = {
             "sampling_stratum": r.get("stratum") or "",
+            "stratum_population": r.get("stratum_population"),
+            "stratum_sample_size": r.get("stratum_sample_size"),
             "url": r.get("url") or f"https://kolesa.kz/a/show/{r['ad_id']}",
             "title": f"{r.get('brand') or ''} {r.get('model') or ''}".strip(),
             "year": r.get("year"),

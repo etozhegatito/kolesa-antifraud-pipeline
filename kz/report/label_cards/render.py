@@ -297,9 +297,7 @@ def card_html(row, idx: int, serve_mode: bool = False) -> str:
         else ""
     )
     verdict_attr = (
-        f' data-verdict="{html.escape(ev)}" data-existing-verdict="{html.escape(ev)}"'
-        if ev
-        else ""
+        f' data-verdict="{html.escape(ev)}" data-existing-verdict="{html.escape(ev)}"' if ev else ""
     )
     existing_comment = row.get("existing_comment")
     existing_comment = (
@@ -366,7 +364,10 @@ def build(rows: pd.DataFrame, serve_mode: bool = False, journal_total: int | Non
     verdicts = rows["existing_verdict"].fillna("")
     n_done = int(verdicts.isin(["fraud", "legit"]).sum())
     n_unknown = int(verdicts.eq("unknown").sum())
-    n_left = len(rows) - n_done
+    # Unknown is a completed review with insufficient evidence, not an
+    # untouched card. Keep it out of the unreviewed count while reporting it
+    # separately so the UI does not claim finished work is still blank.
+    n_left = len(rows) - n_done - n_unknown
     strata = rows.get("stratum", pd.Series(dtype=str)).fillna("").value_counts()
     n_rules = int(strata.get("rule_positive", 0))
     n_residual = int(strata.get("residual_candidate", 0))
@@ -675,7 +676,8 @@ body[data-verdict-filter="unknown"] .card:not([data-verdict="unknown"]){display:
 <p class="lede"><b>__N__ listings</b>: __NRULES__ were flagged by rules,
 __NRESIDUAL__ came from the residual detector, and __NCONTROL__ were sampled
 randomly to measure misses. __NDONE__ already have final fraud/legit verdicts,
-__NUNKNOWN__ are marked unknown, and __NLEFT__ still need a final decision.
+__NUNKNOWN__ are marked unknown pending more evidence, and __NLEFT__ have not
+been reviewed yet.
 Before manual review these are candidates, not
 accusations against sellers. __NDEAD__ have closed Kolesa pages and __NOPHOTO__
 have no available photos because their historical image host was retired.</p>

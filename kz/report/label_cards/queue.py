@@ -28,10 +28,16 @@ def load_rows(include_queue: bool = True) -> pd.DataFrame:
     cd = pd.read_sql("SELECT * FROM clean_data", eng, dtype={"ad_id": str})
     ids = set(cd.loc[cd["is_suspicious"] == 1, "ad_id"])
     stratum = {}
+    stratum_population = {}
+    stratum_sample_size = {}
     if include_queue and Path(QUEUE_CSV).exists():
         q = pd.read_csv(QUEUE_CSV, dtype={"ad_id": str})
         ids |= set(q["ad_id"])
         stratum = dict(zip(q["ad_id"], q["sampling_stratum"]))
+        if "stratum_population" in q.columns:
+            stratum_population = dict(zip(q["ad_id"], q["stratum_population"]))
+        if "stratum_sample_size" in q.columns:
+            stratum_sample_size = dict(zip(q["ad_id"], q["stratum_sample_size"]))
 
     # A verdict journal is durable while review queues are disposable. Include
     # every previously reviewed listing so the Fraud/Legit/Unknown tabs can
@@ -39,9 +45,7 @@ def load_rows(include_queue: bool = True) -> pd.DataFrame:
     lab = pd.DataFrame()
     reviewed = pd.DataFrame()
     if Path(LABELS_CSV).exists():
-        lab = pd.read_csv(LABELS_CSV, dtype={"ad_id": str}).drop_duplicates(
-            "ad_id", keep="last"
-        )
+        lab = pd.read_csv(LABELS_CSV, dtype={"ad_id": str}).drop_duplicates("ad_id", keep="last")
         reviewed = lab[lab["verdict"].isin(VERDICTS)].copy()
         ids |= set(reviewed["ad_id"])
         if "sampling_stratum" in reviewed.columns:
@@ -54,6 +58,8 @@ def load_rows(include_queue: bool = True) -> pd.DataFrame:
     # while random controls evaluate missed cases and recall.
     default = pd.Series(np.where(rows["is_suspicious"] == 1, "rule_positive", ""), index=rows.index)
     rows["stratum"] = rows["ad_id"].map(stratum).fillna(default)
+    rows["stratum_population"] = rows["ad_id"].map(stratum_population)
+    rows["stratum_sample_size"] = rows["ad_id"].map(stratum_sample_size)
 
     # Enriched detail-page fields that are absent from clean_data.
     enr = pd.read_sql(
@@ -87,9 +93,7 @@ def load_rows(include_queue: bool = True) -> pd.DataFrame:
             if "comment" in reviewed.columns
             else pd.Series("", index=reviewed.index)
         )
-        rows["existing_comment"] = rows["ad_id"].map(
-            dict(zip(reviewed["ad_id"], comments))
-        )
+        rows["existing_comment"] = rows["ad_id"].map(dict(zip(reviewed["ad_id"], comments)))
     else:
         rows["existing_verdict"] = None
         rows["existing_comment"] = None

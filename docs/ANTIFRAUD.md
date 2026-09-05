@@ -137,11 +137,18 @@ control sample unusable for unbiased evaluation.
 
 ## Current evidence
 
-The labelled anomaly sample currently contains no confirmed fraud. That does
-not prove the market has none. A random sample of 65 controls with zero observed
-fraud gives a one-sided 95% upper prevalence bound of roughly 4.6% by the rule
-of three (`3 / n`). The correct conclusion is limited: no fraud was found in
-that sample, and larger review coverage is required for a tighter bound.
+The durable journal contains 498 reviewed listings: 378 `legit`, 2 `fraud`,
+and 118 `unknown`. The two fraud rows are one exact-photo UAZ pair with the
+same price, mileage, and description posted hours apart under incompatible
+Pickup and Patriot models. This is concrete evidence, but it is only one
+fraud pattern and two correlated listings.
+
+All 115 random controls have a legitimate verdict. The rule-of-three bound is
+therefore about 2.6% (`3 / 115`) for the fraud prevalence represented by that
+control sample. The raw labelled-sample detector figures are 1.6% precision,
+100% recall, and 3.2% F1, but recall is based on only two correlated positives
+and must not be presented as a stable production estimate. Population weighting
+also remains unavailable for legacy rows with incomplete sampling metadata.
 
 ## Safety boundary
 

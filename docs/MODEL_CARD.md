@@ -111,9 +111,13 @@ that one particular final transaction occurs inside the range.
 ## Computer vision
 
 CV is experimental and excluded from production inference. Historical
-`damaged` annotations mixed impact with cosmetic conditions. All 47 affected
-legacy frames are quarantined as `needs_review`; prior supervised CV metrics
-are withdrawn until manual relabeling and an independent audit are complete.
+`damaged` annotations mixed impact with cosmetic conditions, so all 47 affected
+legacy frames were quarantined before being reviewed under the corrected
+definition. The full 784-frame journal now has no pending rows: 18 boxed
+`damaged`, 6 `wreck`, 9 `parts`, 615 `intact`, and 136 `unclear`. This yields
+only 18 independent damaged/wreck listings, so prior supervised CV metrics
+remain withdrawn until substantially more positives and an independent audit
+are available.
 
 ## Reproducibility
 

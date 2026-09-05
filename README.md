@@ -230,6 +230,14 @@ across rebuilt queues. One-click `Queue`, `Fraud`, `Legit`, `Unknown`, and
 `All` tabs reopen saved decisions and their comments even after the disposable
 candidate queue has been rebuilt.
 
+The 5 September evidence audit assigned a review state to all 498 durable
+journal rows: 378 `legit`, 2 `fraud`, and 118 `unknown`, with no untouched
+rows. `unknown` is an intentional result when the local snapshot has no seller
+text, condition badge, or image; it is not silently converted to a negative.
+The two confirmed fraud rows form one exact-photo pair posted hours apart with
+the same price, mileage, and description under incompatible UAZ models. These
+two positives are far too few for a stable production fraud metric.
+
 The local `/price-review` page is a separate, deliberately blinded diagnostic
 for the below-₸5M segment. Its first pilot is fixed at 50 listings: 30 old
 vehicles with large grouped-OOF errors, 10 random inexpensive controls, and 10
@@ -244,6 +252,11 @@ directly; they first identify which scalable text or CV feature is worth
 building. The current frame can be opened in the precise bounding-box tool
 without leaving the listing workflow conceptually.
 
+The fixed 50-listing pilot is now complete: 20 normal, 16 cosmetic,
+9 repair-needed, 3 parts, 1 non-running, and 1 unclear. These are diagnostic
+labels only; the pilot must be analysed against blinded OOF errors before any
+feature is connected to price training.
+
 ## Computer vision status
 
 Computer vision is **experimental and not deployed**. The repository contains
@@ -252,16 +265,20 @@ bounding-box labeling, COCO export, grouped CV, and ROC-AUC/PR-AUC evaluation.
 However, a label-definition audit found that the historical `damaged` class
 mixed impact/dent damage with rust, scratches, dirt, and paint defects.
 
-All 47 legacy `damaged` frames were placed in `needs_review` without deleting
-or automatically relabeling user work. Earlier supervised CV metrics were
-withdrawn, and pending rows are excluded from training. This does not affect
-the price model because CV never passed its gate and was never connected to
-price inference.
+All 47 legacy `damaged` frames were first placed in `needs_review` without
+deleting or automatically relabeling user work. A later frame-by-frame audit
+reviewed the entire 784-frame journal under the corrected policy. It now
+contains 18 boxed `damaged` frames from 16 listings, 6 `wreck` frames from
+2 listings, 9 `parts`, 615 `intact`, and 136 `unclear`; no row remains pending.
+There are only 18 independent damaged/wreck listings, still far below the
+roughly 200 positives targeted for a stable local evaluation. Earlier
+supervised CV metrics therefore remain withdrawn. This does not affect the
+price model because CV never passed its gate or entered price inference.
 
 The next valid CV milestone is:
 
-1. finish visual review under one written label policy;
-2. use the fixed below-₸5M pilot to separate text evidence from photo evidence;
+1. expand from 18 to roughly 200 independent damaged/wreck listings;
+2. analyse the completed below-₸5M pilot to separate text evidence from photo evidence;
 3. pretrain a detector on a licensed external damage dataset without publishing it;
 4. fine-tune on local boxes and collect 150–200 independent positive ads, not merely frames;
 5. preserve a random audit split before active-learning ranking;

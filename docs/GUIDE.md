@@ -293,6 +293,8 @@ python -m kz.report.photo_labels --stats
 - 14.02% median APE;
 - 22.44% out-of-time MAPE;
 - approximately 80% interval coverage;
-- 133 anomaly candidates and 170 final verdicts, with no confirmed fraud;
-- 47 legacy damaged frames awaiting definition review;
+- 498 durable anomaly reviews: 378 legit, 2 fraud, 118 unknown, 0 untouched;
+- 784 audited photo frames: 18 damaged, 6 wreck, 9 parts, 615 intact, 136 unclear;
+- 50 completed below-₸5M price reviews: 20 normal, 16 cosmetic,
+  9 repair-needed, 3 parts, 1 non-running, and 1 unclear;
 - read-only public demo deployed on Render Free.

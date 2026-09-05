@@ -45,14 +45,25 @@ def load_labeled() -> pd.DataFrame:
     out = clean.merge(lab[["ad_id", "verdict", *optional]], on="ad_id", how="inner")
 
     queue = Path("data/eda/labeling_queue.csv")
-    if queue.exists() and "sampling_stratum" not in out.columns:
+    if queue.exists():
         q = pd.read_csv(queue, dtype={"ad_id": str})
         keep = [
             c
             for c in ["ad_id", "sampling_stratum", "stratum_population", "stratum_sample_size"]
             if c in q.columns
         ]
-        out = out.merge(q[keep], on="ad_id", how="left")
+        out = out.merge(q[keep], on="ad_id", how="left", suffixes=("", "_queue"))
+        for column in keep:
+            if column == "ad_id":
+                continue
+            queued = f"{column}_queue"
+            if queued not in out.columns:
+                continue
+            if column in out.columns:
+                out[column] = out[column].combine_first(out[queued])
+            else:
+                out[column] = out[queued]
+            out = out.drop(columns=queued)
     return out
 
 
@@ -185,8 +196,8 @@ def main():
         print("  This extrapolates to the full snapshot with inverse-probability weights;")
         print("  it is not the raw metric of an enriched review queue.")
     else:
-        print("\n  Population estimate is unavailable: legacy verdicts lack the sampling")
-        print("  metadata introduced by the new three-stratum queue.")
+        print("\n  Population estimate is unavailable: some final verdict rows have legacy")
+        print("  or incomplete sampling metadata, so weighting them would be misleading.")
 
     print("\n► Precision by rule (labeled rows only)")
     flagged = df[df["is_suspicious"] == 1].copy()

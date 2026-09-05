@@ -73,11 +73,12 @@ intersection is age 21+ and price below 5M. Listing-table data describe vehicle
 identity well but not corrosion, crash repair, mechanical state, or restoration
 quality. Hyperparameter tuning cannot recover a signal that is absent.
 
-## 6. Zero confirmed fraud is still a measurement
+## 6. Zero confirmed fraud was still a measurement
 
-The manual sample currently contains no confirmed fraud. This does not prove
-zero prevalence. Sixty-five random controls with zero positives imply a rough
-one-sided 95% upper bound of `3 / 65 ≈ 4.6%` by the rule of three.
+At this historical stage, the manual sample contained no confirmed fraud. That
+did not prove zero prevalence. Sixty-five random controls with zero positives
+implied a rough one-sided 95% upper bound of `3 / 65 ≈ 4.6%` by the rule of
+three. The later complete audit is reported in Finding 32.
 
 Decision: describe candidates as anomalies, retain `unknown`, and continue
 random-control review before claiming recall or prevalence.
@@ -381,6 +382,41 @@ automated text or photo feature only for a cause that is common and associated
 with OOF error, then require improvement on grouped CV and the temporal holdout
 before changing the deployed model.
 
+## 32. The complete local review produced two fraud rows and many honest unknowns
+
+On 5 September all 498 durable anomaly-journal rows received an explicit
+review state: 378 `legit`, 2 `fraud`, and 118 `unknown`; no row is untouched.
+The audit used stored descriptions, structured condition badges, duplicate
+relations, and already-downloaded photos. It made no new source-site requests.
+
+The two fraud rows are one correlated case: an exact-photo match (pHash distance
+zero) with identical price, mileage, and description posted hours apart as the
+incompatible UAZ Pickup and UAZ Patriot models. This is strong identity
+deception evidence, but it is not two independent fraud mechanisms.
+
+Most unknown rows are residual candidates with no locally stored seller text,
+condition badge, or photo. Calling those listings legitimate would train
+absence of enrichment as a negative label; calling them fraud would confuse a
+model error with deception. `unknown` is therefore the only defensible label
+until evidence is acquired. Raw binary-sample metrics are precision 1.6%, recall
+100%, and F1 3.2%, but recall has only the two correlated UAZ positives and is
+not stable enough for a product claim.
+
+## 33. The first cheap-price and photo-definition audits are complete
+
+The fixed 50-listing below-₸5M pilot contains 20 normal, 16 cosmetic,
+9 repair-needed, 3 parts, 1 non-running, and 1 unclear vehicle. It remains a
+diagnostic dataset rather than a training input; the next step is to join these
+labels to blinded grouped-OOF errors and quantify which causes actually move
+error.
+
+The complete 784-frame visual journal was also reviewed under the narrow impact
+definition. Final counts are 18 boxed `damaged` frames from 16 listings,
+6 `wreck` frames from 2 listings, 9 `parts`, 615 `intact`, and 136 `unclear`.
+No `needs_review` row remains. The key limitation is now sample size rather
+than definition drift: only 18 independent damaged/wreck listings are verified,
+roughly 182 short of the planned stable local evaluation target.
+
 ## Practical rules derived from these findings
 
 1. Measure on grouped OOF and out-of-time predictions, never training rows.
@@ -389,7 +425,7 @@ before changing the deployed model.
 4. Keep active learning separate from the random audit.
 5. Never mix rust, cosmetic wear, and impact under one damage class.
 6. Do not add a feature until it exists at both train and serve time.
-7. Do not call an anomaly fraud before a human verdict.
+7. Do not call an anomaly fraud before an evidence-backed review verdict.
 8. Do not expand geography without redefining and validating the product.
 9. Prefer new condition evidence over more repetitions of plateaued fields.
 10. Preserve failed experiments so future work starts from evidence.

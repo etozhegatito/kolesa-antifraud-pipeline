@@ -2023,8 +2023,53 @@ def test_upsert_preserves_other_rows_and_backup(tmp_path, monkeypatch):
     after = list(csv.DictReader(dst.open(encoding="utf-8")))
 
     for a, b in zip(before, after[: len(before)], strict=True):
-        assert a == b
+        assert all(b[key] == value for key, value in a.items())
+        assert b["sampling_stratum"] == ""
+        assert b["stratum_population"] == ""
+        assert b["stratum_sample_size"] == ""
     assert prev.exists() and prev.read_text(encoding="utf-8") == before_text
+
+
+def test_upsert_migrates_and_backfills_sampling_metadata(tmp_path, monkeypatch):
+    """Legacy rows gain the complete weighting contract without losing facts."""
+    import csv
+
+    lc, dst = _tmp_journal(tmp_path, monkeypatch)
+    lc.upsert_verdict(
+        "225480956",
+        "unknown",
+        "insufficient evidence",
+        {
+            "sampling_stratum": "residual_candidate",
+            "stratum_population": 174,
+            "stratum_sample_size": 174,
+        },
+    )
+    rows = list(csv.DictReader(dst.open(encoding="utf-8")))
+    row = next(item for item in rows if item["ad_id"] == "225480956")
+    assert row["sampling_stratum"] == "residual_candidate"
+    assert row["stratum_population"] == "174"
+    assert row["stratum_sample_size"] == "174"
+    assert row["title"] == "Toyota Highlander"
+
+
+def test_journal_facts_carries_complete_sampling_metadata():
+    """Browser saves retain every field required for weighted evaluation."""
+    import pandas as pd
+    from kz.report import label_cards as lc
+
+    rows = pd.DataFrame(
+        {
+            "ad_id": ["111"],
+            "stratum": ["random_control"],
+            "stratum_population": [4_745],
+            "stratum_sample_size": [50],
+        }
+    )
+    facts = lc.journal_facts(rows)["111"]
+    assert facts["sampling_stratum"] == "random_control"
+    assert facts["stratum_population"] == 4_745
+    assert facts["stratum_sample_size"] == 50
 
 
 def test_upsert_writes_ints_without_dot_zero(tmp_path, monkeypatch):
@@ -2826,9 +2871,9 @@ def test_verdict_queue_keeps_history_reopenable(tmp_path, monkeypatch):
 
     queue_csv = tmp_path / "queue.csv"
     labels_csv = tmp_path / "labels.csv"
-    pd.DataFrame(
-        [{"ad_id": "new", "sampling_stratum": "random_control"}]
-    ).to_csv(queue_csv, index=False)
+    pd.DataFrame([{"ad_id": "new", "sampling_stratum": "random_control"}]).to_csv(
+        queue_csv, index=False
+    )
     pd.DataFrame(
         [
             {
@@ -2902,9 +2947,37 @@ def test_verdict_page_explains_why_queue_counts_differ():
         "1 were flagged by rules",
         "1 came from the residual detector",
         "1 were sampled",
-        "3 still need a final decision",
+        "3 have not\nbeen reviewed yet",
     ):
         assert text in page
+
+
+def test_unknown_verdict_is_reviewed_not_unlabelled():
+    """Unknown stays revisitable but must not inflate the untouched count."""
+    import pandas as pd
+    from kz.report.label_cards import build
+
+    rows = pd.DataFrame(
+        [
+            {
+                "ad_id": "1",
+                "brand": "Audi",
+                "model": "80",
+                "year": 1994,
+                "price_tenge": 1_000_000,
+                "photos": [],
+                "status": "active",
+                "existing_verdict": "unknown",
+                "existing_comment": "insufficient evidence",
+                "suspicion_reasons": "",
+                "price_z": 0.0,
+                "stratum": "residual_candidate",
+            }
+        ]
+    )
+    page = build(rows, serve_mode=True, journal_total=1)
+    assert "1 are marked unknown pending more evidence" in page
+    assert "0 have not\nbeen reviewed yet" in page
 
 
 def test_label_cards_can_filter_control_group():
