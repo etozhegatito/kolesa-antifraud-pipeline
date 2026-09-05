@@ -20,7 +20,8 @@ picture:
 
   * how many files were received, and which ones are not readable images;
   * pixel size, and which frames are too small to show damage;
-  * exact and near duplicates, by content hash and perceptual hash;
+  * exact duplicates by content hash, and near duplicates by perceptual hash
+    where imagehash is installed;
   * whether the frame shows vehicle bodywork at all.
 
 The last one is the only learned signal used, and it is the only photo axis
@@ -38,11 +39,15 @@ discovering that the service has been accumulating files all along.
 
 GRACEFUL DEGRADATION
 
-The deployed image installs requirements-web.txt, which has neither Pillow
-nor PyTorch. Rather than failing, each capability reports itself as
-unavailable and the caller shows what it could determine. A service that
-silently returned fewer findings would be worse: the public image already
-fell back to a fixed price range for weeks without saying so (FINDINGS 35).
+The deployed image installs requirements-web.txt, which carries Pillow but
+neither imagehash nor PyTorch: imagehash drags scipy and PyWavelets along for
+roughly 80 MB to buy only perceptual near-duplicates, and PyTorch costs two
+gigabytes for a single axis, against a 512 MB free-instance ceiling.
+
+Rather than failing, each capability reports itself as unavailable and the
+caller shows what it could determine. A service that silently returned fewer
+findings would be worse: the public image already fell back to a fixed price
+range for weeks without saying so (FINDINGS 35).
 """
 
 from __future__ import annotations
@@ -105,13 +110,34 @@ def _pillow():
     return Image
 
 
+# Cache for the bodywork scorer. _UNSET distinguishes "not attempted yet"
+# from "attempted and unavailable", so an image without the CLIP stack pays
+# the import failure once instead of on every upload.
+_UNSET = object()
+_body_axis_cache: object = _UNSET
+
+
 def _body_axis():
     """Return a scorer for "does this frame show bodywork", or None.
 
     Loading CLIP costs seconds and two gigabytes of dependencies, so the
     caller gets None whenever the image stack is absent and simply omits
     that finding.
+
+    The model is built once per process. Rebuilding it per request made each
+    upload wait for weights to load, which is invisible in the deployed image
+    (no torch there) and painful everywhere else — exactly the kind of defect
+    that survives because the environment that would reveal it is not the
+    environment that runs in production.
     """
+    global _body_axis_cache
+    if _body_axis_cache is not _UNSET:
+        return _body_axis_cache
+    _body_axis_cache = _build_body_axis()
+    return _body_axis_cache
+
+
+def _build_body_axis():
     try:
         import numpy as np
         import torch
@@ -125,7 +151,12 @@ def _body_axis():
     except ImportError:
         return None
 
-    model, preprocess, tokenizer, device = _load_model()
+    try:
+        model, preprocess, tokenizer, device = _load_model()
+    except Exception:                                # noqa: BLE001 — weights,
+        # network, or device trouble. An upload check must not fail because a
+        # model could not be fetched; the caller reports the axis as absent.
+        return None
     positive, negative = PROMPT_PAIRS["clip_no_body"]
     axis = (
         _text_vectors(model, tokenizer, device, positive)
@@ -156,7 +187,7 @@ def analyse(files: list[tuple[str, bytes]]) -> IntakeReport:
     Image = _pillow()
     if Image is None:
         report.unavailable.append(
-            "Pixel size and duplicate detection need Pillow, "
+            "Pixel size and image validation need Pillow, "
             "which this deployment does not install."
         )
 
@@ -208,7 +239,12 @@ def analyse(files: list[tuple[str, bytes]]) -> IntakeReport:
                 else:
                     hashes.append((name, current))
             except ImportError:
-                pass
+                if not any("near-duplicate" in u for u in report.unavailable):
+                    report.unavailable.append(
+                        "Near-duplicate matching needs imagehash, which this "
+                        "deployment does not install; identical files are "
+                        "still detected by content hash."
+                    )
 
         if body_score is not None:
             try:
