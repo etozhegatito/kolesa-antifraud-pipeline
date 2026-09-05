@@ -8,6 +8,18 @@
 # different runtime stack might not load correctly in the container.
 
 fastapi==0.141.1
+# Multipart form parsing for seller photo uploads (/api/photos/check).
+# FastAPI raises at import of request.form() without it.
+python-multipart==0.0.32
+
+# Pillow alone, deliberately without imagehash. Pillow costs 13 MB and buys
+# the readable-image check, pixel dimensions, and the "shows bodywork" axis
+# whenever the CLIP stack is present. imagehash would add scipy and
+# PyWavelets, roughly 80 MB against a 512 MB free-instance ceiling, to buy
+# only perceptual near-duplicates; exact duplicates are already detected by
+# content hash with no dependency at all. kz/web/photo_intake degrades to
+# exact-only and says so.
+Pillow==12.3.0
 uvicorn[standard]==0.52.1
 
 # Model and preprocessing

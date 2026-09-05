@@ -151,10 +151,70 @@ def estimate_page() -> str:
   <button onclick="run()">Estimate price</button>
 </div>
 
+<div class="card">
+  <h2 style="margin-top:0">Check your photos</h2>
+  <p class="muted">Upload the frames you plan to publish. The service reports
+  what can be verified by looking at them: unreadable files, duplicates,
+  frames too small to show damage, and frames that do not show the body.</p>
+  <div class="note info">
+    <b>Photos do not change the estimate.</b> This project has no validated
+    model that reads vehicle condition from an image — the supervised results
+    were withdrawn after a labelling-definition audit. Uploaded files are held
+    in memory for the request and never stored.
+  </div>
+  <div style="margin-top:12px">
+    <input id="photos" type="file" accept="image/*" multiple>
+  </div>
+  <button onclick="checkPhotos()">Check photos</button>
+</div>
+
+<div id="photoOut" class="hide"></div>
+
 <div id="out" class="hide"></div>
 
 <script>
 function money(v){ return (v/1e6).toFixed(2) + 'M ₸'; }
+
+async function checkPhotos(){
+  const input = document.getElementById('photos');
+  const out = document.getElementById('photoOut');
+  if (!input.files.length){
+    out.className = '';
+    out.innerHTML = '<div class="card note warn">Choose at least one file.</div>';
+    return;
+  }
+  const body = new FormData();
+  for (const f of input.files) body.append('photos', f);
+  out.className = '';
+  out.innerHTML = '<div class="card">Checking…</div>';
+  const r = await fetch('/api/photos/check', {method:'POST', body});
+  const d = await r.json();
+  if (d.error){
+    out.innerHTML = '<div class="card note warn">' + esc(d.error) + '</div>';
+    return;
+  }
+  let h = '<div class="card"><h2 style="margin-top:0">Photo check</h2>';
+  d.notes.forEach(n => h += '<div class="note info">' + esc(n) + '</div>');
+  d.unavailable.forEach(n => h += '<div class="note warn">' + esc(n) + '</div>');
+  if (d.frames.length){
+    h += '<table style="margin-top:12px"><tr><th>File</th><th>Size</th>'
+       + '<th>Pixels</th><th>Finding</th></tr>';
+    d.frames.forEach(f => {
+      const flags = [];
+      if (!f.ok) flags.push(esc(f.error || 'unreadable'));
+      if (f.duplicate_of) flags.push('same as ' + esc(f.duplicate_of));
+      if (f.too_small) flags.push('too small for damage');
+      if (f.shows_bodywork === false) flags.push('no bodywork visible');
+      h += '<tr><td>' + esc(f.name) + '</td><td>'
+         + Math.round(f.bytes/1024) + ' KB</td><td>'
+         + (f.width ? f.width + '×' + f.height : '—') + '</td><td>'
+         + (flags.length ? flags.join(', ') : 'ok') + '</td></tr>';
+    });
+    h += '</table>';
+  }
+  h += '</div>';
+  out.innerHTML = h;
+}
 function esc(v){
   return String(v ?? '').replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

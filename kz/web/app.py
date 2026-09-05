@@ -133,6 +133,48 @@ async def api_estimate(request: Request):
     return JSONResponse(result)
 
 
+@app.post("/api/photos/check")
+async def api_photos_check(request: Request):
+    """Describe uploaded photos. Deliberately does not touch the price.
+
+    The seller form was tabular-only while the model trained on listings that
+    carry photographs, which is a train/serve gap of our own making. This
+    closes the plumbing without pretending the vision work is finished: every
+    supervised photo claim was withdrawn in FINDINGS 28, and FINDINGS 23 found
+    no incremental value over age and price.
+
+    Files are held in memory and never written to disk. Storing seller
+    photographs would create a personal-data store with no policy behind it,
+    and using uploads as training data needs consent nobody has given.
+    """
+    from kz.web.photo_intake import MAX_BYTES_PER_FILE, MAX_FILES, analyse
+
+    form = await request.form()
+    uploads = form.getlist("photos")
+    if len(uploads) > MAX_FILES:
+        return JSONResponse(
+            {"error": f"At most {MAX_FILES} files per request."}, status_code=400
+        )
+
+    files: list[tuple[str, bytes]] = []
+    for item in uploads:
+        read = getattr(item, "read", None)
+        if read is None:
+            continue
+        blob = await read()
+        if len(blob) > MAX_BYTES_PER_FILE:
+            return JSONResponse(
+                {
+                    "error": f"{getattr(item, 'filename', 'file')} exceeds "
+                             f"{MAX_BYTES_PER_FILE // (1024 * 1024)} MB."
+                },
+                status_code=400,
+            )
+        files.append((getattr(item, "filename", "file"), blob))
+
+    return JSONResponse(analyse(files).as_dict())
+
+
 @app.get("/photos/{path:path}")
 def photo(path: str):
     """Return a locally downloaded photo.

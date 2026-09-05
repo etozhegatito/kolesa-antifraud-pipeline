@@ -281,6 +281,38 @@ roughly 200 positives targeted for a stable local evaluation. Earlier
 supervised CV metrics therefore remain withdrawn. This does not affect the
 price model because CV never passed its gate or entered price inference.
 
+### What sellers can do with photos today
+
+The estimate form accepts uploads at **Check your photos**
+(`POST /api/photos/check`). It exists to close a train/serve gap we created
+ourselves: the model was trained on listings that carry photographs while the
+form accepted tabular fields only.
+
+It reports only what a person can verify by looking at the picture — files
+that are not readable images, duplicates, frames too small to show panel
+damage, and frames that show no bodywork at all. The bodywork axis is the
+single photo signal validated against this project's own labels, at 0.986
+ROC-AUC over 117 frames a reviewer marked as cabin, engine bay, wheel, or
+paperwork. It answers "is the car body visible", never "is the car damaged".
+
+**Uploads cannot change the price, and the code cannot express a change.**
+The response schema is frozen by a test, so a field such as
+`condition_score` cannot appear without that test failing and someone having
+to justify it against the gate below. A word blacklist was rejected as the
+guard: it trips on the field that states the prohibition and misses a field
+that scores condition.
+
+Uploaded files live in memory for the request and are never written to disk,
+which is also enforced by test rather than by comment. Storing seller
+photographs would create a personal-data store this project has no policy
+for, and using uploads as training data would need consent nobody has given.
+
+Where a dependency is absent the service names the check it could not run.
+The deployed image installs Pillow but not `imagehash` — the latter pulls
+scipy and PyWavelets, roughly 80 MB against a 512 MB ceiling, to buy only
+perceptual near-duplicates — so exact duplicates are still detected by
+content hash and the response says perceptual matching was unavailable.
+
 The next valid CV milestone is:
 
 1. expand from 18 to roughly 200 independent damaged/wreck listings;

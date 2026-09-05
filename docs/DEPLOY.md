@@ -12,10 +12,32 @@ ground truth.
 | General model, specialist, metadata | Yes | All three are required by routed inference |
 | Raw listings and descriptions | **No** | Source marketplace content is not redistributed |
 | Photos and photo URLs | **No** | Not required by the deployed estimator |
+| Seller uploads | **Not stored** | Held in memory for one request; storing them would create a personal-data store with no policy behind it |
 | Manual verdicts and damage labels | **No** | Private ground truth must remain protected |
 | Playwright browser | **No** | Collection is not executed by the web service |
 
 `requirements-web.txt` and `.dockerignore` keep the image focused on inference.
+
+### Seller photo uploads
+
+`POST /api/photos/check` accepts uploaded frames and describes them. Nothing
+is written to disk: files exist for the duration of the request. The endpoint
+cannot influence the estimate, and its response schema is frozen by test so a
+condition score cannot be added without deliberate justification.
+
+The image installs `Pillow` for readable-image and pixel-size checks, and
+`python-multipart` so the form can be parsed at all. It deliberately omits
+two things:
+
+| Package | Cost | What is lost |
+|---|---:|---|
+| `imagehash` | ~80 MB with scipy and PyWavelets | Perceptual near-duplicates; exact duplicates still detected by content hash |
+| `torch` + `open_clip` | ~2 GB | The "shows bodywork" axis |
+
+Against a 512 MB free-instance ceiling neither earns its size today. The
+service names each unavailable check in its response rather than returning a
+shorter answer silently — the failure mode that let the public image
+substitute a fixed price range for weeks (FINDINGS 35).
 
 ## Local container smoke test
 

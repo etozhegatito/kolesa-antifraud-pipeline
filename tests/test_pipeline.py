@@ -4574,3 +4574,113 @@ def test_box_is_required_for_damage_and_allowed_everywhere_else(tmp_path, monkey
         except ValueError:
             continue
         raise AssertionError(f"принял негодную рамку {bad}")
+
+
+def _synthetic_png(width: int, height: int, seed: int) -> bytes:
+    """A deterministic image that is not a photograph of anything.
+
+    Generated rather than read from data/: tests must not depend on collected
+    photographs, and a repository clone has none.
+    """
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    buffer = io.BytesIO()
+    Image.fromarray(
+        rng.integers(0, 255, (height, width, 3), dtype=np.uint8)
+    ).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def test_photo_intake_never_reports_anything_about_price():
+    """The upload path exists to close a train/serve gap, not to price cars.
+
+    Every supervised photo claim was withdrawn after the labelling definition
+    turned out to have drifted, and full-frame CLIP showed no gain over age
+    and price. A condition score shown to a seller would therefore be an
+    unvalidated number, most likely re-encoding vehicle age. The contract is
+    that this module cannot express one.
+    """
+    from kz.web import photo_intake
+
+    report = photo_intake.analyse([("a.png", _synthetic_png(800, 600, 1))])
+    payload = report.as_dict()
+
+    assert payload["affects_price"] is False
+    assert any("do not change the estimate" in n for n in payload["notes"])
+
+    # Check the shape, not the wording. A word blacklist would trip over
+    # "affects_price", which is the field that states the prohibition, and
+    # would still miss a field named "condition_score". Freezing the frame
+    # schema means a future numeric verdict cannot appear without a test
+    # failing and someone having to justify it.
+    assert set(vars(report.frames[0])) == {
+        "name", "ok", "bytes", "width", "height",
+        "too_small", "duplicate_of", "shows_bodywork", "error",
+    }, "photo intake grew a field; anything scoring condition needs FINDINGS gate 4 first"
+
+    for frame in payload["frames"]:
+        for key, value in frame.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                assert key in {"bytes", "width", "height"}, (
+                    f"unexpected numeric output {key}={value}"
+                )
+
+
+def test_photo_intake_flags_duplicates_small_and_broken_files():
+    from kz.web import photo_intake
+
+    same = _synthetic_png(800, 600, 7)
+    frames = {
+        f.name: f
+        for f in photo_intake.analyse(
+            [
+                ("first.png", same),
+                ("second.png", same),
+                ("tiny.png", _synthetic_png(80, 60, 8)),
+                ("broken.png", b"this is not an image"),
+            ]
+        ).frames
+    }
+
+    assert frames["second.png"].duplicate_of == "first.png"
+    assert frames["first.png"].duplicate_of is None
+    assert frames["tiny.png"].too_small is True
+    assert frames["broken.png"].ok is False
+
+
+def test_photo_intake_keeps_nothing_on_disk(tmp_path, monkeypatch):
+    """Seller photographs must not accumulate anywhere.
+
+    Storing them would create a personal-data store this project has no
+    policy for, and turning uploads into training data needs consent nobody
+    has given. The guard is a test rather than a comment because the failure
+    mode is silent: files would simply appear.
+    """
+    from kz.web import photo_intake
+
+    monkeypatch.chdir(tmp_path)
+    before = set(tmp_path.rglob("*"))
+    photo_intake.analyse(
+        [("a.png", _synthetic_png(640, 480, 3)), ("b.png", _synthetic_png(640, 480, 4))]
+    )
+    assert set(tmp_path.rglob("*")) == before
+
+
+def test_photo_intake_degrades_instead_of_failing_without_the_image_stack(monkeypatch):
+    """The deployed image installs neither Pillow nor PyTorch.
+
+    Returning fewer findings is acceptable; failing is not, and silently
+    returning fewer findings is worse than either. The public image already
+    fell back to a fixed price range for weeks without saying so.
+    """
+    from kz.web import photo_intake
+
+    monkeypatch.setattr(photo_intake, "_pillow", lambda: None)
+    report = photo_intake.analyse([("a.png", b"anything")])
+
+    assert report.frames and report.frames[0].width is None
+    assert report.unavailable, "an absent capability must be stated, not hidden"
