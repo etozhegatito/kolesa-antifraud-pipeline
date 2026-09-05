@@ -22,7 +22,7 @@ market-anomaly review, and experimental visual-condition analysis.
 | Main result | **21.48% grouped out-of-fold MAPE**, 13.88% median APE, 22.99% out-of-time MAPE. |
 | Where is the remaining error? | Cars below ₸5M: 29.22% MAPE and 55.7% of total percentage error. Cars at ₸5M+: 16.13% MAPE. |
 | Is computer vision in production? | No. Earlier supervised CV results were withdrawn after label-definition drift was found. The live price estimate does not claim to inspect photos. |
-| Engineering quality | 277 offline tests plus 6 PostgreSQL integration tests, Ruff, Docker health smoke, and GitHub Actions. |
+| Engineering quality | 281 offline tests plus 6 PostgreSQL integration tests, Ruff, Docker health smoke, and GitHub Actions. |
 
 The free demo can sleep after inactivity. Its first request may therefore take
 about a minute; later requests are fast.
@@ -73,6 +73,16 @@ The response contains:
 - the model route that answered;
 - plain-language factors that moved the estimate;
 - warnings for missing or unusual input values.
+
+The same page carries **Check your photos**. Upload the frames you plan to
+publish and the service reports unreadable files, duplicates, frames too
+small to show panel damage, and — where the image stack is installed —
+frames that show no bodywork. It states which checks it could not run.
+
+Photos never change the estimate. The response schema is frozen by test so a
+condition score cannot appear without failing it, uploads are held in memory
+for the request and never stored, and no validated photo-to-condition model
+exists in this project. See [Computer vision status](#computer-vision-status).
 
 The public mode intentionally disables `/label` and `/damage`. Those pages
 write human ground truth and must not be exposed to anonymous users. With no
@@ -333,7 +343,8 @@ kz/transform/  clean-table rebuild, damage text parsing, data quality
 kz/ml/         price, intervals, anomaly residuals, monitoring, CV research
 kz/report/     reports and human-review queues
 kz/ops/        full pipeline, catch-up scheduler, operational status
-kz/web/        FastAPI application and read-only public estimator
+kz/web/        FastAPI application, read-only public estimator, and the
+               seller photo check that cannot influence price
 airflow/       collection and offline DAGs
 tests/         offline regression and PostgreSQL integration suites
 deploy/models/ production demo artifacts only; no source marketplace rows
