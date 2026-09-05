@@ -2,15 +2,15 @@
 
 ## Current measured quality
 
-The current artifact uses 12,642 training rows and reports:
+The current artifact uses 12,639 training rows and reports:
 
 | Evaluation | MAPE | Median APE |
 |---|---:|---:|
-| Grouped out-of-fold routed prediction | **21.63%** | **14.02%** |
-| Out-of-time routed prediction | **22.44%** | **14.21%** |
-| Grouped make/model/year baseline | 30.86% | 14.29% |
+| Grouped out-of-fold routed prediction | **21.48%** | **13.88%** |
+| Out-of-time routed prediction | **22.99%** | **14.41%** |
+| Grouped make/model/year baseline | 30.49% | 14.16% |
 
-The 95% grouped-bootstrap interval for MAPE is 21.13%–22.17%. Changes smaller
+The 95% grouped-bootstrap interval for MAPE is 20.99%–22.02%. Changes smaller
 than this sampling variation should not be described as real improvements.
 
 ## Target
@@ -38,9 +38,13 @@ links each one to nearby wording such as customs-cleared, without customs,
 credit price, or initial payment. Negation is contextual: an unrelated word
 such as “not” and generic finance boilerplate do not change the target.
 
-Rows classified as `cash_uncleared`, `credit_price`, or `down_payment` are
-excluded. `ambiguous` rows remain eligible because detail-page enrichment is
-incomplete; treating unknown as invalid would create severe selection bias.
+Rows classified as `cash_uncleared`, `credit_price`, `down_payment`, or
+`parts_price` are excluded. The last class uses a deliberately narrow rule:
+the text must explicitly say that both the engine and gearbox are absent.
+Generic phrases such as “suitable for parts” are insufficient because a
+complete repairable car can still have a comparable whole-vehicle price.
+`ambiguous` rows remain eligible because detail-page enrichment is incomplete;
+treating unknown as invalid would create severe selection bias.
 
 ## Features
 
@@ -92,7 +96,7 @@ residual anomaly thresholds, and stability analysis.
 
 Grouped cross-validation estimates behavior across the observed dataset.
 Out-of-time validation asks whether a model trained on earlier listings works on
-later ones. The higher 22.44% temporal MAPE is a warning that market drift and
+later ones. The higher 22.99% temporal MAPE is a warning that market drift and
 data-history limits remain important.
 
 ## Routed inference
@@ -107,10 +111,10 @@ otherwise                    → general model
 The specialist trains on a wider band of actual prices below 8M KZT to reduce
 edge instability. The route never uses actual price during inference.
 
-On the current snapshot, routing changes overall grouped MAPE by -0.18
-percentage points; the paired 95% interval is -0.35 to -0.01 points. This is a
-small supported grouped-CV gain, while the temporal paired interval still
-includes zero.
+On the current snapshot, routing changes overall grouped MAPE by -0.13
+percentage points; the paired 95% interval is -0.29 to +0.02 points. Both this
+interval and the temporal paired interval include zero, so routing is retained
+as an experiment rather than claimed as a statistically supported gain.
 
 ## Metrics
 
@@ -151,7 +155,7 @@ expensive vehicles. It complements rather than replaces MAPE.
 R² = 1 - Σ_i (z_i - z_hat_i)² / Σ_i (z_i - mean(z))²
 ```
 
-where `z = log(price)`. The current value is approximately 0.934. R-squared is
+where `z = log(price)`. The current value is approximately 0.935. R-squared is
 useful for fit diagnostics but less direct for seller-facing error.
 
 ## Confidence intervals
@@ -181,8 +185,8 @@ is not a fraud classifier.
 
 ## Where the remaining error lives
 
-Below-5M vehicles have 29.45% MAPE versus 16.21% above that threshold. The
-21+-year, below-5M intersection alone contributes about 41.0% of total
+Below-5M vehicles have 29.22% MAPE versus 16.13% above that threshold. The
+21+-year, below-5M intersection alone contributes about 40.9% of total
 percentage error. Repeated same-source data growth has reached a plateau.
 
 The modelling roadmap therefore focuses on condition evidence and coverage,

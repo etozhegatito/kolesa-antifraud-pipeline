@@ -27,6 +27,8 @@ data/**/*.html
 data/eda/*.coco.json
 # The bootstrap audit contains metrics derived from the current private data.
 data/eda/mape_stability.json
+# Contains row-level OOF diagnostics and reviewed listing identifiers.
+data/eda/price_review_analysis.json
 # Local training artifacts remain ignored. The explicitly reviewed copies under
 # deploy/models/ are the only models published for the read-only demo.
 data/models/*.cbm

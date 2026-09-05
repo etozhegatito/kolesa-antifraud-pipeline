@@ -1,0 +1,158 @@
+{
+  "calibration": "mondrian_cqr_asymmetric_tails_grouped_oof",
+  "calibration_rows": 12639,
+  "created_at_utc": "2026-09-05T14:03:01.991924+00:00",
+  "crossed_bounds": 16,
+  "features": [
+    "age",
+    "mileage_km",
+    "engine_volume",
+    "photos_count",
+    "is_mileage_missing",
+    "is_vip",
+    "has_monthly_price",
+    "brand",
+    "model",
+    "engine_type",
+    "transmission",
+    "body_type",
+    "condition"
+  ],
+  "group_edges": [
+    5000000.0,
+    10000000.0,
+    20000000.0
+  ],
+  "min_group": 200,
+  "offsets": {
+    "global": [
+      0.05356785433577116,
+      0.04918494649491478
+    ],
+    "groups": {
+      "10-20M": {
+        "n": 2643,
+        "offsets": [
+          0.04546312348535153,
+          0.03265099062256027
+        ],
+        "source": "group-specific"
+      },
+      "20M+": {
+        "n": 1944,
+        "offsets": [
+          0.037073543337101,
+          0.0735229589857802
+        ],
+        "source": "group-specific"
+      },
+      "5-10M": {
+        "n": 2907,
+        "offsets": [
+          0.04063965235181044,
+          0.042318162584251695
+        ],
+        "source": "group-specific"
+      },
+      "<5M": {
+        "n": 5145,
+        "offsets": [
+          0.0883814213336791,
+          0.05475401802289248
+        ],
+        "source": "group-specific"
+      }
+    }
+  },
+  "oof": {
+    "above": 0.09953319091700293,
+    "below": 0.09953319091700293,
+    "coverage": 0.801012738349553,
+    "mean_width_pct": 76.95159616965782,
+    "median_width_pct": 63.19284452129338
+  },
+  "oof_symmetric_global": {
+    "above": 0.09866286889785585,
+    "below": 0.1012738349552971,
+    "coverage": 0.8001424163304058,
+    "mean_width_pct": 76.39797889526807,
+    "median_width_pct": 62.82182513904255
+  },
+  "quantile_levels": [
+    0.09999999999999998,
+    0.9
+  ],
+  "schema_version": 2,
+  "segments": {
+    "actual": {
+      "10-20M": {
+        "above": 0.10217480508822323,
+        "below": 0.08370947886746,
+        "coverage": 0.8141157160443168,
+        "mean_width_pct": 62.5286835802769,
+        "median_width_pct": 51.87935455294878,
+        "n": 2437
+      },
+      "20M+": {
+        "above": 0.17048108360579167,
+        "below": 0.04857543204110229,
+        "coverage": 0.780943484353106,
+        "mean_width_pct": 64.05991339462247,
+        "median_width_pct": 61.04983580420945,
+        "n": 2141
+      },
+      "5-10M": {
+        "above": 0.10702451954937045,
+        "below": 0.09840954274353876,
+        "coverage": 0.7948972829688535,
+        "mean_width_pct": 55.223379997774046,
+        "median_width_pct": 47.90286904574967,
+        "n": 3018
+      },
+      "<5M": {
+        "above": 0.06365258774538965,
+        "below": 0.12948641681538767,
+        "coverage": 0.8068609954392227,
+        "mean_width_pct": 102.39785577870346,
+        "median_width_pct": 84.12848493159989,
+        "n": 5043
+      }
+    },
+    "predicted": {
+      "10-20M": {
+        "above": 0.10011463507833397,
+        "below": 0.10049675200611387,
+        "coverage": 0.7993886129155522,
+        "mean_width_pct": 62.462041457238584,
+        "median_width_pct": 54.30153862159205,
+        "n": 2617
+      },
+      "20M+": {
+        "above": 0.09927983539094651,
+        "below": 0.09927983539094651,
+        "coverage": 0.801440329218107,
+        "mean_width_pct": 73.41938763486704,
+        "median_width_pct": 65.31977683645198,
+        "n": 1944
+      },
+      "5-10M": {
+        "above": 0.09887487214456188,
+        "below": 0.09853392430958063,
+        "coverage": 0.8029321513808387,
+        "mean_width_pct": 52.90652997858132,
+        "median_width_pct": 46.16445528987172,
+        "n": 2933
+      },
+      "<5M": {
+        "above": 0.09970845481049563,
+        "below": 0.09970845481049563,
+        "coverage": 0.8005830903790088,
+        "mean_width_pct": 99.3636383878234,
+        "median_width_pct": 81.47203857314562,
+        "n": 5145
+      }
+    }
+  },
+  "target_coverage": 0.8,
+  "training_code_sha256": "1bf5a1ed3badbcbaa070b27f5a64531ef7c08be911607822443107a5c4da3c34"
+}

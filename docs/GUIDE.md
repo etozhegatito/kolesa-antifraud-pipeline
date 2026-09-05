@@ -95,7 +95,7 @@ project therefore reports price segments and median APE as well.
 ### Median APE
 
 Sort all row-level APE values and select the middle one. This describes the
-typical listing. The current median is 14.02%, much lower than 21.63% MAPE,
+typical listing. The current median is 13.88%, much lower than 21.48% MAPE,
 which tells us that a smaller tail of difficult rows raises the mean.
 
 ### MAE
@@ -148,7 +148,7 @@ One MAPE value is an estimate from one dataset. Grouped bootstrap repeatedly
 resamples vehicle groups and recomputes MAPE. The distribution gives a standard
 deviation and confidence interval.
 
-The current 95% interval is 21.13%–22.17%. A change of a few hundredths is
+The current 95% interval is 20.99%–22.02%. A change of a few hundredths is
 well inside ordinary variation and should not be called degradation.
 
 ## Model logic
@@ -163,8 +163,8 @@ validates the same inputs.
 Target cleaning is separate from feature engineering. The contextual
 `price_basis` rule uses description evidence only to decide whether the saved
 number is a comparable cash target; the text itself is not passed to CatBoost.
-Explicit uncleared, credit, and down-payment amounts leave training, while
-ambiguous rows stay.
+Explicit uncleared, credit, down-payment, and strict missing-powertrain parts
+amounts leave training, while ambiguous rows stay.
 
 ### General model and cheap specialist
 
@@ -288,10 +288,10 @@ python -m kz.report.photo_labels --stats
 ## Current state at a glance
 
 - 12,799 collected listings;
-- 12,642 model rows;
-- 21.63% grouped routed MAPE;
-- 14.02% median APE;
-- 22.44% out-of-time MAPE;
+- 12,639 model rows;
+- 21.48% grouped routed MAPE;
+- 13.88% median APE;
+- 22.99% out-of-time MAPE;
 - approximately 80% interval coverage;
 - 498 durable anomaly reviews: 378 legit, 2 fraud, 118 unknown, 0 untouched;
 - 784 audited photo frames: 18 damaged, 6 wreck, 9 parts, 615 intact, 136 unclear;

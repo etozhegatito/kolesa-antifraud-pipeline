@@ -18,6 +18,7 @@ from kz.ml.train_price_model import (
     CHEAP_ROUTE_MAX,
     FEATURES,
 )
+from kz.ml.price_interval import GROUP_NAMES, SCHEMA_VERSION as INTERVAL_SCHEMA_VERSION
 
 
 def create(output: Path) -> None:
@@ -69,6 +70,11 @@ def create(output: Path) -> None:
     specialist.fit(pool)
     main.save_model(str(output / "price_model.cbm"))
     specialist.save_model(str(output / "price_cheap_specialist.cbm"))
+    # CI checks container wiring, not interval quality. Reuse the tiny smoke
+    # regressor as both endpoints and give it explicit symmetric offsets so
+    # the image exercises the conformal-artifact loading path.
+    main.save_model(str(output / "price_interval_lower.cbm"))
+    main.save_model(str(output / "price_interval_upper.cbm"))
 
     metadata = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -83,6 +89,28 @@ def create(output: Path) -> None:
     }
     (output / "price_model.metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    interval_metadata = {
+        "schema_version": INTERVAL_SCHEMA_VERSION,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "features": FEATURES,
+        "target_coverage": 0.8,
+        "offsets": {
+            "global": [0.2, 0.2],
+            "groups": {
+                name: {
+                    "offsets": [0.2, 0.2],
+                    "n": len(frame),
+                    "source": "ci smoke",
+                }
+                for name in GROUP_NAMES
+            },
+        },
+        "oof": {"coverage": None},
+        "artifact_purpose": "ci_smoke_test_only",
+    }
+    (output / "price_interval.metadata.json").write_text(
+        json.dumps(interval_metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 

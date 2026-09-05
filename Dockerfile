@@ -24,14 +24,17 @@ COPY requirements-web.txt .
 RUN pip install --no-cache-dir -r requirements-web.txt
 
 COPY kz/ ./kz/
-# The public repository contains only the three derivative artifacts required
-# for inference. CI overrides MODEL_DIR with an explicitly synthetic smoke
-# artifact; it validates startup and /api/health without pretending that the
-# smoke model is a production model.
+# The public repository contains only the derivative point and interval
+# artifacts required for inference. CI overrides MODEL_DIR with explicitly
+# synthetic smoke artifacts; it validates startup and /api/health without
+# pretending that the smoke models are production models.
 ARG MODEL_DIR=deploy/models
 COPY ${MODEL_DIR}/price_model.cbm \
      ${MODEL_DIR}/price_cheap_specialist.cbm \
-     ${MODEL_DIR}/price_model.metadata.json ./data/models/
+     ${MODEL_DIR}/price_model.metadata.json \
+     ${MODEL_DIR}/price_interval_lower.cbm \
+     ${MODEL_DIR}/price_interval_upper.cbm \
+     ${MODEL_DIR}/price_interval.metadata.json ./data/models/
 
 # Run without root privileges to reduce the impact of a service compromise.
 RUN useradd --create-home --uid 10001 app && chown -R app:app /app

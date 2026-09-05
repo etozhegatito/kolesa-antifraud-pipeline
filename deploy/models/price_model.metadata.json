@@ -40,8 +40,8 @@
       "робот"
     ]
   },
-  "created_at_utc": "2026-09-04T18:08:00.088667+00:00",
-  "data_fingerprint_sha256": "4f125aac6d8c6f7161937f8dfeaf51428e6bb171d0fe1fdfb2170d58c137af6f",
+  "created_at_utc": "2026-09-05T14:00:19.744118+00:00",
+  "data_fingerprint_sha256": "c6f3694ed5220876c075852fa6f70cdd774c6250fae0d5030e9355173e0dfdc1",
   "features": [
     "age",
     "mileage_km",
@@ -57,17 +57,17 @@
     "body_type",
     "condition"
   ],
-  "git_commit": "6d46e8bd45f91127262b29a50c75533db55f395c",
+  "git_commit": "ae39d03dee737b85c491f319492b8798a09fa5f4",
   "git_dirty": false,
   "oof_diagnostics": {
     "path": "data/eda/price_model_oof.csv",
-    "rows": 12642
+    "rows": 12639
   },
   "routing": {
     "artifact": "data/models/price_cheap_specialist.cbm",
     "route_below_tenge": 5000000,
     "specialist_train_below_tenge": 8000000,
-    "specialist_training_rows": 7081
+    "specialist_training_rows": 7078
   },
   "schema_version": 1,
   "target": "log(first_seen_listing_price_tenge)",
@@ -75,98 +75,99 @@
     "excluded_price_bases": [
       "cash_uncleared",
       "credit_price",
-      "down_payment"
+      "down_payment",
+      "parts_price"
     ],
-    "excluded_rows": 26,
+    "excluded_rows": 31,
     "is_transaction_price": false,
     "later_prices_table": "sightings",
     "observation": "first_saved_listing_price",
     "source": "raw_ads.price_tenge"
   },
-  "training_code_sha256": "497ed6d6177b27d1e7145d17f1486f3eddfb70bb158cf6a1723bb879f1cfece6",
-  "training_rows": 12642,
+  "training_code_sha256": "2c4359d509ac2039b1b299bf590f80d81a2faf1cdbee8a0ce301d199fca23873",
+  "training_rows": 12639,
   "validation": {
     "grouped_cv": {
       "base_model": {
-        "mae_tenge": 2336261.538494357,
-        "mape_pct": 21.812238902090648,
-        "median_ape_pct": 14.096843257404718,
-        "r2_log": 0.9340371494640882
+        "mae_tenge": 2316886.266424914,
+        "mape_pct": 21.617296267814556,
+        "median_ape_pct": 14.015539786812822,
+        "r2_log": 0.9349213003542967
       },
       "baseline": {
-        "mae_tenge": 2834822.674020302,
-        "mape_pct": 30.859587033166036,
-        "median_ape_pct": 14.285714285714244,
-        "r2_log": 0.8513521289602717
+        "mae_tenge": 2866496.915423281,
+        "mape_pct": 30.487703046939274,
+        "median_ape_pct": 14.157054009184925,
+        "r2_log": 0.8495663968910696
       },
       "model": {
-        "mae_tenge": 2335396.0564908683,
-        "mape_pct": 21.63331123426878,
-        "median_ape_pct": 14.019128149018606,
-        "r2_log": 0.9344254390600857
+        "mae_tenge": 2315176.496989309,
+        "mape_pct": 21.48417849379812,
+        "median_ape_pct": 13.875097319254126,
+        "r2_log": 0.9350940554055631
       },
       "routed_vs_base": {
         "bootstrap_95_ci": [
-          -0.3504157248500992,
-          -0.009318784735602647
+          -0.2918939572816115,
+          0.017511837574221024
         ],
-        "bootstrap_probability_better": 0.976,
+        "bootstrap_probability_better": 0.952,
         "bootstrap_repeats": 1000,
-        "independent_groups": 12616,
-        "mape_delta_pct_points": -0.17892766782186445
+        "independent_groups": 12613,
+        "mape_delta_pct_points": -0.13311777401643302
       }
     },
     "segments": {
       "10-20M": {
-        "mape_pct": 15.451660001068142,
+        "mape_pct": 15.463228412161964,
         "n": 2397
       },
       "20M+": {
-        "mape_pct": 17.696636782606706,
+        "mape_pct": 17.770994961105853,
         "n": 2092
       },
       "5-10M": {
-        "mape_pct": 15.78183305310661,
+        "mape_pct": 15.501722503738177,
         "n": 2977
       },
       "<5M": {
-        "mape_pct": 29.452629531057575,
-        "n": 5176
+        "mape_pct": 29.218562560777166,
+        "n": 5173
       }
     },
     "temporal_holdout": {
       "base_model": {
-        "mae_tenge": 2178289.943207738,
-        "mape_pct": 22.74861210019534,
-        "median_ape_pct": 14.368371622429175,
-        "r2_log": 0.9285868895910474
+        "mae_tenge": 2209601.043534838,
+        "mape_pct": 22.893582746677904,
+        "median_ape_pct": 14.671351572232785,
+        "r2_log": 0.9279743975767202
       },
       "baseline": {
-        "mae_tenge": 2702832.5298904045,
-        "mape_pct": 34.27986646029944,
-        "median_ape_pct": 14.885043096259606,
-        "r2_log": 0.8409821590994887
+        "mae_tenge": 2704874.859144379,
+        "mape_pct": 34.3099565809335,
+        "median_ape_pct": 15.000000000000016,
+        "r2_log": 0.8405721478138461
       },
       "model": {
-        "mae_tenge": 2174462.7015313925,
-        "mape_pct": 22.444136338931536,
-        "median_ape_pct": 14.211087929018765,
-        "r2_log": 0.9292716635062419
+        "mae_tenge": 2201396.1094635953,
+        "mape_pct": 22.990332176020285,
+        "median_ape_pct": 14.411228862840392,
+        "r2_log": 0.9285246777178363
       },
-      "route_fraction": 0.4416765519968367,
+      "route_fraction": 0.4438291139240506,
       "routed_vs_base": {
         "bootstrap_95_ci": [
-          -0.7332231231523739,
-          0.11224178631987261
+          -0.5269579074307746,
+          0.6241435433771231
         ],
-        "bootstrap_probability_better": 0.911,
+        "bootstrap_probability_better": 0.361,
         "bootstrap_repeats": 1000,
-        "independent_groups": 2528,
-        "mape_delta_pct_points": -0.3044757612638063
+        "independent_groups": 2527,
+        "mape_delta_pct_points": 0.09674942934238541
       },
       "test_from": "2026-08-29 20:13:29",
-      "test_rows": 2529,
-      "train_rows": 10106,
+      "test_rows": 2528,
+      "train_rows": 10104,
       "train_until": "2026-08-29 20:13:29"
     }
   }

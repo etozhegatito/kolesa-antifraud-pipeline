@@ -44,8 +44,9 @@ The distinction matters: negotiation and final-sale data are unavailable.
 
 The displayed number is not always the full cash price. The clean layer links
 explicit amounts to customs, credit, and down-payment context and stores the
-result as `price_basis`. Only confidently non-comparable targets are removed
-from training; conflicting or missing evidence remains `ambiguous`.
+result as `price_basis`. A strict parts-price rule also detects an explicitly
+missing engine-and-gearbox pair. Only confidently non-comparable targets are
+removed from training; conflicting or missing evidence remains `ambiguous`.
 
 A prediction range means that the calibration procedure covered approximately
 the target fraction of held-out listing prices. It does not mean that a sale is
@@ -53,24 +54,24 @@ guaranteed inside the range.
 
 ## Current measured state
 
-The current artifact was trained on 12,642 rows from 12,799 collected Almaty
+The current artifact was trained on 12,639 rows from 12,799 collected Almaty
 listings.
 
 | Validation view | Result |
 |---|---:|
-| Grouped out-of-fold MAPE, routed model | **21.63%** |
-| Median absolute percentage error | **14.02%** |
-| Out-of-time MAPE | **22.44%** |
-| Grouped-bootstrap 95% interval for MAPE | **21.13%–22.17%** |
-| Simple make/model/year baseline MAPE | **30.86%** |
+| Grouped out-of-fold MAPE, routed model | **21.48%** |
+| Median absolute percentage error | **13.88%** |
+| Out-of-time MAPE | **22.99%** |
+| Grouped-bootstrap 95% interval for MAPE | **20.99%–22.02%** |
+| Simple make/model/year baseline MAPE | **30.49%** |
 
 The average error is not evenly distributed:
 
 | Segment | MAPE |
 |---|---:|
-| Below 5M tenge | **29.45%** |
-| 5M tenge and above | **16.21%** |
-| Vehicle age 21+ years | **29.66%** |
+| Below 5M tenge | **29.22%** |
+| 5M tenge and above | **16.13%** |
+| Vehicle age 21+ years | **29.54%** |
 
 Vehicles aged 21+ years and priced below 5M tenge create roughly 41% of the
 total percentage error. The strongest practical path is therefore better
@@ -98,10 +99,12 @@ analysis, manual bounding boxes, COCO export, grouped evaluation, and audit-spli
 logic.
 
 An annotation audit found definition drift: the historical `damaged` class mixed
-local impact damage with rust, dirt, scuffs, and paint defects. All 47 affected
-legacy frames were marked `needs_review` without deletion or automatic
-relabeling. Earlier supervised CV scores were withdrawn. The price model was not
-affected because photo features never passed the product gate.
+local impact damage with rust, dirt, scuffs, and paint defects. All 784 journal
+frames were subsequently reviewed under the corrected definition: 18 damaged,
+6 wreck, 9 parts, 615 intact, and 136 unclear, with no pending row. Earlier
+supervised CV scores remain withdrawn because there are only 18 independent
+damaged/wreck listings. The price model was not affected because photo features
+never passed the product gate.
 
 The next valid CV milestone requires 150–200 independent positive listings, a
 random holdout selected before active learning, duplicate-component grouping,
@@ -124,7 +127,7 @@ private textbook files are shipped with the public repository.
 Work is prioritized by evidence:
 
 1. improve detail-page enrichment coverage for inexpensive listings;
-2. finish manual review under one stable photo-label policy;
+2. expand the corrected photo corpus toward 200 independent positives;
 3. train a true damage detector only after the annotation gate is met;
 4. expose text and photo inputs only when training and serving use identical
    information;

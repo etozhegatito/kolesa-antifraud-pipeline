@@ -42,6 +42,7 @@ from kz.ml.train_price_model import (
 _DIR = os.environ.get("KZ_LABELS_DIR", "data")
 LABELS_CSV = str(Path(_DIR) / "price_review_labels.csv")
 LABELS_PREV = str(Path(_DIR) / "price_review_labels.prev.csv")
+PILOT_CSV = str(Path(_DIR) / "price_review_pilot.csv")
 
 PILOT_SIZE = 50
 AUDIT_SIZE = 10
@@ -51,6 +52,7 @@ OLD_AGE_MIN = 21
 CHEAP_PRICE_MAX = 5_000_000
 MIN_LOCAL_PHOTOS = 3
 LABEL_VERSION = "1"
+PILOT_VERSION = "1"
 
 VEHICLE_STATES = {
     "normal": "No material problem is visible or disclosed",
@@ -99,6 +101,55 @@ HEADER = [
     "dataset_split",
     "annotator",
     "label_version",
+]
+
+PILOT_COLUMNS = [
+    "ad_id",
+    "url",
+    "title",
+    "brand",
+    "model",
+    "price_tenge",
+    "year",
+    "mileage_km",
+    "engine_volume",
+    "engine_type",
+    "transmission",
+    "body_type",
+    "condition",
+    "city",
+    "description",
+    "photos_count",
+    "views_count",
+    "posted_date",
+    "labels",
+    "is_vip",
+    "has_monthly_price",
+    "scraped_at",
+    "customs_cleared",
+    "drive",
+    "steering",
+    "color",
+    "generation",
+    "page_mileage_km",
+    "damage_keywords",
+    "seller_comment",
+    "kolesa_avg_price",
+    "page_status_badge",
+    "text_full",
+    "price_basis",
+    "age",
+    "is_mileage_missing",
+    "is_description_missing",
+    "duplicate_group",
+    "routed_pred_tenge",
+    "base_pred_tenge",
+    "baseline_pred_tenge",
+    "absolute_percentage_error_pct",
+    "dataset_split",
+    "selection_source",
+    "photo_positions",
+    "pilot_version",
 ]
 
 
@@ -241,6 +292,87 @@ def select_pilot(candidates: pd.DataFrame, limit: int = PILOT_SIZE) -> pd.DataFr
     # Mix strata so the annotator cannot infer that the next listing is meant
     # to be a failure case or a control from its position in the queue.
     return selected.head(limit).sample(frac=1.0, random_state=117).reset_index(drop=True)
+
+
+def save_pilot(pilot: pd.DataFrame) -> None:
+    """Persist the fixed cohort before target-policy or model changes.
+
+    The manifest contains only already-local facts and photo positions.  It is
+    deliberately separate from the mutable review journal so a later clean or
+    retrain cannot replace completed cases with a new high-error queue.
+    """
+    if pilot.empty:
+        raise ValueError("Cannot persist an empty price-review pilot")
+    work = pilot.copy()
+    work["ad_id"] = work["ad_id"].astype(str)
+    if work["ad_id"].duplicated().any():
+        raise ValueError("Cannot persist a price-review pilot with duplicate ad_id values")
+    if len(work) > PILOT_SIZE:
+        raise ValueError(f"Price-review pilot exceeds the fixed {PILOT_SIZE}-listing limit")
+
+    work["photo_positions"] = work["photos"].map(
+        lambda gallery: ",".join(str(int(photo["position"])) for photo in gallery)
+    )
+    work["pilot_version"] = PILOT_VERSION
+    for column in PILOT_COLUMNS:
+        if column not in work:
+            work[column] = ""
+
+    path = Path(PILOT_CSV)
+    if path.exists():
+        existing = pd.read_csv(path, dtype={"ad_id": str})
+        if existing["ad_id"].astype(str).tolist() != work["ad_id"].tolist():
+            raise ValueError("Refusing to replace the existing fixed price-review pilot")
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    work[PILOT_COLUMNS].to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def read_pilot() -> pd.DataFrame:
+    """Load the durable cohort and rebuild galleries from local files only."""
+    path = Path(PILOT_CSV)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing fixed price-review pilot: {path}")
+    rows = pd.read_csv(path, dtype={"ad_id": str, "duplicate_group": str})
+    if rows.empty or rows["ad_id"].duplicated().any():
+        raise ValueError("The fixed price-review pilot is empty or contains duplicate ad_id values")
+    versions = set(rows["pilot_version"].fillna("").astype(str))
+    if versions != {PILOT_VERSION}:
+        raise ValueError(f"Unsupported price-review pilot versions: {sorted(versions)}")
+
+    def gallery(row: pd.Series) -> list[dict]:
+        value = row.get("photo_positions")
+        raw = "" if pd.isna(value) else str(value)
+        out = []
+        for token in raw.split(","):
+            if not token.strip():
+                continue
+            position = int(token)
+            path = local_path(str(row["ad_id"]), position)
+            if path.is_file():
+                out.append(
+                    {
+                        "position": position,
+                        "path": str(path),
+                        "src": f"/photos/{path.relative_to(PHOTO_DIR)}",
+                    }
+                )
+        return out
+
+    rows["photos"] = rows.apply(gallery, axis=1)
+    return rows
+
+
+def load_pilot() -> pd.DataFrame:
+    """Return the durable pilot, creating it once from aligned OOF rows."""
+    if Path(PILOT_CSV).exists():
+        return read_pilot()
+    pilot = select_pilot(load_candidates())
+    save_pilot(pilot)
+    return read_pilot()
 
 
 _snapshot_done = False

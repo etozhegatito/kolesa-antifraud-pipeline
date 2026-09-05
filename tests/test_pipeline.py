@@ -187,6 +187,39 @@ def test_price_basis_marks_conflicting_customs_evidence_ambiguous():
     assert classify_price_basis(typo, "Нет", 9_900_000) == "ambiguous"
 
 
+def test_price_basis_rejects_only_explicit_missing_powertrain_shells():
+    """A missing engine and gearbox make the amount a parts-vehicle target."""
+    from kz.transform.price_basis import classify_price_basis
+
+    assert classify_price_basis("Машина без матора, без коробки", "Да", 250_000) == ("parts_price")
+    assert classify_price_basis("Продается целиком БЕЗ МОТОРА И КОРОБКИ", None, 230_000) == (
+        "parts_price"
+    )
+    assert classify_price_basis("БЕЗ Двигателя и кпп кузов", "Да", 150_000) == "parts_price"
+
+    # These phrases describe a complete vehicle or ordinary maintenance and
+    # must not be promoted to a parts-only target by a loose keyword match.
+    assert classify_price_basis("Двигатель и КПП без проблем", "Да", 2_000_000) == (
+        "cash_customs_cleared"
+    )
+    assert classify_price_basis("Без двигателя, коробка работает", "Да", 900_000) == (
+        "cash_customs_cleared"
+    )
+    assert (
+        classify_price_basis(
+            "Не на ходу, подойдет на запчасти или под восстановление", "Да", 350_000
+        )
+        == "cash_customs_cleared"
+    )
+    assert classify_price_basis("Денег на запчасти не жалели", "Да", 6_000_000) == (
+        "cash_customs_cleared"
+    )
+    assert (
+        classify_price_basis("Коррозии и гнилая нет Двигатель и коробка идеальный", "Да", 2_500_000)
+        == "cash_customs_cleared"
+    )
+
+
 def test_price_training_rejects_only_known_non_comparable_targets():
     """Unknown price bases stay usable while explicit traps leave training."""
     import pandas as pd
@@ -195,13 +228,21 @@ def test_price_training_rejects_only_known_non_comparable_targets():
 
     frame = pd.DataFrame(
         {
-            "price_tenge": [7_000_000, 11_400_000, 1_500_000, 9_000_000, 8_000_000],
-            "mileage_km": [10_000] * 5,
-            "is_suspicious": [0] * 5,
+            "price_tenge": [
+                7_000_000,
+                11_400_000,
+                1_500_000,
+                250_000,
+                9_000_000,
+                8_000_000,
+            ],
+            "mileage_km": [10_000] * 6,
+            "is_suspicious": [0] * 6,
             "price_basis": [
                 "cash_uncleared",
                 "credit_price",
                 "down_payment",
+                "parts_price",
                 "ambiguous",
                 "cash_customs_cleared",
             ],
@@ -1404,8 +1445,8 @@ def test_runtime_python_contract_is_consistent():
     assert "Python 3.13.x" in Path("docs/SETUP.md").read_text(encoding="utf-8")
 
 
-def test_web_container_includes_every_routed_model_artifact():
-    """A routed image must carry the general model, specialist, and metadata."""
+def test_web_container_includes_every_inference_artifact():
+    """The image must carry both routed point and calibrated interval models."""
     from pathlib import Path
 
     docker = Path("Dockerfile").read_text(encoding="utf-8")
@@ -1414,7 +1455,14 @@ def test_web_container_includes_every_routed_model_artifact():
     assert "ARG MODEL_DIR=deploy/models" in docker
     assert "data/" in ignore_lines
     assert "deploy/models/" not in ignore_lines
-    for name in ("price_model.cbm", "price_cheap_specialist.cbm", "price_model.metadata.json"):
+    for name in (
+        "price_model.cbm",
+        "price_cheap_specialist.cbm",
+        "price_model.metadata.json",
+        "price_interval_lower.cbm",
+        "price_interval_upper.cbm",
+        "price_interval.metadata.json",
+    ):
         assert name in docker
         assert (Path("deploy/models") / name).is_file()
 
@@ -1429,10 +1477,16 @@ def test_ci_smoke_artifact_matches_runtime_schema(tmp_path):
     create(out)
     assert (out / "price_model.cbm").stat().st_size > 0
     assert (out / "price_cheap_specialist.cbm").stat().st_size > 0
+    assert (out / "price_interval_lower.cbm").stat().st_size > 0
+    assert (out / "price_interval_upper.cbm").stat().st_size > 0
     meta = json.loads((out / "price_model.metadata.json").read_text())
     assert meta["features"] == FEATURES
     assert meta["artifact_purpose"] == "ci_smoke_test_only"
     assert meta["target"] == "log(first_seen_listing_price_tenge)"
+    interval = json.loads((out / "price_interval.metadata.json").read_text())
+    assert interval["features"] == FEATURES
+    assert interval["artifact_purpose"] == "ci_smoke_test_only"
+    assert interval["target_coverage"] == 0.8
 
 
 def test_model_loader_rejects_incompatible_feature_schema(tmp_path, monkeypatch):
@@ -4125,6 +4179,33 @@ def test_price_review_pilot_is_fixed_and_contains_controls():
     assert selected.ad_id.tolist() == review.select_pilot(pd.DataFrame(rows)).ad_id.tolist()
 
 
+def test_price_review_pilot_manifest_cannot_be_silently_replaced(tmp_path, monkeypatch):
+    """A later model run must not turn the completed pilot into a moving queue."""
+    import pandas as pd
+    import pytest
+    from kz.report import price_review as review
+
+    path = tmp_path / "price_review_pilot.csv"
+    monkeypatch.setattr(review, "PILOT_CSV", str(path))
+    first = pd.DataFrame(
+        {
+            "ad_id": ["1", "2"],
+            "photos": [[], []],
+            "selection_source": ["random_local_audit", "old_high_oof_error"],
+            "dataset_split": ["audit", "discovery"],
+        }
+    )
+    review.save_pilot(first)
+    saved = review.read_pilot()
+    assert saved["ad_id"].tolist() == ["1", "2"]
+    assert saved["photos"].tolist() == [[], []]
+
+    replacement = first.copy()
+    replacement["ad_id"] = ["3", "4"]
+    with pytest.raises(ValueError, match="Refusing to replace"):
+        review.save_pilot(replacement)
+
+
 def test_price_review_oof_alignment_fails_closed(monkeypatch):
     """A stale OOF file must never be attached to the wrong listing."""
     import pandas as pd
@@ -4190,6 +4271,79 @@ def test_price_review_page_combines_gallery_reason_labels_and_precise_cv_link():
     assert "Precisely label this frame for CV" in html
     assert "/damage?ad_id=" in html
     assert "predictions and errors are hidden" in html.lower()
+
+
+def test_price_review_analysis_requires_complete_unique_labels():
+    """Analysis fails closed instead of silently changing the fixed cohort."""
+    import pandas as pd
+    import pytest
+
+    from kz.report.price_review_analysis import join_reviews
+
+    pilot = pd.DataFrame(
+        {
+            "ad_id": ["1", "2"],
+            "selection_source": ["random_local_audit", "old_high_oof_error"],
+            "dataset_split": ["audit", "discovery"],
+        }
+    )
+    one_label = pd.DataFrame(
+        {
+            "ad_id": ["1"],
+            "vehicle_state": ["normal"],
+            "price_validity": ["comparable_cash"],
+            "evidence_source": ["neither"],
+            "data_issue": ["none"],
+        }
+    )
+    with pytest.raises(ValueError, match="Missing price-review labels"):
+        join_reviews(pilot, one_label)
+
+    duplicates = pd.concat([one_label, one_label], ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate ad_id"):
+        join_reviews(pilot.head(1), duplicates)
+
+
+def test_price_review_analysis_preserves_direction_and_sampling_boundary():
+    """The report distinguishes target contamination from ordinary error."""
+    import pandas as pd
+
+    from kz.report.price_review_analysis import add_error_fields, analyse
+
+    rows = pd.DataFrame(
+        {
+            "ad_id": ["1", "2", "3"],
+            "brand": ["A", "B", "C"],
+            "model": ["One", "Two", "Three"],
+            "year": [2000, 2001, 2002],
+            "price_tenge": [1_000_000, 200_000, 2_000_000],
+            "routed_pred_tenge": [800_000, 1_000_000, 2_200_000],
+            "absolute_percentage_error_pct": [20.0, 400.0, 10.0],
+            "vehicle_state": ["normal", "parts", "cosmetic"],
+            "price_validity": ["comparable_cash", "parts_price", "comparable_cash"],
+            "evidence_source": ["photos", "text", "both"],
+            "data_issue": ["none", "none", "none"],
+            "selection_source": [
+                "random_local_audit",
+                "old_high_oof_error",
+                "random_cheap_control",
+            ],
+            "dataset_split": ["audit", "discovery", "discovery"],
+        }
+    )
+    enriched = add_error_fields(rows)
+    assert enriched["signed_percentage_error_pct"].tolist() == [-20.0, 400.0, 10.0]
+    assert enriched["target_group"].tolist() == [
+        "comparable",
+        "non_comparable",
+        "comparable",
+    ]
+    report = analyse(enriched)
+    assert report["confirmed_non_comparable_rows"] == 1
+    assert report["material_condition_rows"] == 1
+    assert report["random_source_rows"] == 2
+    assert report["random_source_mape_pct"] == 15.0
+    assert "do not estimate" in report["sampling_warning"]
 
 
 def test_damage_labelling_never_touches_kolesa():

@@ -190,9 +190,9 @@ def _price_rows():
     """Build the fixed below-5M pilot once per process."""
     global _price_review_cohort
     if _price_review_cohort is None:
-        from kz.report.price_review import load_candidates, select_pilot
+        from kz.report.price_review import load_pilot
 
-        _price_review_cohort = select_pilot(load_candidates())
+        _price_review_cohort = load_pilot()
     return _price_review_cohort
 
 

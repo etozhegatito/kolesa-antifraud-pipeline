@@ -17,8 +17,8 @@ Withdrawn CV figures are retained only to explain why they must not be cited.
 | Do generic image embeddings improve price? | ResNet50 and full-frame CLIP did not beat tabular baselines. | Do not add them to production price inference. |
 | Does more same-source listing data solve the error? | Repeated growth moved MAPE little and the baseline caught up. | Treat listing-card data as plateaued. |
 | Where is the error? | Old vehicles below 5M tenge dominate. | Prioritize physical-condition evidence. |
-| Is the anomaly detector a fraud classifier? | No confirmed fraud in the labelled sample. | Keep human review and random controls. |
-| Is supervised photo damage ready? | No; definition drift invalidated legacy positives. | Quarantine and relabel before evaluation. |
+| Is the anomaly detector a fraud classifier? | One correlated two-listing fraud case is confirmed; this is far too little for stable recall. | Keep human review and random controls. |
+| Is supervised photo damage ready? | No; definitions are repaired, but only 18 independent positive listings remain. | Expand to roughly 200 positives before evaluation. |
 
 ## 1. Additional tabular feature groups did not help
 
@@ -406,9 +406,8 @@ not stable enough for a product claim.
 
 The fixed 50-listing below-₸5M pilot contains 20 normal, 16 cosmetic,
 9 repair-needed, 3 parts, 1 non-running, and 1 unclear vehicle. It remains a
-diagnostic dataset rather than a training input; the next step is to join these
-labels to blinded grouped-OOF errors and quantify which causes actually move
-error.
+diagnostic dataset rather than a training input. Finding 34 records its joined
+OOF analysis and the first target-policy change supported by that evidence.
 
 The complete 784-frame visual journal was also reviewed under the narrow impact
 definition. Final counts are 18 boxed `damaged` frames from 16 listings,
@@ -416,6 +415,56 @@ definition. Final counts are 18 boxed `damaged` frames from 16 listings,
 No `needs_review` row remains. The key limitation is now sample size rather
 than definition drift: only 18 independent damaged/wreck listings are verified,
 roughly 182 short of the planned stable local evaluation target.
+
+## 34. The cheap-price pilot found target contamination before a useful CV feature
+
+The 50 completed reviews were joined to the OOF predictions hidden during
+annotation. The 30 old listings deliberately selected for high error had
+104.87% mean APE. The two random-source subsets contained 20 listings and had
+14.32% combined MAPE. Neither figure is a full-market estimate: the former is
+selected on the outcome, while both sources require already-downloaded photos.
+
+The strongest actionable pattern was not a new image feature. Three reviewed
+Delicas were sold without both engine and gearbox. Their mean APE was 457%
+because the regression target represented an incomplete shell while the model
+was trained to estimate complete vehicles. The corpus-wide rule was therefore
+kept deliberately narrow: `parts_price` requires explicit grammatical evidence
+that both major assemblies are absent. Generic “for parts or restoration” text
+does not qualify. Corpus review found five matches; four had previously been
+training-eligible.
+
+The first broad pattern falsely matched a poorly punctuated claim that an intact
+Nissan's engine and gearbox were ideal. That experiment was stopped before any
+artifact was written. Restricting `without/no` patterns to the expected
+genitive forms removed the false positive and left exactly the five auditable
+shell listings.
+
+On the same 12,638 valid rows, retraining after the rule changed MAPE from
+21.5072% to 21.4453%, a paired delta of -0.0619 percentage points with a 95%
+grouped-bootstrap interval of [-0.2602, +0.1377]. This is not statistically
+supported model lift. The production rebuild reports 21.4842% on 12,639 rows,
+but its difference from the prior 21.6333% headline also includes the changed
+evaluation cohort and must not be sold as pure model improvement.
+
+The fixed pilot is now stored in an immutable local manifest before retraining.
+This closes a lifecycle bug: recomputing the high-error queue after target
+cleaning would otherwise replace already-reviewed cases and make the diagnostic
+analysis irreproducible.
+
+## 35. The public image silently used a fallback price range
+
+The service prefers calibrated lower and upper quantile models, but the public
+Dockerfile originally copied only the point model, cheap specialist, and point
+metadata. The local development service therefore returned a conformal range
+while the live image always fell back to a fixed 0.88–1.15 multiplier. That was
+a deployment-contract bug: the README's calibrated-range claim was true for
+local evaluation but false for the packaged product.
+
+The public artifact bundle now contains all six files, and CI creates a small
+schema-compatible synthetic interval pair for its container smoke test. A
+local build of the real public image returned `range_method=conformal` with
+stored grouped-OOF coverage 0.8010. No database or private row-level data are
+included in the image.
 
 ## Practical rules derived from these findings
 
@@ -430,3 +479,5 @@ roughly 182 short of the planned stable local evaluation target.
 9. Prefer new condition evidence over more repetitions of plateaued fields.
 10. Preserve failed experiments so future work starts from evidence.
 11. Classify what a displayed price means before treating it as a regression target.
+12. Freeze a human-review cohort before any rule that can change its membership.
+13. Test the packaged product contract; local artifact availability is not deployment proof.

@@ -15,9 +15,12 @@ PRICE_BASIS_VALUES = (
     "cash_uncleared",
     "credit_price",
     "down_payment",
+    "parts_price",
     "ambiguous",
 )
-NON_COMPARABLE_PRICE_BASES = frozenset({"cash_uncleared", "credit_price", "down_payment"})
+NON_COMPARABLE_PRICE_BASES = frozenset(
+    {"cash_uncleared", "credit_price", "down_payment", "parts_price"}
+)
 
 _AMOUNT = re.compile(
     r"(?<![\d.,])(?:"
@@ -62,6 +65,39 @@ _CUES = {
 _NEGATIVE_CUSTOMS_VALUES = {"нет", "не указан", "не указано", "-"}
 _POSITIVE_CUSTOMS_VALUES = {"да", "растаможен", "растаможена"}
 _MAX_CUE_DISTANCE = 48
+
+# A generic phrase such as "good for parts" is not enough: a complete but
+# repairable vehicle can still have a comparable whole-car price.  This narrow
+# rule requires explicit evidence that both major powertrain assemblies are
+# absent.  It covers a repeated real corpus pattern while avoiding statements
+# such as "engine and gearbox work well" or "money was not spared on parts".
+_GENITIVE_ABSENCE = r"(?:без|нету?)"
+_ENGINE_GENITIVE = r"(?:двигателя|м[ао]тора)"
+_GEARBOX_GENITIVE = r"(?:коробки|кпп|акпп|мкпп)"
+_ENGINE_ANY = r"(?:двигател\w*|м[ао]тор\w*)"
+_GEARBOX_ANY = r"(?:коробк\w*|кпп|акпп|мкпп)"
+_MISSING_ENGINE = re.compile(
+    rf"\b(?:{_GENITIVE_ABSENCE}\s+{_ENGINE_GENITIVE}|отсутству\w*\s+{_ENGINE_ANY})\b",
+    re.IGNORECASE,
+)
+_MISSING_GEARBOX = re.compile(
+    rf"\b(?:{_GENITIVE_ABSENCE}\s+{_GEARBOX_GENITIVE}|отсутству\w*\s+{_GEARBOX_ANY})\b",
+    re.IGNORECASE,
+)
+_SHARED_SEPARATOR = r"(?:\s*[/+]\s*|\s*,?\s*\bи\b\s*)"
+_SHARED_ABSENCE = re.compile(
+    rf"\b(?:"
+    rf"{_GENITIVE_ABSENCE}\s+(?:"
+    rf"{_ENGINE_GENITIVE}{_SHARED_SEPARATOR}{_GEARBOX_GENITIVE}"
+    rf"|{_GEARBOX_GENITIVE}{_SHARED_SEPARATOR}{_ENGINE_GENITIVE}"
+    rf")"
+    rf"|отсутству\w*\s+(?:"
+    rf"{_ENGINE_ANY}{_SHARED_SEPARATOR}{_GEARBOX_ANY}"
+    rf"|{_GEARBOX_ANY}{_SHARED_SEPARATOR}{_ENGINE_ANY}"
+    rf")"
+    rf")\b",
+    re.IGNORECASE,
+)
 
 
 def _parse_amount(match: re.Match) -> float | None:
@@ -139,6 +175,12 @@ def classify_price_basis(
 ) -> str:
     """Return the strongest supported interpretation of the listing price."""
     source = str(text or "").lower().replace("\u00a0", " ")
+
+    missing_engine = bool(_MISSING_ENGINE.search(source))
+    missing_gearbox = bool(_MISSING_GEARBOX.search(source))
+    if (missing_engine and missing_gearbox) or _SHARED_ABSENCE.search(source):
+        return "parts_price"
+
     try:
         target = float(listing_price)
     except (TypeError, ValueError):

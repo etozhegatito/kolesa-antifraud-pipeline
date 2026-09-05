@@ -85,8 +85,8 @@ avoids long retries against retired CDN hosts. Image traffic has its own budget.
 - numeric and categorical normalization;
 - missingness indicators;
 - impossible-value checks;
-- contextual `price_basis` classification for customs, credit, and down-payment
-  terms;
+- contextual `price_basis` classification for customs, credit, down-payment,
+  and explicit missing-engine-and-gearbox parts prices;
 - relist grouping without using price;
 - rule-based anomaly signals;
 - exculpation for disclosed damage or other valid low-price reasons;
@@ -100,6 +100,12 @@ saved price with the nearest labelled amount, handles customs negation and
 common spelling variants, and returns `ambiguous` when structured and textual
 evidence conflict. Training rejects only known non-comparable bases; uncertainty
 is not treated as proof that a row is invalid.
+
+The first below-5M diagnostic cohort is persisted in
+`data/price_review_pilot.csv`. This local manifest freezes its listing facts,
+OOF residuals, sampling source, and photo positions before any later target
+policy or model run. The review journal and analysis can therefore reopen the
+same 50 cases rather than silently selecting replacements.
 
 ## Modelling layer
 
